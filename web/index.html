@@ -7,7 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="app">
   <header class="top">
     <a class="brand" href="./">flower</a>
     <nav>
@@ -15,14 +15,59 @@
       <a href="components.html">Components</a>
     </nav>
   </header>
-  <main class="page">
-    <div class="card clock-hero">
-      <p class="sub">single-binary webapp in C — proof of concept</p>
-      <p id="clock" class="clock">—</p>
-      <p id="status" class="status connecting">connecting…</p>
-    </div>
+
+  <main class="deck" id="deck">
+    <section class="pane projects-pane" aria-label="Projects" data-pane="0">
+      <div class="rail" id="rail" aria-label="Projects">
+        <button type="button" class="chip chip-add" id="add-project"
+                title="Add a project" aria-label="Add a project">+</button>
+      </div>
+      <div class="editor">
+        <div class="pane-head">
+          <h1>Projects</h1>
+          <span class="pane-hint" id="project-count"></span>
+        </div>
+        <div class="pane-body" id="editor"><!-- filled by app.js --></div>
+      </div>
+    </section>
+
+    <section class="pane" aria-label="Column two" data-pane="1">
+      <div class="pane-head">
+        <h2>Column two</h2>
+        <span class="pane-hint">reserved</span>
+      </div>
+      <div class="pane-warn">
+        <p class="warn-title">Project unavailable</p>
+        <p class="warn-text"><!-- filled by app.js --></p>
+      </div>
+      <div class="placeholder-body">
+        <p class="placeholder-title">Nothing here yet</p>
+        <p class="placeholder-text">This column keeps its place in the
+        layout. flower grows into it later.</p>
+      </div>
+    </section>
+
+    <section class="pane" aria-label="Column three" data-pane="2">
+      <div class="pane-head">
+        <h2>Column three</h2>
+        <span class="pane-hint">reserved</span>
+      </div>
+      <div class="pane-warn">
+        <p class="warn-title">Project unavailable</p>
+        <p class="warn-text"><!-- filled by app.js --></p>
+      </div>
+      <div class="placeholder-body">
+        <p class="placeholder-title">Nothing here yet</p>
+        <p class="placeholder-text">This column keeps its place in the
+        layout. flower grows into it later.</p>
+      </div>
+    </section>
   </main>
+
+  <nav class="deck-dots" id="deck-dots" aria-label="Move between columns"></nav>
+
   <script src="theme.js"></script>
+  <script src="emoji.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -11,6 +11,7 @@
 #include "http.h"
 #include "assets_gen.h"
 #include "theme.h"
+#include "projects.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -56,6 +57,7 @@ typedef struct {
     int fd_cap;
     int nconns;
     theme_t theme;               /* current theme (reloaded via API) */
+    projects_t projects;         /* current project list (replaced via API) */
 } server_t;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -280,6 +282,44 @@ static void handle_theme_put(server_t *s, conn_t *c, http_request_t *req,
     }
 }
 
+static void handle_projects_put(server_t *s, conn_t *c, http_request_t *req,
+                                const char *body, size_t body_len, int *status)
+{
+    projects_t np;
+    char efield[80], emsg[160];
+    projects_parse_result_t pr = projects_from_json(body, body_len, &np,
+                                                    efield, sizeof efield,
+                                                    emsg, sizeof emsg);
+    if (pr != PROJECTS_OK) {
+        *status = (pr == PROJECTS_E_JSON) ? 400 : 422;
+        char *eb = theme_error_json(emsg, efield);
+        if (eb) {
+            respond_json(s, c, *status, eb, req->keep_alive);
+            free(eb);
+        } else {
+            respond_json(s, c, *status, "{\"error\":\"invalid project list\"}",
+                         req->keep_alive);
+        }
+        return;
+    }
+    if (projects_save(&np) != 0) {
+        *status = 500;
+        respond_json(s, c, 500,
+                     "{\"error\":\"cannot write projects.json in config dir\"}",
+                     req->keep_alive);
+        return;
+    }
+    s->projects = np;
+    *status = 200;
+    char *j = projects_to_json(&np, 0);
+    if (j) {
+        respond_json(s, c, 200, j, req->keep_alive);
+        free(j);
+    } else {
+        respond_json(s, c, 200, "[]", req->keep_alive);
+    }
+}
+
 static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                            const char *body, size_t body_len)
 {
@@ -308,6 +348,17 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
             }
         } else if (strcmp(path, "/api/theme") == 0) {
             char *j = theme_to_json(&s->theme);
+            if (j) {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            } else {
+                status = 500;
+                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                             req->keep_alive);
+            }
+        } else if (strcmp(path, "/api/projects") == 0) {
+            char *j = projects_to_json(&s->projects, 1);
             if (j) {
                 respond(s, c, 200, "application/json", j, strlen(j),
                         req->keep_alive, head, NULL);
@@ -347,7 +398,10 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 respond_json(s, c, 200, "{}", req->keep_alive);
             }
         }
-    } else if (strcmp(path, "/api/theme") == 0) {
+    } else if (put && strcmp(path, "/api/projects") == 0) {
+        handle_projects_put(s, c, req, body, body_len, &status);
+    } else if (strcmp(path, "/api/theme") == 0 ||
+               strcmp(path, "/api/projects") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false,
@@ -569,8 +623,10 @@ int server_run(const char *bind_addr, uint16_t port)
     logmsg("listening on %s", url);
 
     int tl = theme_load(&s.theme);
-    logmsg("config: %s (%s)", theme_dir(),
-           tl == 0 ? "theme.json loaded" : "using default theme");
+    projects_load(&s.projects);
+    logmsg("config: %s (%s, %d project%s)", theme_dir(),
+           tl == 0 ? "theme.json loaded" : "using default theme",
+           (int)s.projects.count, s.projects.count == 1 ? "" : "s");
 
     long long next_tick = now_ms() / 1000 * 1000 + 1000;
 
