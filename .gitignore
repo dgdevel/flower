@@ -10,3 +10,11 @@
 
 # agent session files
 /.reasonix/
+
+# playwright: scratch server config dir, downloaded browsers, test artifacts
+/.e2e-config/
+/.playwright/
+/test-results/
+
+# js dev tooling (e2e only; the web frontend itself has no dependencies)
+/node_modules/
