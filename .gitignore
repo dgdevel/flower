@@ -1,0 +1,12 @@
+# build outputs
+/flower
+/tools/embed
+*.o
+*.d
+
+# generated asset table
+/src/assets_gen.c
+/src/assets_gen.h
+
+# agent session files
+/.reasonix/
