@@ -95,7 +95,8 @@ int http_parse_request(const char *buf, size_t len,
 
     /* --- headers: we only care about Connection --- */
     bool hdr_close = false, hdr_keepalive = false;
-    size_t pos = line_len + 1;
+    size_t pos = line_len + 2; /* skip the request line's CRLF
+                                * (line_len excludes it, so +2, not +1) */
     while (pos < head_end) {
         const char *le = memchr(buf + pos, '\n', head_end - pos);
         size_t ll = le ? (size_t)(le - (buf + pos)) : head_end - pos;
@@ -158,7 +159,11 @@ int http_build_response(char **out, size_t *out_len, int code,
                                         body_len,
                                         keep_alive ? "keep-alive" : "close",
                                         extra ? extra : "");
-    char *buf = malloc(head_size + 1 + (head_only ? 0 : body_len));
+    /* Wire layout must be exactly [head][body]:
+     * snprintf writes its NUL terminator at buf[head_size]; the body then
+     * OVERWRITES that byte, so no stray NUL rides between head and body
+     * (a NUL there breaks JS with "illegal character U+0000"). */
+    char *buf = malloc(head_size + body_len + 1);
     if (!buf) return -1;
     int n = snprintf(buf, head_size + 1, fmt, code, http_status_text(code),
                      content_type, body_len,
@@ -169,7 +174,7 @@ int http_build_response(char **out, size_t *out_len, int code,
         return -1;
     }
     if (!head_only && body_len > 0)
-        memcpy(buf + head_size + 1, body, body_len);
+        memcpy(buf + head_size, body, body_len);
     *out = buf;
     *out_len = head_size + (head_only ? 0 : body_len);
     return 0;
