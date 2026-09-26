@@ -196,9 +196,15 @@ static void sse_send_time(server_t *s, conn_t *c)
     gmtime_r(&t, &tm);
     char iso[32];
     strftime(iso, sizeof iso, "%Y-%m-%dT%H:%M:%SZ", &tm);
-    char ev[160];
-    int n = snprintf(ev, sizeof ev,
-                     "data: {\"unix\":%lld,\"iso\":\"%s\"}\n\n",
+    char ev[192];
+    int n;
+    /* every 15 s add a comment line: ignored by browsers, but keeps
+     * idle-pruning proxies/middleboxes from silently reaping the stream */
+    if (ts.tv_sec % 15 == 0)
+        n = snprintf(ev, sizeof ev, ": ping\n\ndata: {\"unix\":%lld,\"iso\":\"%s\"}\n\n",
+                     (long long)ts.tv_sec, iso);
+    else
+        n = snprintf(ev, sizeof ev, "data: {\"unix\":%lld,\"iso\":\"%s\"}\n\n",
                      (long long)ts.tv_sec, iso);
     if (n > 0 && (size_t)n < sizeof ev)
         conn_write(s, c, ev, (size_t)n);

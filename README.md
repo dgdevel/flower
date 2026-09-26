@@ -71,11 +71,20 @@ web/style.css         frontend: styling
 | `/api/time`  | GET      | `text/event-stream`; one JSON tick per second      |
 | anything else| GET/HEAD | 404; other methods → 405                            |
 
-SSE event format (`retry` hint sent once at stream start):
+SSE event format (`retry` hint sent once at stream start, `: ping` comment
+every 15 s as a keep-alive):
 
 ```
 data: {"unix":1790414077,"iso":"2026-09-26T09:14:37Z"}
 ```
+
+The SSE response also sends `X-Accel-Buffering: no`, and the page uses
+**relative URLs** for assets and the event stream — so it works both
+directly and behind a reverse proxy that serves it under a path prefix.
+If a proxy in front still buffers the stream (page loads but the clock
+never ticks and the status stays "connecting…"), disable response
+buffering there (nginx: `proxy_buffering off;`), or test with
+`curl -N <url>/api/time` to see events arrive.
 
 Adding a static file = drop it anywhere under `web/` and rebuild; it is
 served automatically with the right MIME type. Dotfiles are skipped.

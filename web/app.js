@@ -2,7 +2,10 @@
 const clock = document.getElementById("clock");
 const status = document.getElementById("status");
 
-const es = new EventSource("/api/time");
+// Relative URL: also works behind path-prefixed proxies (a page served at
+// /proxy/8080/ resolves this to /proxy/8080/api/time, which the proxy maps
+// to /api/time on the server).
+const es = new EventSource("api/time");
 
 es.onopen = () => {
   status.textContent = "live — server-sent events at /api/time";

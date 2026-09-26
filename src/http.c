@@ -181,6 +181,7 @@ int http_build_sse_head(char **out, size_t *out_len)
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream; charset=utf-8\r\n"
         "Cache-Control: no-cache\r\n"
+        "X-Accel-Buffering: no\r\n" /* nginx-style proxies: stream, don't buffer */
         "Connection: keep-alive\r\n"
         "\r\n";
     size_t n = sizeof head - 1;
