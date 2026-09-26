@@ -10,9 +10,9 @@ over Server-Sent Events, proving the base architecture. See *Roadmap*.
 ## Quick start
 
 ```sh
-make run            # build + serve on http://127.0.0.1:8080/
+make run            # build + serve on http://0.0.0.0:8080/
 ./flower -p 9000    # or: custom port
-./flower -b '*'     # or: listen on all interfaces
+./flower -b 127.0.0.1   # or: loopback only
 ```
 
 Open the URL — the page shows the server's clock, ticking once per second

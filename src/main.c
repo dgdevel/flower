@@ -16,7 +16,7 @@ static void usage(FILE *out, const char *prog)
         "usage: %s [-b ADDR] [-p PORT] [-h]\n"
         "\n"
         "options:\n"
-        "  -b ADDR   address to bind (default 127.0.0.1; '*' = all interfaces)\n"
+        "  -b ADDR   address to bind (default 0.0.0.0 = all interfaces)\n"
         "  -p PORT   port to listen on (default 8080)\n"
         "  -h        show this help\n",
         prog);
@@ -24,7 +24,7 @@ static void usage(FILE *out, const char *prog)
 
 int main(int argc, char **argv)
 {
-    const char *addr = "127.0.0.1";
+    const char *addr = NULL; /* NULL = bind all interfaces (0.0.0.0) */
     long port = 8080;
 
     int opt;
