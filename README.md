@@ -4,8 +4,10 @@ A web application shipped as a **single static binary**, written in C11.
 The frontend lives in ordinary files under `web/`; at build time a small
 generator compiles them into the executable, so deployment is one file.
 
-**Status: part 1 — proof of concept.** Hello-world page + a clock streamed
-over Server-Sent Events, proving the base architecture. See *Roadmap*.
+**Status: part 2 — theme system + filesystem config.** Part 1 proved the
+base architecture (embedded assets, epoll HTTP server, SSE). This part
+adds the config directory, a `theme.json` backend (parsed with cJSON),
+a config page and a component gallery. See *Roadmap*.
 
 ## Quick start
 
@@ -13,78 +15,119 @@ over Server-Sent Events, proving the base architecture. See *Roadmap*.
 make run            # build + serve on http://0.0.0.0:8080/
 ./flower -p 9000    # or: custom port
 ./flower -b 127.0.0.1   # or: loopback only
+make check          # end-to-end smoke tests (tests/smoke.sh)
 ```
 
-Open the URL — the page shows the server's clock, ticking once per second
-via SSE, with live/reconnecting status.
+Pages: `/` (home, live clock), `/config.html` (theme editor),
+`/components.html` (themed component gallery).
 
-Requires: Linux, a C11 compiler (`cc`), GNU make ≥ 4.3 (grouped targets).
+Requires: Linux, a C11 compiler (`cc`), GNU make ≥ 4.3 (grouped targets),
+and **cJSON** (system package `libcjson`, discovered via pkg-config).
 
 ## How it works
 
 **Build time** — assets are compiled into the binary:
 
 ```
-web/index.html ─┐
-web/style.css   ─┼─ tools/embed ──> src/assets_gen.{c,h} ──> linked into `flower`
-web/app.js      ─┘   (host tool,      (C arrays + MIME        (serves everything
+web/*.html ─┐
+web/*.css   ─┼─ tools/embed ──> src/assets_gen.{c,h} ──> linked into `flower`
+web/*.js    ─┘   (host tool,      (C arrays + MIME        (serves everything
                        run by make)     + served path)          from memory)
 ```
 
 **Run time** — one thread, one `epoll` loop, all sockets non-blocking:
 
 ```
-                ┌────────────────────────────────────────────┐
- client ───────►│  accept ─► parse request ─► route          │
-                │                         │                  │
-                │            static asset │ SSE /api/time    │
-                │            ─────────────┼──────────────    │
-                │            200 + body   │ 200 + stream,    │
-                │            (keep-alive) │ tick every 1 s   │
-                └────────────────────────────────────────────┘
+              ┌────────────────────────────────────────────────────┐
+ client ─────►│ accept ─► parse head ─► [read body] ─► route       │
+              │                                    │               │
+              │   static asset   │ SSE /api/time   │ /api/theme    │
+              │   ───────────    │ ─────────────   │ ───────────   │
+              │   200 + body     │ 200 + stream,   │ GET/PUT/reset │
+              │   (keep-alive)   │ tick every 1 s  │ (cJSON, file) │
+              └────────────────────────────────────────────────────┘
 ```
 
 Because nothing blocks, one slow SSE client can never stall the others
 (verified: 3 concurrent SSE streams + interleaved requests at ~0.3 ms).
 
+## Configuration (filesystem backend)
+
+The config directory is `$XDG_CONFIG_HOME/flower/`, falling back to
+`~/.config/flower/` when the variable is unset (override with `-c DIR`).
+The directory is created with mode 0700 on first start.
+
+`theme.json` — all 12 keys are optional on disk (missing/invalid values
+fall back to defaults), pretty-printed, written atomically (tmp + rename):
+
+```json
+{
+  "background_primary":   "#0d1117",
+  "background_secondary": "#161b22",
+  "background_tertiary":  "#21262d",
+  "text_primary_color":   "#e6edf3",
+  "text_primary_font":    "system-ui, -apple-system, 'Segoe UI', sans-serif",
+  "text_primary_size":    "16px",
+  "text_secondary_color": "#8b949e",
+  "text_secondary_font":  "system-ui, -apple-system, 'Segoe UI', sans-serif",
+  "text_secondary_size":  "13px",
+  "accent":   "#58a6ff",
+  "success":  "#3fb950",
+  "warning":  "#d29922"
+}
+```
+
+Validation (enforced server-side on PUT, mirrored client-side):
+colors must be `#rrggbb`; sizes like `16px` (unit `px`, `rem`, `em`, `%`);
+fonts limited to ASCII letters, digits, spaces and `, - _ '` (keeps values
+injection-safe as CSS custom properties). The browser applies the theme as
+CSS custom properties (`--bg-primary`, `--fg-primary`, …) the moment it is
+saved — `web/style.css` carries the same defaults as fallback.
+
 ## Repository layout
 
 ```
-Makefile              build: embed assets, compile, link
+Makefile              build: embed assets, compile (cJSON via pkg-config), link
 tools/embed.c         asset compiler: web/** -> C arrays (deterministic, sorted,
                       MIME table, escaping-safe for any binary content)
-src/main.c            CLI entry point (-b addr, -p port, -h)
+src/main.c            CLI entry point (-b addr, -p port, -c config dir, -h)
 src/server.c          epoll event loop, connection lifecycle, routing, SSE ticks
-src/http.{c,h}        minimal HTTP/1.1 parser (GET/HEAD) + response builders
+src/http.{c,h}        HTTP/1.1 parser (GET/HEAD/PUT/POST, Content-Length bodies)
+                      + response builders
+src/theme.{c,h}       config dir resolution, theme.json load/save/validate (cJSON)
 src/assets_gen.{c,h}  GENERATED — do not edit; regenerated by `make`
-web/index.html        frontend: page shell
-web/app.js            frontend: EventSource client for /api/time
-web/style.css         frontend: styling
+web/index.html        home: live clock (SSE)
+web/config.html/.js   theme editor: instant preview, validate, save, reset
+web/components.html   themed component gallery (palette, buttons, badges, rows…)
+web/theme.js          shared: fetch /api/theme, apply as CSS custom properties
+web/app.js            home: EventSource client for api/time
+web/style.css         styles driven entirely by theme variables
+tests/smoke.sh        end-to-end smoke tests (make check)
 ```
 
 ## HTTP surface
 
-| Path         | Method   | Response                                          |
-|--------------|----------|---------------------------------------------------|
-| `/`          | GET/HEAD | embedded `index.html` (`/` → `/index.html`)        |
-| `/style.css`, `/app.js`, … | GET/HEAD | any file under `web/`, exact path match |
-| `/api/time`  | GET      | `text/event-stream`; one JSON tick per second      |
-| anything else| GET/HEAD | 404; other methods → 405                            |
+| Path              | Method       | Response                                        |
+|-------------------|--------------|-------------------------------------------------|
+| `/`               | GET/HEAD     | embedded `index.html` (`/` → `/index.html`)     |
+| `/config.html`, `/components.html`, `/style.css`, `/app.js`, … | GET/HEAD | any file under `web/`, exact path match |
+| `/api/time`       | GET          | `text/event-stream`; one JSON tick per second   |
+| `/api/theme`      | GET/HEAD     | current theme as JSON                           |
+| `/api/theme`      | PUT          | body: full/partial theme JSON; validates, saves |
+|                   |              | 200 + saved theme; 400 bad JSON; 422 invalid    |
+|                   |              | value/unknown key (`{"error","field"}`)         |
+| `/api/theme/reset`| POST         | restore defaults, save, return theme            |
+| anything else     | GET/HEAD     | 404; other methods → 405 (with `Allow`)         |
 
-SSE event format (`retry` hint sent once at stream start, `: ping` comment
-every 15 s as a keep-alive):
+Request bodies: `Content-Length` only (≤ 64 KB); `Transfer-Encoding:
+chunked` and duplicate `Content-Length` are rejected (400/413).
+
+SSE event format (`retry` hint at stream start, `: ping` comment every
+15 s; `X-Accel-Buffering: no` for proxies):
 
 ```
 data: {"unix":1790414077,"iso":"2026-09-26T09:14:37Z"}
 ```
-
-The SSE response also sends `X-Accel-Buffering: no`, and the page uses
-**relative URLs** for assets and the event stream — so it works both
-directly and behind a reverse proxy that serves it under a path prefix.
-If a proxy in front still buffers the stream (page loads but the clock
-never ticks and the status stays "connecting…"), disable response
-buffering there (nginx: `proxy_buffering off;`), or test with
-`curl -N <url>/api/time` to see events arrive.
 
 Adding a static file = drop it anywhere under `web/` and rebuild; it is
 served automatically with the right MIME type. Dotfiles are skipped.
@@ -94,23 +137,28 @@ served automatically with the right MIME type. Dotfiles are skipped.
 - **Build-time embedding via a generator tool** (`tools/embed`), not
   `xxd -i` or preprocessor tricks: no external tool dependency,
   deterministic output (sorted), MIME types resolved once at build time,
-  handles arbitrary binary bytes, and refuses unsafe filenames. The
-  alternative — reading `web/` at runtime — was rejected because it
-  breaks the single-binary property.
+  handles arbitrary binary bytes, and refuses unsafe filenames.
 - **Hand-rolled HTTP/1.1 subset** rather than vendoring a library
-  (e.g. mongoose): zero dependencies, full control, and the surface we
-  need is small. Trade-off: we own correctness for parsing/keep-alive.
-  Swapping in a library later is contained behind `src/http.{c,h}`.
-- **Single-threaded epoll loop**: SSE is broadcast-friendly (a tick is
-  one loop over connections), no locking, scales to thousands of mostly
-  idle connections. Slow clients are dropped once > 256 KB is pending.
-- **SSE (not WebSocket)** for server→client push: it is plain HTTP,
-  auto-reconnects in the browser, and fits a clock/notifications pattern.
+  (e.g. mongoose): zero dependencies beyond libc/cJSON, full control.
+  Trade-off: we own correctness for parsing/keep-alive. Swapping in a
+  library later is contained behind `src/http.{c,h}`.
+- **cJSON from the system** (`libcjson` via pkg-config) for all JSON:
+  parsing PUTs, serializing responses, writing theme.json. One small,
+  ubiquitous dependency; the JSON seams live only in `src/theme.c`.
+- **Single-threaded epoll loop**: SSE broadcast is one loop over
+  connections, no locking. Slow clients are dropped once > 256 KB is
+  pending.
+- **Theme as CSS custom properties**: server stores plain values, the
+  browser applies them (`--bg-primary`, `--accent`, …). Instant preview
+  is one `setProperty` call per field; no CSS re-generation server-side.
+- **Lenient load, strict save**: a hand-edited theme.json with a bad
+  value still boots (that field falls back to default), but the API and
+  UI never let invalid data in.
 
-## Known limits (deliberate, for the POC)
+## Known limits
 
 - No TLS, no URL percent-decoding (exact path match only).
-- No idle keep-alive timeouts; no request-body support (GET/HEAD only).
+- No idle keep-alive timeouts.
 - Access log goes to stderr, one line per request.
 - Linux-only for now (`epoll`, POSIX sockets). Windows later needs:
   `epoll` → `select`/IOCP, `winsock2` init + `closesocket`, and a
@@ -119,10 +167,14 @@ served automatically with the right MIME type. Dotfiles are skipped.
 
 ## Roadmap
 
-- [ ] part 2: application state + JSON API endpoints (request routing table)
-- [ ] automated smoke tests (curl-based) in the Makefile
+- [x] part 1: base architecture (embedded assets, epoll, SSE)
+- [x] part 2: config directory + theme.json + config UI + gallery
+- [x] automated smoke tests (`make check`)
+- [ ] part 3: the main application UI
+- [ ] more settings in the config directory (beyond theme.json)
 - [ ] idle connection timeouts
 - [ ] Windows build (winsock + select/IOCP)
+- [ ] Dockerfile / packaging
 - [ ] TLS (optional reverse-proxy or built-in)
 
 ## Development notes
@@ -130,8 +182,8 @@ served automatically with the right MIME type. Dotfiles are skipped.
 ```sh
 make          # build ./flower (regenerates assets if web/ changed)
 make run      # build + run with defaults
+make check    # build + run the smoke tests (isolated tmp config dir)
 make clean    # remove binary, objects, generated asset files
 ```
 
-The binary is ~35 KB, dynamically linked against libc only
-(`-static` works too if a fully static binary is wanted).
+The binary is ~62 KB, dynamically linked against libc and libcjson.

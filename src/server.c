@@ -10,6 +10,7 @@
 #include "server.h"
 #include "http.h"
 #include "assets_gen.h"
+#include "theme.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -30,6 +31,7 @@
 
 #define READ_CHUNK  16384
 #define MAX_REQUEST (64 * 1024)   /* request-head cap before we give up */
+#define MAX_BODY    (64 * 1024)   /* request-body cap (theme PUT etc.) */
 #define MAX_BACKLOG (256 * 1024)  /* unwritten bytes before dropping a client */
 #define MAX_EVENTS  128
 
@@ -42,6 +44,9 @@ typedef struct {
     bool no_more_read;           /* peer half-closed its side */
     bool close_after_flush;      /* finish writing, then close */
     bool dead;                   /* destroyed at the end of the event batch */
+    http_request_t pending;      /* request whose body is still arriving */
+    size_t pending_len;
+    bool has_pending;
 } conn_t;
 
 typedef struct {
@@ -50,6 +55,7 @@ typedef struct {
     conn_t **by_fd;              /* fd -> conn_t* (NULL slots) */
     int fd_cap;
     int nconns;
+    theme_t theme;               /* current theme (reloaded via API) */
 } server_t;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -229,7 +235,53 @@ static void sse_start(server_t *s, conn_t *c)
 
 /* ---------- request handling ---------- */
 
-static void handle_request(server_t *s, conn_t *c, http_request_t *req)
+static void respond_json(server_t *s, conn_t *c, int code, const char *json,
+                         bool keep_alive)
+{
+    respond(s, c, code, "application/json", json, strlen(json),
+            keep_alive, false, NULL);
+}
+
+static void handle_theme_put(server_t *s, conn_t *c, http_request_t *req,
+                             const char *body, size_t body_len, int *status)
+{
+    theme_t nt;
+    char efield[80], emsg[160];
+    theme_parse_result_t pr = theme_from_json(body, body_len, &nt,
+                                              efield, sizeof efield,
+                                              emsg, sizeof emsg);
+    if (pr != THEME_OK) {
+        *status = (pr == THEME_E_JSON) ? 400 : 422;
+        char *eb = theme_error_json(emsg, efield);
+        if (eb) {
+            respond_json(s, c, *status, eb, req->keep_alive);
+            free(eb);
+        } else {
+            respond_json(s, c, *status, "{\"error\":\"invalid theme\"}",
+                         req->keep_alive);
+        }
+        return;
+    }
+    if (theme_save(&nt) != 0) {
+        *status = 500;
+        respond_json(s, c, 500,
+                     "{\"error\":\"cannot write theme.json in config dir\"}",
+                     req->keep_alive);
+        return;
+    }
+    s->theme = nt;
+    *status = 200;
+    char *j = theme_to_json(&nt);
+    if (j) {
+        respond_json(s, c, 200, j, req->keep_alive);
+        free(j);
+    } else {
+        respond_json(s, c, 200, "{}", req->keep_alive);
+    }
+}
+
+static void handle_request(server_t *s, conn_t *c, http_request_t *req,
+                           const char *body, size_t body_len)
 {
     char *q = strchr(req->target, '?');
     if (q) *q = '\0';
@@ -238,30 +290,77 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req)
 
     bool get  = strcmp(req->method, "GET")  == 0;
     bool head = strcmp(req->method, "HEAD") == 0;
+    bool put  = strcmp(req->method, "PUT")  == 0;
+    bool post = strcmp(req->method, "POST") == 0;
     int status = 200;
 
-    if (!get && !head) {
-        status = 405;
-        respond(s, c, 405, "text/plain; charset=utf-8",
-                "method not allowed\n", 19, false, false, "Allow: GET, HEAD\r\n");
-    } else if (get && strcmp(path, "/api/time") == 0) {
-        logmsg("%s %s 200 (sse) [%s]", req->method, path, c->peer);
-        sse_start(s, c);
-        return;
-    } else if (head && strcmp(path, "/api/time") == 0) {
-        status = 405;
-        respond(s, c, 405, "text/plain; charset=utf-8",
-                "method not allowed\n", 19, false, false, "Allow: GET\r\n");
-    } else {
-        const asset_t *a = asset_find(path);
-        if (!a) {
-            status = 404;
-            respond(s, c, 404, "text/plain; charset=utf-8",
-                    "not found\n", 10, req->keep_alive, false, NULL);
+    if (get || head) {
+        if (strcmp(path, "/api/time") == 0) {
+            if (head) {
+                status = 405;
+                respond(s, c, 405, "text/plain; charset=utf-8",
+                        "method not allowed\n", 19, false, false,
+                        "Allow: GET\r\n");
+            } else {
+                logmsg("%s %s 200 (sse) [%s]", req->method, path, c->peer);
+                sse_start(s, c);
+                return;
+            }
+        } else if (strcmp(path, "/api/theme") == 0) {
+            char *j = theme_to_json(&s->theme);
+            if (j) {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            } else {
+                status = 500;
+                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                             req->keep_alive);
+            }
         } else {
-            respond(s, c, 200, a->mime, a->data, a->size,
-                    req->keep_alive, head, NULL);
+            const asset_t *a = asset_find(path);
+            if (!a) {
+                status = 404;
+                respond(s, c, 404, "text/plain; charset=utf-8",
+                        "not found\n", 10, req->keep_alive, false, NULL);
+            } else {
+                respond(s, c, 200, a->mime, a->data, a->size,
+                        req->keep_alive, head, NULL);
+            }
         }
+    } else if (put && strcmp(path, "/api/theme") == 0) {
+        handle_theme_put(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/api/theme/reset") == 0) {
+        theme_t def;
+        theme_defaults(&def);
+        if (theme_save(&def) != 0) {
+            status = 500;
+            respond_json(s, c, 500, "{\"error\":\"cannot write theme.json\"}",
+                         req->keep_alive);
+        } else {
+            s->theme = def;
+            char *j = theme_to_json(&def);
+            if (j) {
+                respond_json(s, c, 200, j, req->keep_alive);
+                free(j);
+            } else {
+                respond_json(s, c, 200, "{}", req->keep_alive);
+            }
+        }
+    } else if (strcmp(path, "/api/theme") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false,
+                "Allow: GET, HEAD, PUT\r\n");
+    } else if (strcmp(path, "/api/theme/reset") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false, "Allow: POST\r\n");
+    } else {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false,
+                "Allow: GET, HEAD\r\n");
     }
     logmsg("%s %s %d [%s]", req->method, path, status, c->peer);
 }
@@ -269,8 +368,22 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req)
 static void process_input(server_t *s, conn_t *c)
 {
     for (;;) {
-        if (c->in_len == 0 || c->dead || c->is_sse || c->close_after_flush)
-            return;
+        if (c->dead || c->is_sse || c->close_after_flush) return;
+
+        /* body of an already-parsed request still arriving? */
+        if (c->has_pending) {
+            if (c->in_len < c->pending_len) return;
+            http_request_t req = c->pending;
+            size_t body_len = c->pending_len;
+            c->has_pending = false;
+            handle_request(s, c, &req, c->in, body_len);
+            if (c->dead || c->is_sse || c->close_after_flush) return;
+            memmove(c->in, c->in + body_len, c->in_len - body_len);
+            c->in_len -= body_len;
+            continue;
+        }
+
+        if (c->in_len == 0) return;
         http_request_t req;
         size_t consumed = 0;
         int r = http_parse_request(c->in, c->in_len, &req, &consumed);
@@ -285,9 +398,32 @@ static void process_input(server_t *s, conn_t *c)
                     "bad request\n", 12, false, false, NULL);
             return;
         }
+        /* strip the head; the body (if any) now sits at the front */
         memmove(c->in, c->in + consumed, c->in_len - consumed);
         c->in_len -= consumed;
-        handle_request(s, c, &req); /* may turn the conn into an SSE stream */
+
+        if (req.chunked) {
+            respond(s, c, 400, "text/plain; charset=utf-8",
+                    "chunked bodies not supported\n", 29, false, false, NULL);
+            return;
+        }
+        if (req.has_body && req.content_length > MAX_BODY) {
+            respond(s, c, 413, "text/plain; charset=utf-8",
+                    "body too large\n", 15, false, false, NULL);
+            return;
+        }
+        size_t body_len = (req.has_body && req.content_length > 0)
+                              ? req.content_length : 0;
+        if (body_len > 0 && c->in_len < body_len) {
+            c->pending = req; /* remember it, wait for the rest */
+            c->pending_len = body_len;
+            c->has_pending = true;
+            return;
+        }
+        handle_request(s, c, &req, c->in, body_len);
+        if (c->dead || c->is_sse || c->close_after_flush) return;
+        memmove(c->in, c->in + body_len, c->in_len - body_len);
+        c->in_len -= body_len;
     }
 }
 
@@ -431,6 +567,10 @@ int server_run(const char *bind_addr, uint16_t port)
     signal(SIGPIPE, SIG_IGN);
 
     logmsg("listening on %s", url);
+
+    int tl = theme_load(&s.theme);
+    logmsg("config: %s (%s)", theme_dir(),
+           tl == 0 ? "theme.json loaded" : "using default theme");
 
     long long next_tick = now_ms() / 1000 * 1000 + 1000;
 

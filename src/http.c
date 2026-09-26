@@ -93,8 +93,8 @@ int http_parse_request(const char *buf, size_t len,
         return -1;
     req->minor = buf[i + 7] - '0';
 
-    /* --- headers: we only care about Connection --- */
-    bool hdr_close = false, hdr_keepalive = false;
+    /* --- headers: Connection, Content-Length, Transfer-Encoding --- */
+    bool hdr_close = false, hdr_keepalive = false, has_cl = false;
     size_t pos = line_len + 2; /* skip the request line's CRLF
                                 * (line_len excludes it, so +2, not +1) */
     while (pos < head_end) {
@@ -107,23 +107,40 @@ int http_parse_request(const char *buf, size_t len,
         const char *colon = memchr(buf + pos, ':', ll);
         if (colon) {
             size_t name_len = (size_t)(colon - (buf + pos));
+            const char *v = colon + 1;
+            while (v < buf + pos + ll && (*v == ' ' || *v == '\t')) v++;
+            size_t vl = (size_t)(buf + pos + ll - v);
+            char val[64];
+            int have_val = vl < sizeof val;
+            if (have_val) {
+                memcpy(val, v, vl);
+                val[vl] = '\0';
+            }
             if (name_len == 10 && ci_eq_n(buf + pos, "connection", 10)) {
-                const char *v = colon + 1;
-                while (v < buf + pos + ll && (*v == ' ' || *v == '\t')) v++;
-                size_t vl = (size_t)(buf + pos + ll - v);
-                char val[64];
-                if (vl < sizeof val) {
-                    memcpy(val, v, vl);
-                    val[vl] = '\0';
+                if (have_val) {
                     if (ci_contains(val, "close")) hdr_close = true;
                     if (ci_contains(val, "keep-alive")) hdr_keepalive = true;
                 }
+            } else if (name_len == 14 &&
+                       ci_eq_n(buf + pos, "content-length", 14)) {
+                if (!have_val || has_cl) return -1; /* dup CL: smuggling */
+                char *end = NULL;
+                unsigned long long clv = strtoull(val, &end, 10);
+                if (end == val || *end != '\0' || clv > (100ULL << 20))
+                    return -1;
+                req->content_length = (size_t)clv;
+                has_cl = true;
+            } else if (name_len == 17 &&
+                       ci_eq_n(buf + pos, "transfer-encoding", 17)) {
+                if (have_val && ci_contains(val, "chunked"))
+                    req->chunked = true;
             }
         }
         pos = next;
     }
 
     req->keep_alive = (req->minor == 1) ? !hdr_close : hdr_keepalive;
+    req->has_body = has_cl;
     *consumed = head_end;
     return 1;
 }
@@ -135,7 +152,10 @@ const char *http_status_text(int code)
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 413: return "Payload Too Large";
+    case 422: return "Unprocessable Entity";
     case 431: return "Request Header Fields Too Large";
+    case 500: return "Internal Server Error";
     default:  return "Unknown";
     }
 }

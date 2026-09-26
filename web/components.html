@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flower — components</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./">flower</a>
+    <nav>
+      <a href="config.html">Config</a>
+      <a href="components.html">Components</a>
+    </nav>
+  </header>
+  <main class="page">
+    <h1>Components</h1>
+    <p class="muted">
+      Everything below is driven by the theme. Change it in
+      <a href="config.html">Config</a> — colors, fonts and sizes apply
+      immediately.
+    </p>
+
+    <h2>Palette</h2>
+    <div class="grid" id="palette">
+      <div class="card swatch"><span class="dot" style="background:var(--bg-primary)"></span>background primary</div>
+      <div class="card swatch"><span class="dot" style="background:var(--bg-secondary)"></span>background secondary</div>
+      <div class="card swatch"><span class="dot" style="background:var(--bg-tertiary)"></span>background tertiary</div>
+      <div class="card swatch"><span class="dot" style="background:var(--fg-primary)"></span>text primary</div>
+      <div class="card swatch"><span class="dot" style="background:var(--fg-secondary)"></span>text secondary</div>
+      <div class="card swatch"><span class="dot" style="background:var(--accent)"></span>accent</div>
+      <div class="card swatch"><span class="dot" style="background:var(--success)"></span>success</div>
+      <div class="card swatch"><span class="dot" style="background:var(--warning)"></span>warning</div>
+    </div>
+
+    <h2>Buttons</h2>
+    <div class="card row-wrap">
+      <button class="btn">Default</button>
+      <button class="btn btn-ghost">Ghost</button>
+      <button class="btn btn-accent">Accent</button>
+      <button class="btn btn-success">Success</button>
+      <button class="btn btn-warning">Warning</button>
+      <a class="btn btn-ghost" href="#">Link as button</a>
+    </div>
+
+    <h2>Badges</h2>
+    <div class="card row-wrap">
+      <span class="badge badge-accent">running</span>
+      <span class="badge badge-success">healthy</span>
+      <span class="badge badge-warning">degraded</span>
+      <span class="badge badge-muted">idle</span>
+    </div>
+
+    <h2>Cards &amp; panel</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Card</h3>
+        <p>Body text uses the primary font, size and color. <span class="muted">This part is muted.</span></p>
+        <p class="ts">last update 2026-09-26T10:00:00Z</p>
+      </div>
+      <div class="card">
+        <h3>Panel with hover rows</h3>
+        <div class="rows">
+          <div class="row"><span>/etc/flower.conf</span><span class="ts">12 min ago</span></div>
+          <div class="row"><span>theme.json</span><span class="ts">just now</span></div>
+          <div class="row active"><span>backup.zip</span><span class="ts">1 h ago</span></div>
+          <div class="row"><span>server.log</span><span class="ts">3 h ago</span></div>
+        </div>
+      </div>
+    </div>
+
+    <h2>Forms</h2>
+    <div class="card">
+      <div class="cfg-row">
+        <label for="demo-text">Text input</label>
+        <input id="demo-text" type="text" placeholder="type something…">
+      </div>
+      <div class="cfg-row">
+        <label for="demo-sel">Select</label>
+        <select id="demo-sel"><option>px</option><option>rem</option><option>%</option></select>
+      </div>
+      <div class="cfg-row">
+        <label>Checkboxes &amp; focus</label>
+        <span class="row-wrap">
+          <label class="check"><input type="checkbox" checked> enabled</label>
+          <label class="check"><input type="checkbox"> verbose</label>
+        </span>
+      </div>
+      <p class="muted">Tab through the inputs to see the accent focus ring.</p>
+    </div>
+
+    <h2>Links &amp; modal</h2>
+    <div class="grid">
+      <div class="card">
+        <p><a href="#">An accent link</a> — and <span class="muted">secondary text</span> for timestamps and labels.</p>
+      </div>
+      <div class="card" role="dialog" aria-label="modal example">
+        <h3>Modal-like panel</h3>
+        <p>Panels and modals sit on the secondary background.</p>
+        <button class="btn btn-accent">Confirm</button>
+        <button class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </main>
+  <script src="theme.js"></script>
+</body>
+</html>

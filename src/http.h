@@ -4,14 +4,18 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Minimal HTTP/1.1 request-head parser + response builders.
- * Enough for GET/HEAD + Server-Sent Events; see README for limits. */
+/* Minimal HTTP/1.1 request parser + response builders.
+ * GET/HEAD/PUT/POST with Content-Length bodies + Server-Sent Events;
+ * see README for limits. */
 
 typedef struct {
     char method[8];
     char target[2048];
     int  minor;       /* HTTP version is 1.minor (0 or 1) */
     bool keep_alive;
+    bool has_body;    /* a Content-Length header was present */
+    bool chunked;     /* Transfer-Encoding: chunked (rejected upstream) */
+    size_t content_length;
 } http_request_t;
 
 /* Parse one request head from buf.
