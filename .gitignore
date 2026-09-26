@@ -18,3 +18,6 @@
 
 # js dev tooling (e2e only; the web frontend itself has no dependencies)
 /node_modules/
+
+# llmkit reference checkout (read-only; not part of flower)
+/llmkit/

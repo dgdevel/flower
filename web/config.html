@@ -18,23 +18,46 @@
   <main class="page">
     <h1>Configuration</h1>
     <p class="muted">
-      The theme is stored as <code>theme.json</code> in the app config
-      directory and applied to every page. Changes preview instantly;
-      <em>Save</em> validates and persists them.
+      Everything lives as plain json files in the app config directory and
+      is validated on save. The <em>theme</em> is applied to every page;
+      <em>llm endpoints</em> keep connection details (url, key, headers) in
+      one place; <em>agents</em> reference them and add prompts, inference
+      options and mcp servers — the record shapes llmkit speaks, ready for
+      the runner.
       <a href="components.html">Open the component gallery →</a>
     </p>
 
+    <h2>Theme</h2>
     <form id="theme-form" autocomplete="off"></form>
 
     <div class="save-bar">
       <span id="cfg-status" class="muted"></span>
       <span class="save-actions">
         <button type="button" id="reset" class="btn">Reset to defaults</button>
-        <button type="button" id="save" class="btn btn-accent">Save</button>
+        <button type="button" id="save" class="btn btn-accent">Save theme</button>
       </span>
     </div>
+
+    <h2>LLM endpoints</h2>
+    <p class="muted">
+      Named endpoints stored as <code>llms.json</code> — one place for the
+      url, api key and headers. Agents reference an endpoint by name, so
+      rotating a key or moving a server touches exactly one entry.
+    </p>
+    <div class="entity" id="llms-ui"></div>
+
+    <h2>Agents</h2>
+    <p class="muted">
+      Each agent is one json file under <code>agents/</code> in the config
+      directory: the llm it talks to, its inference options, system prompt
+      and the mcp servers its tools come from — the settings
+      <code>llmkit runner</code> consumes. Add and customize them here;
+      saving writes one <code>&lt;name&gt;.json</code> per agent.
+    </p>
+    <div class="entity" id="agents-ui"></div>
   </main>
   <script src="theme.js"></script>
   <script src="config.js"></script>
+  <script src="agents.js"></script>
 </body>
 </html>

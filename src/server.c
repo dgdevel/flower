@@ -12,6 +12,7 @@
 #include "assets_gen.h"
 #include "theme.h"
 #include "projects.h"
+#include "agents.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -31,8 +32,8 @@
 #include <unistd.h>
 
 #define READ_CHUNK  16384
-#define MAX_REQUEST (64 * 1024)   /* request-head cap before we give up */
-#define MAX_BODY    (64 * 1024)   /* request-body cap (theme PUT etc.) */
+#define MAX_REQUEST (64 * 1024)    /* request-head cap before we give up */
+#define MAX_BODY    (256 * 1024)   /* request-body cap (agents PUT etc.) */
 #define MAX_BACKLOG (256 * 1024)  /* unwritten bytes before dropping a client */
 #define MAX_EVENTS  128
 
@@ -58,6 +59,8 @@ typedef struct {
     int nconns;
     theme_t theme;               /* current theme (reloaded via API) */
     projects_t projects;         /* current project list (replaced via API) */
+    llms_t llms;                 /* named llm endpoints (replaced via API) */
+    agents_t agents;             /* current agent list (replaced via API) */
 } server_t;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -320,6 +323,86 @@ static void handle_projects_put(server_t *s, conn_t *c, http_request_t *req,
     }
 }
 
+static void handle_llms_put(server_t *s, conn_t *c, http_request_t *req,
+                            const char *body, size_t body_len, int *status)
+{
+    llms_t nl;
+    char efield[96], emsg[160];
+    llms_parse_result_t pr = llms_from_json(body, body_len, &nl,
+                                             efield, sizeof efield,
+                                             emsg, sizeof emsg);
+    if (pr != LLMS_OK) {
+        *status = (pr == LLMS_E_JSON) ? 400 : 422;
+        char *eb = theme_error_json(emsg, efield);
+        if (eb) {
+            respond_json(s, c, *status, eb, req->keep_alive);
+            free(eb);
+        } else {
+            respond_json(s, c, *status, "{\"error\":\"invalid llm list\"}",
+                         req->keep_alive);
+        }
+        return;
+    }
+    if (llms_save(&nl) != 0) {
+        llms_free(&nl);
+        *status = 500;
+        respond_json(s, c, 500,
+                     "{\"error\":\"cannot write llms.json in config dir\"}",
+                     req->keep_alive);
+        return;
+    }
+    llms_free(&s->llms);
+    s->llms = nl;
+    *status = 200;
+    char *j = llms_to_json(&nl);
+    if (j) {
+        respond_json(s, c, 200, j, req->keep_alive);
+        free(j);
+    } else {
+        respond_json(s, c, 200, "[]", req->keep_alive);
+    }
+}
+
+static void handle_agents_put(server_t *s, conn_t *c, http_request_t *req,
+                              const char *body, size_t body_len, int *status)
+{
+    agents_t na;
+    char efield[96], emsg[160];
+    agents_parse_result_t pr = agents_from_json(body, body_len, &s->llms,
+                                                 &na, efield, sizeof efield,
+                                                 emsg, sizeof emsg);
+    if (pr != AGENTS_OK) {
+        *status = (pr == AGENTS_E_JSON) ? 400 : 422;
+        char *eb = theme_error_json(emsg, efield);
+        if (eb) {
+            respond_json(s, c, *status, eb, req->keep_alive);
+            free(eb);
+        } else {
+            respond_json(s, c, *status, "{\"error\":\"invalid agent list\"}",
+                         req->keep_alive);
+        }
+        return;
+    }
+    if (agents_save(&na) != 0) {
+        agents_free(&na);
+        *status = 500;
+        respond_json(s, c, 500,
+                     "{\"error\":\"cannot write agents/ in config dir\"}",
+                     req->keep_alive);
+        return;
+    }
+    agents_free(&s->agents);
+    s->agents = na;
+    *status = 200;
+    char *j = agents_to_json(&na, NULL); /* PUT echo: refs just validated */
+    if (j) {
+        respond_json(s, c, 200, j, req->keep_alive);
+        free(j);
+    } else {
+        respond_json(s, c, 200, "[]", req->keep_alive);
+    }
+}
+
 static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                            const char *body, size_t body_len)
 {
@@ -368,6 +451,28 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
                              req->keep_alive);
             }
+        } else if (strcmp(path, "/api/llms") == 0) {
+            char *j = llms_to_json(&s->llms);
+            if (j) {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            } else {
+                status = 500;
+                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                             req->keep_alive);
+            }
+        } else if (strcmp(path, "/api/agents") == 0) {
+            char *j = agents_to_json(&s->agents, &s->llms);
+            if (j) {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            } else {
+                status = 500;
+                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                             req->keep_alive);
+            }
         } else {
             const asset_t *a = asset_find(path);
             if (!a) {
@@ -400,8 +505,14 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         }
     } else if (put && strcmp(path, "/api/projects") == 0) {
         handle_projects_put(s, c, req, body, body_len, &status);
+    } else if (put && strcmp(path, "/api/llms") == 0) {
+        handle_llms_put(s, c, req, body, body_len, &status);
+    } else if (put && strcmp(path, "/api/agents") == 0) {
+        handle_agents_put(s, c, req, body, body_len, &status);
     } else if (strcmp(path, "/api/theme") == 0 ||
-               strcmp(path, "/api/projects") == 0) {
+               strcmp(path, "/api/projects") == 0 ||
+               strcmp(path, "/api/llms") == 0 ||
+               strcmp(path, "/api/agents") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false,
@@ -624,9 +735,13 @@ int server_run(const char *bind_addr, uint16_t port)
 
     int tl = theme_load(&s.theme);
     projects_load(&s.projects);
-    logmsg("config: %s (%s, %d project%s)", theme_dir(),
+    llms_load(&s.llms);
+    agents_load(&s.agents);
+    logmsg("config: %s (%s, %d project%s, %d llm%s, %d agent%s)", theme_dir(),
            tl == 0 ? "theme.json loaded" : "using default theme",
-           (int)s.projects.count, s.projects.count == 1 ? "" : "s");
+           (int)s.projects.count, s.projects.count == 1 ? "" : "s",
+           (int)s.llms.count, s.llms.count == 1 ? "" : "s",
+           (int)s.agents.count, s.agents.count == 1 ? "" : "s");
 
     long long next_tick = now_ms() / 1000 * 1000 + 1000;
 
@@ -682,6 +797,8 @@ int server_run(const char *bind_addr, uint16_t port)
     for (int fd = 0; fd < s.fd_cap; fd++)
         if (s.by_fd[fd]) conn_destroy(&s, s.by_fd[fd]);
     free(s.by_fd);
+    llms_free(&s.llms);
+    agents_free(&s.agents);
     close(epfd);
     close(lfd);
     return 0;

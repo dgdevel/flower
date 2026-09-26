@@ -27,7 +27,7 @@ done
 curl -s -o /dev/null "$B/" || fail "server did not come up on $B"
 
 echo "== 1. embedded assets are byte-identical, no stray bytes =="
-for f in index.html config.html components.html style.css theme.js config.js app.js emoji.js; do
+for f in index.html config.html components.html style.css theme.js config.js agents.js app.js emoji.js; do
     curl -s "$B/$f" | cmp -s - "web/$f" || fail "$f: served bytes differ from web/$f"
 done
 for p in / /config.html /style.css /app.js /api/theme; do
@@ -124,6 +124,66 @@ assert d["'"$CFG"'/vanishing"] is False, d   # vanished dir is flagged, not drop
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\"},{\"dir\":\"$CFG/vanishing\"}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "PUT with a vanished dir: expected 422, got $code"
 curl -s -X PUT --data '[]' "$B/api/projects" | grep -q '^\[\]$' || fail "PUT [] did not clear the list"
+
+echo "== 6c. llms API =="
+curl -s "$B/api/llms" | grep -q '^\[\]$' || fail "GET /api/llms should start as []"
+curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
+ {"name":"ollama","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1"},
+ {"name":"anthropic","endpoint_protocol":"anthropic","api_base":"https://api.anthropic.com/v1","api_key":"sk-x","headers":{"x-api-key":"k"}}]' "$B/api/llms" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert [x["name"] for x in d] == ["anthropic", "ollama"], d   # sorted by name
+assert d[1]["model"] == "llama3.1", d
+assert d[0]["headers"] == {"x-api-key": "k"}, d
+' || fail "PUT /api/llms did not save and echo the list"
+[ -f "$CFG/llms.json" ] || fail "llms.json not written to config dir"
+curl -s "$B/api/llms" | grep -q '"name":"ollama"' || fail "GET /api/llms after PUT does not reflect the change"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/llms")
+[ "$code" = 400 ] || fail "llms: malformed JSON: expected 400, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '{"name":"x"}' "$B/api/llms")
+[ "$code" = 400 ] || fail "llms: object instead of array: expected 400, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","endpoint_protocol":"bogus","api_base":"http://a/"}]' "$B/api/llms")
+[ "$code" = 422 ] || fail "llms: bad protocol: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","endpoint_protocol":"openai","api_base":"ftp://a/"}]' "$B/api/llms")
+[ "$code" = 422 ] || fail "llms: non-http api_base: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","endpoint_protocol":"openai","api_base":"http://a/","zzz":1}]' "$B/api/llms")
+[ "$code" = 422 ] || fail "llms: unknown key: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","endpoint_protocol":"openai","api_base":"http://a/"},{"name":"X","endpoint_protocol":"openai","api_base":"http://b/"}]' "$B/api/llms")
+[ "$code" = 422 ] || fail "llms: duplicate name: expected 422, got $code"
+curl -s "$B/api/llms" | grep -q '"name":"ollama"' || fail "rejected PUTs must not change the stored llms"
+
+echo "== 6d. agents API =="
+curl -s "$B/api/agents" | grep -q '^\[\]$' || fail "GET /api/agents should start as []"
+curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
+ {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
+ {"name":"thinker","llm":"anthropic","inference_options":{"max_tokens":4096,"thinking_budget":2048}}]' "$B/api/agents" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert [a["name"] for a in d] == ["gardener", "thinker"], d
+assert d[0]["inference_options"]["stop"] == ["END"], d   # string form normalized to array
+assert d[0]["tools"][0]["required"] is True, d
+assert "llm_ok" not in d[0] or d[0]["llm_ok"], d         # PUT echo may omit, never false
+' || fail "PUT /api/agents did not save and echo the list"
+[ -f "$CFG/agents/gardener.json" ] || fail "agents/gardener.json not written"
+[ -f "$CFG/agents/thinker.json" ] || fail "agents/thinker.json not written"
+curl -s "$B/api/agents" | python3 -c '
+import json, sys
+d = {a["name"]: a["llm_ok"] for a in json.load(sys.stdin)}
+assert d == {"gardener": True, "thinker": True}, d        # live reference flags on GET
+' || fail "GET /api/agents should report llm_ok flags"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":"missing"}]' "$B/api/agents")
+[ "$code" = 422 ] || fail "agents: unknown llm reference: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":"anthropic"}]' "$B/api/agents")
+[ "$code" = 422 ] || fail "agents: anthropic without max_tokens: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":"ollama","tools":[{"type":"stdio","name":"fs"}]}]' "$B/api/agents")
+[ "$code" = 422 ] || fail "agents: stdio without command_line: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":"ollama","tools":[{"type":"stdio","name":"fs","command_line":"ls"},{"type":"http","name":"fs","url":"http://a/"}]}]' "$B/api/agents")
+[ "$code" = 422 ] || fail "agents: duplicate tool names: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":"ollama","prompt":"y"}]' "$B/api/agents")
+[ "$code" = 422 ] || fail "agents: unknown key: expected 422, got $code"
+curl -s -X PUT --data '[{"name":"thinker","llm":"anthropic","inference_options":{"max_tokens":4096}}]' "$B/api/agents" >/dev/null
+[ ! -f "$CFG/agents/gardener.json" ] || fail "removing an agent must delete its file"
+ls "$CFG/agents" | grep -qx 'thinker.json' || fail "the kept agent's file must stay"
 
 echo "== 7. SSE still streams =="
 curl -sN --max-time 3 "$B/api/time" | grep -m1 -q '^data: {"unix"' || fail "no SSE event within 3s"
