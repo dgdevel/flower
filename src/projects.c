@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h> /* stat: working dirs must exist on save */
+#include <sys/types.h> /* mkdir */
+#include <time.h>
 #include <unistd.h> /* getpid */
 
 /* ---------- defaults & limits ---------- */
@@ -23,6 +25,43 @@ static const char *const DEFAULT_COLORS[] = {
 #define DEFAULT_EMOJI "\xf0\x9f\x8c\xb8" /* 🌸 */
 
 /* ---------- validation ---------- */
+
+/* random lowercase-hex id, n chars (buf holds n+1). /dev/urandom with
+ * a time+pid fallback — uniqueness, not secrecy, is the goal. */
+static void gen_hex_id(char *buf, size_t n)
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned char raw[16];
+    size_t nb = (n + 1) / 2;
+    int ok = 0;
+    if (nb <= sizeof raw) {
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (f) {
+            ok = fread(raw, 1, nb, f) == nb;
+            fclose(f);
+        }
+    }
+    if (!ok) {
+        unsigned seed = (unsigned)getpid() ^ (unsigned)time(NULL);
+        for (size_t i = 0; i < nb && i < sizeof raw; i++) {
+            seed = seed * 1103515245u + 12345u;
+            raw[i] = (unsigned char)(seed >> 16);
+        }
+    }
+    for (size_t i = 0; i < n; i++)
+        buf[i] = hex[(raw[i / 2] >> (i % 2 ? 0 : 4)) & 0xf];
+    buf[n] = '\0';
+}
+
+/* exactly PROJECT_ID_LEN lowercase hex chars */
+static int valid_id(const char *s)
+{
+    if (strlen(s) != PROJECT_ID_LEN) return 0;
+    for (size_t i = 0; i < PROJECT_ID_LEN; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+            return 0;
+    return 1;
+}
 
 /* #rrggbb */
 static int valid_color(const char *s)
@@ -99,6 +138,13 @@ static const char *dir_basename(const char *dir)
     return dir; /* no slash (or all slashes) -> the whole string */
 }
 
+static int id_used(const projects_t *p, size_t upto, const char *id)
+{
+    for (size_t i = 0; i < upto; i++)
+        if (strcmp(p->items[i].id, id) == 0) return 1;
+    return 0;
+}
+
 /* ---------- entry parsing (shared by load & PUT) ---------- */
 
 /* the free-text detail fields: json key + offset into project_t */
@@ -114,15 +160,36 @@ static const struct { const char *key; size_t off; } DETAIL_FIELDS[] = {
  * Parse one project object into *out. Strict mode (PUT) rejects any
  * problem into err_field/err_msg; lenient mode (load) repairs missing
  * or broken values with defaults and only fails on an unusable dir.
- * `index` selects the fallback palette color. Returns 0 on success.
+ * `index` selects the fallback palette color; `seen` is the list being
+ * built (ids are generated to avoid the ids already in it); *gen_id
+ * (nullable) reports that an id had to be generated. Returns 0 on
+ * success.
  */
 static int parse_entry(const cJSON *obj, size_t index, project_t *out,
-                       int strict,
+                       const projects_t *seen, int strict, int *gen_id,
                        char *err_field, size_t err_field_n,
                        char *err_msg, size_t err_msg_n)
 {
     memset(out, 0, sizeof *out);
+    if (gen_id) *gen_id = 0;
     const cJSON *j;
+
+    /* the id: optional on the wire (new projects), never rewritten
+     * once assigned. Strict rejects a malformed one; lenient (and a
+     * missing one) gets a fresh unique id. */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "id");
+    if (cJSON_IsString(j) && j->valuestring && valid_id(j->valuestring)) {
+        snprintf(out->id, sizeof out->id, "%s", j->valuestring);
+    } else if (j && strict) {
+        snprintf(err_field, err_field_n, "projects[%zu].id", index);
+        snprintf(err_msg, err_msg_n,
+                 "must be %d lowercase hex characters", PROJECT_ID_LEN);
+        return -1;
+    } else {
+        do gen_hex_id(out->id, PROJECT_ID_LEN);
+        while (seen && id_used(seen, seen->count, out->id));
+        if (gen_id) *gen_id = 1;
+    }
 
     j = cJSON_GetObjectItemCaseSensitive(obj, "dir");
     if (!cJSON_IsString(j) || !j->valuestring || !valid_dir(j->valuestring)) {
@@ -220,7 +287,8 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
 
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         cJSON_ArrayForEach(j, obj) {
-            int known = j->string && (strcmp(j->string, "dir") == 0 ||
+            int known = j->string && (strcmp(j->string, "id") == 0 ||
+                strcmp(j->string, "dir") == 0 ||
                 strcmp(j->string, "title") == 0 ||
                 strcmp(j->string, "color") == 0 ||
                 strcmp(j->string, "emoji") == 0);
@@ -289,18 +357,30 @@ int projects_load(projects_t *p)
         return 1; /* corrupt file -> empty list */
     }
 
-    /* lenient: keep the good entries, drop/repair the rest */
+    /* lenient: keep the good entries, drop/repair the rest. Ids are
+     * generated for entries without one (or with a duplicate) and the
+     * file is written back so they stay stable. */
+    int dirty = 0;
     const cJSON *child = NULL;
     cJSON_ArrayForEach(child, j) {
         if (p->count >= PROJECTS_MAX) break;
         project_t one;
+        int gen = 0;
         if (!cJSON_IsObject(child)) continue;
-        if (parse_entry(child, p->count, &one, 0, NULL, 0, NULL, 0) != 0)
+        if (parse_entry(child, p->count, &one, p, 0, &gen,
+                        NULL, 0, NULL, 0) != 0)
             continue;
         if (dir_used(p, p->count, one.dir)) continue;
+        if (id_used(p, p->count, one.id)) { /* duplicate in the file */
+            do gen_hex_id(one.id, PROJECT_ID_LEN);
+            while (id_used(p, p->count, one.id));
+            gen = 1;
+        }
+        if (gen) dirty = 1;
         p->items[p->count++] = one;
     }
     cJSON_Delete(j);
+    if (dirty) projects_save(p); /* persist generated ids immediately */
     return 0;
 }
 
@@ -318,6 +398,7 @@ int projects_save(const projects_t *p)
         for (size_t i = 0; i < p->count; i++) {
             cJSON *o = cJSON_CreateObject();
             if (!o ||
+                !cJSON_AddStringToObject(o, "id", p->items[i].id) ||
                 !cJSON_AddStringToObject(o, "dir", p->items[i].dir) ||
                 !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
                 !cJSON_AddStringToObject(o, "color", p->items[i].color) ||
@@ -391,7 +472,8 @@ projects_parse_result_t projects_from_json(const char *buf, size_t len,
             return PROJECTS_E_FIELD;
         }
         project_t one;
-        if (parse_entry(child, i, &one, 1, err_field, err_field_n,
+        if (parse_entry(child, i, &one, out, 1, NULL,
+                        err_field, err_field_n,
                         err_msg, err_msg_n) != 0) {
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
@@ -399,6 +481,12 @@ projects_parse_result_t projects_from_json(const char *buf, size_t len,
         if (dir_used(out, out->count, one.dir)) {
             snprintf(err_field, err_field_n, "projects[%zu].dir", i);
             snprintf(err_msg, err_msg_n, "duplicate directory");
+            cJSON_Delete(j);
+            return PROJECTS_E_FIELD;
+        }
+        if (id_used(out, out->count, one.id)) {
+            snprintf(err_field, err_field_n, "projects[%zu].id", i);
+            snprintf(err_msg, err_msg_n, "duplicate id");
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
         }
@@ -426,6 +514,7 @@ char *projects_to_json(const projects_t *p, int with_exists)
     for (size_t i = 0; i < p->count; i++) {
         cJSON *o = cJSON_CreateObject();
         if (!o ||
+            !cJSON_AddStringToObject(o, "id", p->items[i].id) ||
             !cJSON_AddStringToObject(o, "dir", p->items[i].dir) ||
             !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
             !cJSON_AddStringToObject(o, "color", p->items[i].color) ||

@@ -366,6 +366,7 @@ function updateBlockState() {
 function render() {
   renderRail();
   renderEditor();
+  renderConvPane();
   updateBlockState();
 }
 
@@ -436,6 +437,7 @@ async function saveNow() {
       const merged = { ...cur };
       for (const f of ALL_FIELDS)
         if (lp && sp[f] !== lp[f] && cur[f] === lp[f]) merged[f] = sp[f];
+      if (!merged.id && sp.id) merged.id = sp.id; // server-generated
       merged.exists = true; // saved == verified on disk
       return merged;
     });
@@ -665,13 +667,430 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowLeft") { e.preventDefault(); goTo(paneIndex() - 1); }
 });
 
+/* ---------- conversations (column two) ----------
+ *
+ * A conversation is bound to one agent (user-defined or builtin) and
+ * stored server-side under {config}/conversations/{ID}/ — the list is
+ * rendered from memory and PUT whole, like projects. The bottom half
+ * shows the details of the selected conversation: its id, the agent
+ * binding, and the llm pick (an override — "the agent's" inherits the
+ * agent's own llm; the builtins have none, so theirs must select one).
+ * The selected conversation is the scope for column three. */
+
+const convListEl = document.getElementById("conv-list");
+const convDetailsEl = document.getElementById("conv-details");
+const convCountEl = document.getElementById("conv-count");
+
+let conversations = []; // [{id, title, agent, llm, created, agent_ok?, llm_ok?}]
+let convSel = -1;       // index into conversations
+let convDraft = null;   // {agent, title, llm} while creating
+let agentsMeta = [];    // agents incl. builtins, for the selects
+let llmsMeta = [];      // configured llms, for the selects
+let convSaveTimer = 0;
+let convSaveSeq = 0;
+
+const convDisplayTitle = (c) => (c.title || "").trim() || "Untitled conversation";
+
+function findAgentMeta(name) {
+  return agentsMeta.find(
+    (a) => (a.name || "").toLowerCase() === (name || "").toLowerCase());
+}
+
+/* the conversation's llm: its override, else the bound agent's */
+function convEffectiveLlm(c) {
+  if (c.llm) return c.llm;
+  const a = findAgentMeta(c.agent);
+  return a ? a.llm || "" : "";
+}
+
+function convFlagged(c) {
+  return c.agent_ok === false || c.llm_ok === false;
+}
+
+function setConvStatus(text, kind) {
+  const s = document.getElementById("conv-status");
+  if (!s) return;
+  s.textContent = text;
+  s.className = kind === "ok" ? "cfg-ok" : kind === "warn" ? "cfg-warn" : "muted";
+}
+
+function showConvError(name, msg) {
+  const err = document.getElementById(`err-${name}`);
+  const input = convDetailsEl.querySelector(`[data-f="${name}"]`);
+  if (err) err.textContent = msg || "";
+  if (input) input.classList.toggle("invalid", !!msg);
+}
+
+async function refreshConvMeta() {
+  try {
+    const [ar, lr] = await Promise.all([fetch("api/agents"), fetch("api/llms")]);
+    if (ar.ok) agentsMeta = await ar.json();
+    if (lr.ok) llmsMeta = await lr.json();
+  } catch (_) { /* selects stay with what they had */ }
+}
+
+async function loadConversations() {
+  try {
+    const r = await fetch("api/conversations");
+    if (r.ok) conversations = await r.json();
+  } catch (_) { /* stay with the empty list */ }
+}
+
+/* ---------- rendering ---------- */
+
+function selectField(label, name, options, value) {
+  const sel = el("select", { id: `f-${name}`, "data-f": name });
+  for (const [v, text] of options) {
+    const o = el("option", { value: v, text });
+    if (v === (value ?? "")) o.selected = true;
+    sel.appendChild(o);
+  }
+  return el("div", { class: "field" },
+    el("label", { for: `f-${name}`, text: label }),
+    sel,
+    el("span", { class: "field-error", id: `err-${name}` }));
+}
+
+function kvRow(label, value, opts = {}) {
+  return el("div", { class: "conv-kv" + (opts.warn ? " conv-warn" : "") },
+    el("label", { text: label }),
+    el(opts.mono ? "code" : "p", {
+      class: opts.mono ? "mono" : "",
+      style: "margin:0", text: value,
+    }));
+}
+
+function agentOptions() {
+  const opts = [];
+  for (const b of agentsMeta.filter((a) => a.builtin))
+    opts.push([b.name, `${b.name} — builtin`]);
+  for (const a of agentsMeta.filter((a) => !a.builtin))
+    opts.push([a.name, a.name]);
+  if (!opts.length) opts.push(["", "— no agents configured —"]);
+  return opts;
+}
+
+function llmOptions(forBuiltin) {
+  const opts = [];
+  if (!forBuiltin) opts.push(["", "the agent's llm"]);
+  for (const l of llmsMeta) opts.push([l.name, l.name]);
+  if (!opts.length) opts.push(["", "— no llms configured —"]);
+  return opts;
+}
+
+function renderConvList() {
+  convListEl.textContent = "";
+  conversations.forEach((c, i) => {
+    const a = findAgentMeta(c.agent);
+    const sub = `${c.agent}${a && a.builtin ? " · builtin" : ""}` +
+                ` · ${convEffectiveLlm(c) || "no llm"}`;
+    convListEl.append(el("button", {
+      type: "button",
+      class: "conv-row" + (i === convSel ? " active" : "") +
+             (convFlagged(c) ? " missing" : ""),
+      "data-idx": i,
+      title: convDisplayTitle(c),
+    },
+      el("span", { class: "name", text: convDisplayTitle(c) }),
+      el("span", { class: "sub", text: sub })));
+  });
+  if (!conversations.length)
+    convListEl.append(el("p", {
+      class: "conv-none muted",
+      text: convDraft ? "Creating the first one…" : "No conversations yet.",
+    }));
+  const n = conversations.length;
+  convCountEl.textContent = n ? `${n} conversation${n === 1 ? "" : "s"}` : "";
+}
+
+function renderConvDraft() {
+  const a = convDraft.agent ? findAgentMeta(convDraft.agent) : null;
+  const title = field("Title", "conv-title", {
+    placeholder: "optional, shown in the list",
+  });
+  title.querySelector("input").value = convDraft.title;
+  convDetailsEl.append(
+    el("h3", { class: "conv-h3", text: "New conversation" }),
+    selectField("Agent", "conv-agent", agentOptions(), convDraft.agent),
+    title,
+    selectField("LLM", "conv-llm", llmOptions(a && !a.llm), convDraft.llm),
+    el("p", { id: "conv-status", class: "muted", role: "status" }),
+    el("div", { class: "conv-actions" },
+      el("button", {
+        class: "btn btn-accent", type: "button",
+        "data-action": "conv-create", text: "Create conversation",
+      }),
+      el("button", {
+        class: "btn btn-ghost", type: "button",
+        "data-action": "conv-cancel", text: "Cancel",
+      })));
+}
+
+function renderConvDetails() {
+  convDetailsEl.textContent = "";
+  if (convDraft) {
+    renderConvDraft();
+    convDraftValid(); // show required-field hints right away
+    return;
+  }
+  const c = conversations[convSel];
+  if (!c) {
+    convDetailsEl.append(el("div", { class: "conv-empty" },
+      el("p", {
+        class: "placeholder-title",
+        text: conversations.length ? "No conversation selected" : "Nothing open",
+      }),
+      el("p", {
+        class: "placeholder-text",
+        text: conversations.length
+          ? "Pick one from the list above — it becomes the scope for column three."
+          : "Create one with the New conversation button above.",
+      })));
+    return;
+  }
+
+  const a = findAgentMeta(c.agent);
+  const eff = convEffectiveLlm(c);
+  const title = field("Title", "conv-title", { placeholder: "shown in the list" });
+  title.querySelector("input").value = c.title;
+  convDetailsEl.append(
+    el("h3", { class: "conv-h3", text: convDisplayTitle(c) }),
+    kvRow("ID", c.id, { mono: true }),
+    kvRow("Agent", c.agent + (a && a.builtin ? " — builtin" : ""),
+          { warn: c.agent_ok === false }),
+    kvRow("Created", new Date(c.created * 1000).toLocaleString()),
+    title,
+    selectField("LLM", "conv-llm", llmOptions(a && !a.llm), c.llm));
+  if (c.agent_ok === false)
+    setConvStatus(`unknown agent “${c.agent}” — it was deleted or renamed`, "warn");
+  else if (c.llm_ok === false)
+    setConvStatus(`the llm “${eff || "…"}” is not configured anymore`, "warn");
+  else {
+    const s = el("p", { id: "conv-status", class: "muted", role: "status" });
+    convDetailsEl.append(s);
+  }
+}
+
+function renderConvPane() {
+  renderConvList();
+  renderConvDetails();
+}
+
+/* ---------- validation (mirrors src/conversations.c) ---------- */
+
+function convDraftValid() {
+  const errs = {};
+  if (!convDraft.agent) errs["conv-agent"] = "pick an agent";
+  else {
+    const a = findAgentMeta(convDraft.agent);
+    if (!a) errs["conv-agent"] = "unknown agent";
+    else if (!convDraft.llm && !a.llm)
+      errs["conv-llm"] = `agent “${a.name}” has no llm of its own — select one`;
+  }
+  const titleErr = bytes(convDraft.title || "") <= 95 && noControls(convDraft.title || "")
+    ? "" : "too long (95 bytes at most)";
+  if (titleErr) errs["conv-title"] = titleErr;
+  for (const name of ["conv-agent", "conv-title", "conv-llm"])
+    showConvError(name, errs[name] || "");
+  return !Object.keys(errs).length;
+}
+
+/* ---------- server sync ---------- */
+
+const convWire = (c) => ({
+  id: c.id, title: c.title, agent: c.agent, llm: c.llm, created: c.created,
+});
+
+function scheduleConvSave() {
+  clearTimeout(convSaveTimer);
+  setConvStatus("editing…");
+  convSaveTimer = setTimeout(saveConversations, SAVE_DELAY);
+}
+
+async function putConversations(list, seq) {
+  const r = await fetch("api/conversations", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(list),
+  });
+  if (seq !== convSaveSeq) return null; // a newer change is already saving
+  if (!r.ok) {
+    let msg = `save failed (${r.status})`;
+    try {
+      const e = await r.json();
+      msg = e.error + (e.field ? ` — ${e.field}` : "");
+    } catch (_) {}
+    setConvStatus(msg, "warn");
+    return null;
+  }
+  return r.json();
+}
+
+async function saveConversations() {
+  clearTimeout(convSaveTimer);
+  if (convDraft) return;
+  const sent = conversations.map(convWire);
+  const seq = ++convSaveSeq;
+  setConvStatus("saving…");
+  const saved = await putConversations(sent, seq).catch(() => null);
+  if (!saved) {
+    if (seq === convSaveSeq) setConvStatus("network error — changes stay on this screen", "warn");
+    return;
+  }
+  conversations = saved.map((sc) => {
+    const s = sent.find((x) => x.id === sc.id);
+    const cur = conversations.find((x) => x.id === sc.id) || sc;
+    const merged = { ...cur };
+    for (const f of ["title", "llm"])
+      if (s && sc[f] !== s[f] && cur[f] === s[f]) merged[f] = sc[f];
+    return merged;
+  });
+  renderConvPane();
+  setConvStatus("saved ✓", "ok");
+}
+
+/* ---------- selection & creation ---------- */
+
+function selectConversation(i) {
+  convDraft = null;
+  convSel = i;
+  const c = conversations[i];
+  if (c) localStorage.setItem("flower.conversation", c.id);
+  else localStorage.removeItem("flower.conversation");
+  renderConvPane();
+  refreshConvFlags(); // flags go stale; re-check when one takes focus
+}
+
+/* re-fetch the reference flags without disturbing local edits */
+async function refreshConvFlags() {
+  if (convDraft) return;
+  try {
+    const r = await fetch("api/conversations");
+    if (!r.ok) return;
+    const fresh = await r.json();
+    let changed = false;
+    for (const c of conversations) {
+      const f = fresh.find((x) => x.id === c.id);
+      const ao = f ? f.agent_ok !== false : true;
+      const lo = f ? f.llm_ok !== false : true;
+      if (c.agent_ok !== ao || c.llm_ok !== lo) {
+        c.agent_ok = ao;
+        c.llm_ok = lo;
+        changed = true;
+      }
+    }
+    const typing = document.activeElement && convDetailsEl.contains(document.activeElement);
+    if (changed && !typing) renderConvPane();
+  } catch (_) {}
+}
+
+async function startConvDraft() {
+  await refreshConvMeta();
+  convDraft = { agent: "", title: "", llm: "" };
+  renderConvPane();
+  const agent = convDetailsEl.querySelector('[data-f="conv-agent"]');
+  if (agent) agent.focus();
+}
+
+/* Creating goes through its own PUT: the server generates the id and
+ * the directory, and a rejection leaves the draft in place. */
+async function createConversation() {
+  if (!convDraft || !convDraftValid()) return;
+  const oldIds = new Set(conversations.map((c) => c.id));
+  const next = [...conversations.map(convWire), {
+    agent: convDraft.agent,
+    title: convDraft.title.trim(),
+    llm: convDraft.llm,
+  }];
+  const seq = ++convSaveSeq;
+  setConvStatus("saving…");
+  const saved = await putConversations(next, seq).catch(() => null);
+  if (!saved) {
+    if (seq === convSaveSeq) setConvStatus("network error — the conversation was not created", "warn");
+    return;
+  }
+  conversations = saved;
+  const created = conversations.find((c) => !oldIds.has(c.id)) ||
+                  conversations[0];
+  convDraft = null;
+  convSel = created ? conversations.indexOf(created) : -1;
+  if (created) localStorage.setItem("flower.conversation", created.id);
+  renderConvPane();
+  setConvStatus("saved ✓", "ok");
+}
+
+convListEl.addEventListener("click", (e) => {
+  const row = e.target.closest(".conv-row[data-idx]");
+  if (row) selectConversation(Number(row.dataset.idx));
+});
+
+document.getElementById("new-conversation").addEventListener("click", startConvDraft);
+
+convDetailsEl.addEventListener("input", (e) => {
+  const name = e.target.dataset.f;
+  if (!name || name !== "conv-title") return;
+  if (convDraft) {
+    convDraft.title = e.target.value;
+    convDraftValid();
+    return;
+  }
+  const c = conversations[convSel];
+  if (!c) return;
+  c.title = e.target.value;
+  showConvError("conv-title",
+    bytes(c.title) <= 95 && noControls(c.title)
+      ? "" : "too long (95 bytes at most)");
+  scheduleConvSave();
+});
+
+convDetailsEl.addEventListener("change", (e) => {
+  const name = e.target.dataset.f;
+  if (!name) return;
+  if (convDraft) {
+    if (name === "conv-agent") {
+      convDraft.agent = e.target.value;
+      convDraft.llm = ""; // the llm list depends on the agent
+      renderConvPane();
+      const sel = convDetailsEl.querySelector('[data-f="conv-agent"]');
+      if (sel) sel.focus();
+      convDraftValid();
+    } else if (name === "conv-llm") {
+      convDraft.llm = e.target.value;
+      convDraftValid();
+    }
+    return;
+  }
+  const c = conversations[convSel];
+  if (!c) return;
+  if (name === "conv-llm") {
+    c.llm = e.target.value;
+    renderConvList();
+    scheduleConvSave();
+  }
+});
+
+convDetailsEl.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const act = btn.dataset.action;
+  if (act === "conv-create") createConversation();
+  else if (act === "conv-cancel") {
+    convDraft = null;
+    renderConvPane();
+  }
+});
+
 /* ---------- boot ---------- */
 
 (async () => {
   await loadProjects();
+  await Promise.all([loadConversations(), refreshConvMeta()]);
   const remembered = localStorage.getItem("flower.selected");
   const i = projects.findIndex((p) => p.dir === remembered);
   selected = i >= 0 ? i : projects.length ? 0 : -1;
+  const wantedConv = localStorage.getItem("flower.conversation");
+  const ci = conversations.findIndex((c) => c.id === wantedConv);
+  convSel = ci >= 0 ? ci : conversations.length ? 0 : -1;
   render();
 
   const pane = Number(localStorage.getItem("flower.pane") || "0") || 0;

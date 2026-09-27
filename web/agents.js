@@ -325,7 +325,8 @@ function llmsDirty() { return JSON.stringify(llms) !== llmsSnapshot; }
  * ============================================================ */
 
 const agentsUI = document.getElementById("agents-ui");
-let agents = [];       // [{name, llm, inference_options, system_prompt, tools}]
+let agents = [];       // user agents: [{name, llm, inference_options, system_prompt, tools}]
+let builtins = [];     // builtin agents (read-only): [{name, llm:"", system_prompt, builtin:true}]
 let agentSel = -1;
 let agentsSnapshot = "";
 
@@ -390,6 +391,9 @@ function validateAgent(a, all) {
   if (!errs.name &&
       all.some((o) => o !== a && o.name.toLowerCase() === a.name.toLowerCase()))
     errs.name = "another agent already uses this name";
+  if (!errs.name &&
+      builtins.some((b) => b.name.toLowerCase() === a.name.toLowerCase()))
+    errs.name = "a builtin agent already uses this name";
   if (!a.llm) errs.llm = "pick the llm this agent talks to";
   else if (!llms.some((l) => l.name.toLowerCase() === a.llm.toLowerCase()))
     errs.llm = `unknown llm “${a.llm}” — add or save it in the llm section first`;
@@ -558,6 +562,16 @@ function renderAgents() {
     },
       el("span", { class: "name", text: a.name || "(unnamed)" }),
       el("span", { class: "sub", text: sub })));
+  });
+  // the builtins: shipped with flower, selectable in conversations,
+  // never editable here
+  builtins.forEach((b) => {
+    list.append(el("button", {
+      type: "button", class: "entity-row builtin", disabled: "",
+      title: "builtin agent — shipped with flower, not editable",
+    },
+      el("span", { class: "name", text: b.name }),
+      el("span", { class: "sub", text: "builtin · llm picked per conversation" })));
   });
 
   const editor = el("div", { class: "entity-editor card" });
@@ -880,7 +894,11 @@ document.addEventListener("click", async (e) => {
   try {
     const [lr, ar] = await Promise.all([fetch("api/llms"), fetch("api/agents")]);
     if (lr.ok) llms = (await lr.json()).map(llmFromWire);
-    if (ar.ok) agents = (await ar.json()).map(agentFromWire);
+    if (ar.ok) {
+      const all = await ar.json();
+      agents = all.filter((a) => !a.builtin).map(agentFromWire);
+      builtins = all.filter((a) => a.builtin);
+    }
   } catch (_) { /* editors still work; saves will fail loudly */ }
   llmsSnapshot = JSON.stringify(llms);
   agentsSnapshot = JSON.stringify(agents);

@@ -47,21 +47,24 @@ test("config: llm endpoint and agent — create, reference, persist", async ({ p
   await expect(page.locator("#agent-status")).toContainText("saved");
 
   const agents = await (await request.get("/api/agents")).json();
-  expect(agents).toHaveLength(1);
-  expect(agents[0]).toMatchObject({
+  const user = agents.filter((a) => !a.builtin);
+  expect(user).toHaveLength(1); // the builtin assistant is listed too
+  expect(agents.some((a) => a.builtin)).toBeTruthy();
+  expect(user[0]).toMatchObject({
     name: "gardener",
     llm: "ollama",
     system_prompt: "You tend flowers.",
     llm_ok: true,
   });
-  expect(agents[0].inference_options).toMatchObject({ temperature: 0.7, max_tokens: 2048 });
-  expect(agents[0].tools[0]).toMatchObject({ type: "stdio", name: "fs", required: true });
+  expect(user[0].inference_options).toMatchObject({ temperature: 0.7, max_tokens: 2048 });
+  expect(user[0].tools[0]).toMatchObject({ type: "stdio", name: "fs", required: true });
 
   // everything persists across a reload
   await page.reload();
   await expect(page.locator('#llms-ui .entity-row .name')).toHaveText("ollama");
-  await expect(page.locator('#agents-ui .entity-row .name')).toHaveText("gardener");
-  await expect(page.locator('#agents-ui .entity-row .sub')).toContainText("1 mcp server");
+  await expect(page.locator('#agents-ui .entity-row:not(.builtin) .name')).toHaveText("gardener");
+  await expect(page.locator('#agents-ui .entity-row:not(.builtin) .sub')).toContainText("1 mcp server");
+  await expect(page.locator('#agents-ui .entity-row.builtin .name')).toHaveText("assistant");
   await expect(page.locator('#agents-ui [data-b="system_prompt"]')).toHaveValue("You tend flowers.");
 });
 

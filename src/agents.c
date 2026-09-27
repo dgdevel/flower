@@ -933,6 +933,52 @@ void agents_free(agents_t *a)
     a->count = 0;
 }
 
+/* ---------- builtin agents ---------- */
+
+/* Compiled in, shipped with flower, never written to agents/. The llm
+ * reference is "" by design: conversations bound to a builtin select
+ * their llm themselves (the conversation's llm field). */
+static const agent_t BUILTIN_AGENTS[] = {
+    {
+        .name = "assistant",
+        .llm = "",
+        .system_prompt =
+            "You are a helpful assistant. Answer clearly and concisely.",
+    },
+};
+#define BUILTIN_N (sizeof BUILTIN_AGENTS / sizeof BUILTIN_AGENTS[0])
+
+const agent_t *agents_builtin(size_t i)
+{
+    return i < BUILTIN_N ? &BUILTIN_AGENTS[i] : NULL;
+}
+
+size_t agents_builtin_count(void)
+{
+    return BUILTIN_N;
+}
+
+int agents_builtin_find(const char *name)
+{
+    if (!name) return -1;
+    for (size_t i = 0; i < BUILTIN_N; i++)
+        if (strcasecmp(BUILTIN_AGENTS[i].name, name) == 0) return (int)i;
+    return -1;
+}
+
+static int is_builtin(const agent_t *a)
+{
+    return a >= BUILTIN_AGENTS && a < BUILTIN_AGENTS + BUILTIN_N;
+}
+
+int agents_find(const agents_t *a, const char *name)
+{
+    if (!name) return -1;
+    for (size_t i = 0; i < a->count; i++)
+        if (strcasecmp(a->items[i]->name, name) == 0) return (int)i;
+    return -1;
+}
+
 static const char *agents_dir(char *buf, size_t n)
 {
     snprintf(buf, n, "%s/agents", theme_dir());
@@ -1147,6 +1193,15 @@ agents_parse_result_t agents_from_json(const char *buf, size_t len,
                 cJSON_Delete(j);
                 return AGENTS_E_FIELD;
             }
+        if (agents_builtin_find(one->name) >= 0) {
+            snprintf(err_field, err_field_n, "agents[%zu].name", i);
+            snprintf(err_msg, err_msg_n,
+                     "a builtin agent already uses this name");
+            free(one);
+            agents_free(out);
+            cJSON_Delete(j);
+            return AGENTS_E_FIELD;
+        }
         out->items[out->count++] = one;
         i++;
     }
@@ -1305,16 +1360,30 @@ fail:
     return NULL;
 }
 
-char *agents_to_json(const agents_t *a, const llms_t *llms)
+char *agents_to_json(const agents_t *a, const llms_t *llms, int with_builtins)
 {
+    /* user agents (and the builtins when asked), sorted by name */
+    const agent_t *all[AGENTS_MAX + BUILTIN_N];
+    size_t n = 0;
+    for (size_t i = 0; i < a->count; i++) all[n++] = a->items[i];
+    if (with_builtins)
+        for (size_t i = 0; i < BUILTIN_N; i++) all[n++] = &BUILTIN_AGENTS[i];
+    qsort(all, n, sizeof all[0], agent_name_cmp);
+
     cJSON *j = cJSON_CreateArray();
     if (!j) return NULL;
-    for (size_t i = 0; i < a->count; i++) {
-        cJSON *o = agent_to_cjson(a->items[i]);
+    for (size_t i = 0; i < n; i++) {
+        cJSON *o = agent_to_cjson(all[i]);
         if (!o) { cJSON_Delete(j); return NULL; }
-        if (llms &&
+        if (is_builtin(all[i])) {
+            if (!cJSON_AddBoolToObject(o, "builtin", 1)) {
+                cJSON_Delete(o);
+                cJSON_Delete(j);
+                return NULL;
+            }
+        } else if (llms &&
             !cJSON_AddBoolToObject(o, "llm_ok",
-                                   llms_find(llms, a->items[i]->llm) >= 0)) {
+                                   llms_find(llms, all[i]->llm) >= 0)) {
             cJSON_Delete(o);
             cJSON_Delete(j);
             return NULL;

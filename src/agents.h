@@ -177,8 +177,26 @@ agents_parse_result_t agents_from_json(const char *buf, size_t len,
                                        char *err_msg, size_t err_msg_n);
 
 /* Serialize as a compact sorted JSON array. With `llms` non-NULL every
- * agent carries a live "llm_ok":true/false reference flag (used by GET,
- * like the projects "exists" flag); NULL omits it (PUT echo). */
-char *agents_to_json(const agents_t *a, const llms_t *llms);
+ * user agent carries a live "llm_ok":true/false reference flag (used by
+ * GET, like the projects "exists" flag); NULL omits it (PUT echo).
+ * with_builtins merges the builtin agents in, sorted by name, flagged
+ * "builtin":true and never carrying llm_ok (their llm is chosen per
+ * conversation) — GET uses 1, the PUT echo 0 so a client can re-PUT
+ * exactly what it received. */
+char *agents_to_json(const agents_t *a, const llms_t *llms,
+                     int with_builtins);
+
+/* ---------- builtin agents ---------- */
+
+/* Compiled-in agents shipped with flower: listed and selectable like
+ * user agents but not editable — they carry no llm reference of their
+ * own (llm is ""), so a conversation bound to one must select an llm.
+ * User agents may not take a builtin's name (case-insensitive). */
+const agent_t *agents_builtin(size_t i); /* i < agents_builtin_count() */
+size_t agents_builtin_count(void);
+int agents_builtin_find(const char *name); /* index, or -1 */
+
+/* Case-insensitive lookup across user agents only: index, or -1. */
+int agents_find(const agents_t *a, const char *name);
 
 #endif

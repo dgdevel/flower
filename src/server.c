@@ -13,6 +13,7 @@
 #include "theme.h"
 #include "projects.h"
 #include "agents.h"
+#include "conversations.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -61,6 +62,7 @@ typedef struct {
     projects_t projects;         /* current project list (replaced via API) */
     llms_t llms;                 /* named llm endpoints (replaced via API) */
     agents_t agents;             /* current agent list (replaced via API) */
+    conversations_t conversations; /* the store behind /api/conversations */
 } server_t;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -394,7 +396,48 @@ static void handle_agents_put(server_t *s, conn_t *c, http_request_t *req,
     agents_free(&s->agents);
     s->agents = na;
     *status = 200;
-    char *j = agents_to_json(&na, NULL); /* PUT echo: refs just validated */
+    char *j = agents_to_json(&na, NULL, 0); /* PUT echo: refs just validated */
+    if (j) {
+        respond_json(s, c, 200, j, req->keep_alive);
+        free(j);
+    } else {
+        respond_json(s, c, 200, "[]", req->keep_alive);
+    }
+}
+
+static void handle_conversations_put(server_t *s, conn_t *c,
+                                     http_request_t *req,
+                                     const char *body, size_t body_len,
+                                     int *status)
+{
+    conversations_t nc;
+    char efield[96], emsg[160];
+    convs_parse_result_t pr = conversations_from_json(
+        body, body_len, &s->llms, &s->agents, &nc,
+        efield, sizeof efield, emsg, sizeof emsg);
+    if (pr != CONVS_OK) {
+        *status = (pr == CONVS_E_JSON) ? 400 : 422;
+        char *eb = theme_error_json(emsg, efield);
+        if (eb) {
+            respond_json(s, c, *status, eb, req->keep_alive);
+            free(eb);
+        } else {
+            respond_json(s, c, *status,
+                         "{\"error\":\"invalid conversation list\"}",
+                         req->keep_alive);
+        }
+        return;
+    }
+    if (conversations_save(&nc) != 0) {
+        *status = 500;
+        respond_json(s, c, 500,
+                     "{\"error\":\"cannot write conversations/ in config dir\"}",
+                     req->keep_alive);
+        return;
+    }
+    s->conversations = nc;
+    *status = 200;
+    char *j = conversations_to_json(&nc, 0, NULL, NULL); /* echo: validated */
     if (j) {
         respond_json(s, c, 200, j, req->keep_alive);
         free(j);
@@ -463,7 +506,19 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                              req->keep_alive);
             }
         } else if (strcmp(path, "/api/agents") == 0) {
-            char *j = agents_to_json(&s->agents, &s->llms);
+            char *j = agents_to_json(&s->agents, &s->llms, 1);
+            if (j) {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            } else {
+                status = 500;
+                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                             req->keep_alive);
+            }
+        } else if (strcmp(path, "/api/conversations") == 0) {
+            char *j = conversations_to_json(&s->conversations, 1,
+                                            &s->llms, &s->agents);
             if (j) {
                 respond(s, c, 200, "application/json", j, strlen(j),
                         req->keep_alive, head, NULL);
@@ -509,10 +564,13 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         handle_llms_put(s, c, req, body, body_len, &status);
     } else if (put && strcmp(path, "/api/agents") == 0) {
         handle_agents_put(s, c, req, body, body_len, &status);
+    } else if (put && strcmp(path, "/api/conversations") == 0) {
+        handle_conversations_put(s, c, req, body, body_len, &status);
     } else if (strcmp(path, "/api/theme") == 0 ||
                strcmp(path, "/api/projects") == 0 ||
                strcmp(path, "/api/llms") == 0 ||
-               strcmp(path, "/api/agents") == 0) {
+               strcmp(path, "/api/agents") == 0 ||
+               strcmp(path, "/api/conversations") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false,
@@ -737,11 +795,14 @@ int server_run(const char *bind_addr, uint16_t port)
     projects_load(&s.projects);
     llms_load(&s.llms);
     agents_load(&s.agents);
-    logmsg("config: %s (%s, %d project%s, %d llm%s, %d agent%s)", theme_dir(),
+    conversations_load(&s.conversations);
+    logmsg("config: %s (%s, %d project%s, %d llm%s, %d agent%s, "
+           "%d conversation%s)", theme_dir(),
            tl == 0 ? "theme.json loaded" : "using default theme",
            (int)s.projects.count, s.projects.count == 1 ? "" : "s",
            (int)s.llms.count, s.llms.count == 1 ? "" : "s",
-           (int)s.agents.count, s.agents.count == 1 ? "" : "s");
+           (int)s.agents.count, s.agents.count == 1 ? "" : "s",
+           (int)s.conversations.count, s.conversations.count == 1 ? "" : "s");
 
     long long next_tick = now_ms() / 1000 * 1000 + 1000;
 
