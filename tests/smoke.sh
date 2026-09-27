@@ -195,7 +195,7 @@ import json, sys
 d = json.load(sys.stdin)
 assert [a["name"] for a in d] == ["assistant"], d      # only the builtin so far
 assert d[0]["builtin"] is True and d[0]["llm"] == "", d
-assert "llm_ok" not in d[0], d    # builtins pick their llm per conversation
+assert "llm_ok" not in d[0], d    # builtins pick their llm per task
 ' || fail "GET /api/agents should start with only the builtin agents"
 curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
@@ -230,13 +230,13 @@ curl -s -X PUT --data '[{"name":"thinker","llm":"anthropic","inference_options":
 [ ! -f "$CFG/agents/gardener.json" ] || fail "removing an agent must delete its file"
 ls "$CFG/agents" | grep -qx 'thinker.json' || fail "the kept agent's file must stay"
 
-echo "== 6e. conversations API =="
-curl -s "$B/api/conversations" | grep -q '^\[\]$' || fail "GET /api/conversations should start as []"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant"}]' "$B/api/conversations")
-[ "$code" = 422 ] || fail "conversations: builtin agent without an llm: expected 422, got $code"
+echo "== 6e. tasks API =="
+curl -s "$B/api/tasks" | grep -q '^\[\]$' || fail "GET /api/tasks should start as []"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant"}]' "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: builtin agent without an llm: expected 422, got $code"
 CID=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"agent":"assistant","llm":"ollama","title":"first chat","created":1000},
- {"agent":"thinker","created":2000}]' "$B/api/conversations" | python3 -c '
+ {"agent":"thinker","created":2000}]' "$B/api/tasks" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert len(d) == 2, d
@@ -245,27 +245,27 @@ for c in d:
 assert d[0]["agent"] == "thinker" and d[0]["created"] == 2000, d  # newest first
 assert d[1]["llm"] == "ollama", d
 print(d[1]["id"])')
-[ -f "$CFG/conversations/$CID/conversation.json" ] || fail "conversations/$CID/conversation.json not written"
-grep -q '"assistant"' "$CFG/conversations/$CID/conversation.json" || fail "conversation details not persisted"
-curl -s "$B/api/conversations" | python3 -c '
+[ -f "$CFG/tasks/$CID/task.json" ] || fail "tasks/$CID/task.json not written"
+grep -q '"assistant"' "$CFG/tasks/$CID/task.json" || fail "task details not persisted"
+curl -s "$B/api/tasks" | python3 -c '
 import json, sys
 d = {c["agent"]: c for c in json.load(sys.stdin)}
 assert d["assistant"]["llm_ok"] is True and d["assistant"]["agent_ok"] is True, d
 assert d["thinker"]["llm"] == "" and d["thinker"]["llm_ok"] is True, d  # inherits
-' || fail "GET /api/conversations should report live reference flags"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/conversations")
-[ "$code" = 400 ] || fail "conversations: malformed JSON: expected 400, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"nope","llm":"ollama"}]' "$B/api/conversations")
-[ "$code" = 422 ] || fail "conversations: unknown agent: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"nope"}]' "$B/api/conversations")
-[ "$code" = 422 ] || fail "conversations: unknown llm: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"ollama","id":"short"}]' "$B/api/conversations")
-[ "$code" = 422 ] || fail "conversations: malformed id: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"ollama","extra":1}]' "$B/api/conversations")
-[ "$code" = 422 ] || fail "conversations: unknown key: expected 422, got $code"
-curl -s "$B/api/conversations" | grep -q '"first chat"' || fail "rejected PUTs must not change stored conversations"
-curl -s -X PUT --data '[]' "$B/api/conversations" | grep -q '^\[\]$' || fail "PUT [] did not clear the conversations"
-[ -z "$(ls -A "$CFG/conversations" 2>/dev/null)" ] || fail "removed conversations must delete their directories"
+' || fail "GET /api/tasks should report live reference flags"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/tasks")
+[ "$code" = 400 ] || fail "tasks: malformed JSON: expected 400, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"nope","llm":"ollama"}]' "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: unknown agent: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"nope"}]' "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: unknown llm: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"ollama","id":"short"}]' "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: malformed id: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"ollama","extra":1}]' "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: unknown key: expected 422, got $code"
+curl -s "$B/api/tasks" | grep -q '"first chat"' || fail "rejected PUTs must not change stored tasks"
+curl -s -X PUT --data '[]' "$B/api/tasks" | grep -q '^\[\]$' || fail "PUT [] did not clear the tasks"
+[ -z "$(ls -A "$CFG/tasks" 2>/dev/null)" ] || fail "removed tasks must delete their directories"
 
 echo "== 7. SSE still streams =="
 curl -sN --max-time 3 "$B/api/time" | grep -m1 -q '^data: {"unix"' || fail "no SSE event within 3s"

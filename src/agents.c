@@ -936,8 +936,8 @@ void agents_free(agents_t *a)
 /* ---------- builtin agents ---------- */
 
 /* Compiled in, shipped with flower, never written to agents/. The llm
- * reference is "" by design: conversations bound to a builtin select
- * their llm themselves (the conversation's llm field). */
+ * reference is "" by design: tasks bound to a builtin select
+ * their llm themselves (the task's llm field). */
 static const agent_t BUILTIN_AGENTS[] = {
     {
         .name = "assistant",

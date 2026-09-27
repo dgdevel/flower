@@ -10,7 +10,7 @@ const WORK = "/tmp/flower-e2e";
 async function resetProjects(request: APIRequestContext) {
   const r = await request.put("/api/projects", { data: [] });
   expect(r.ok()).toBeTruthy();
-  const c = await request.put("/api/conversations", { data: [] });
+  const c = await request.put("/api/tasks", { data: [] });
   expect(c.ok()).toBeTruthy();
 }
 
@@ -33,8 +33,8 @@ test("desktop: three columns side by side, placeholders visible", async ({ page,
   expect(b!.x).toBeGreaterThan(a!.x);
   expect(c!.x).toBeGreaterThan(b!.x);
 
-  await expect(panes.nth(1)).toContainText("Conversations");
-  await expect(panes.nth(1)).toContainText("No conversations yet");
+  await expect(panes.nth(1)).toContainText("Taskersations");
+  await expect(panes.nth(1)).toContainText("No tasks yet");
   await expect(panes.nth(2)).toContainText("Nothing here yet");
   await expect(panes.nth(0)).toContainText("Projects");
 });
@@ -115,9 +115,9 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   await expect(page.locator("#editor")).toContainText("No projects yet");
 });
 
-test("conversations: create with a builtin agent, details below, column three reserved", async ({ page, request }) => {
+test("tasks: create with a builtin agent, details below, column three reserved", async ({ page, request }) => {
   await resetProjects(request);
-  await request.put("/api/conversations", { data: [] });
+  await request.put("/api/tasks", { data: [] });
   await request.put("/api/llms", { data: [{
     name: "loco", endpoint_protocol: "openai",
     api_base: "http://localhost:11434/v1", model: "llama3.1",
@@ -125,46 +125,46 @@ test("conversations: create with a builtin agent, details below, column three re
   await page.goto("/");
 
   const pane2 = page.locator('.pane[data-pane="1"]');
-  await expect(pane2.locator("h2")).toHaveText("Conversations");
-  await expect(pane2).toContainText("No conversations yet");
+  await expect(pane2.locator("h2")).toHaveText("Taskersations");
+  await expect(pane2).toContainText("No tasks yet");
 
   // the top button opens the creation form; the builtin agent carries
   // no llm of its own, so one must be picked
-  await pane2.locator("#new-conversation").click();
-  await pane2.locator('[data-action="conv-create"]').click(); // nothing picked yet
-  await expect(pane2.locator("#err-conv-agent")).toContainText("pick an agent");
+  await pane2.locator("#new-task").click();
+  await pane2.locator('[data-action="task-create"]').click(); // nothing picked yet
+  await expect(pane2.locator("#err-task-agent")).toContainText("pick an agent");
 
-  await pane2.locator('[data-f="conv-agent"]').selectOption({ label: "assistant — builtin" });
-  await pane2.locator('[data-action="conv-create"]').click();
-  await expect(pane2.locator("#err-conv-llm")).toContainText("no llm of its own");
+  await pane2.locator('[data-f="task-agent"]').selectOption({ label: "assistant — builtin" });
+  await pane2.locator('[data-action="task-create"]').click();
+  await expect(pane2.locator("#err-task-llm")).toContainText("no llm of its own");
 
-  await pane2.locator('[data-f="conv-llm"]').selectOption("loco");
-  await pane2.locator('[data-f="conv-title"]').fill("Bee talk");
-  await pane2.locator('[data-action="conv-create"]').click();
+  await pane2.locator('[data-f="task-llm"]').selectOption("loco");
+  await pane2.locator('[data-f="task-title"]').fill("Bee talk");
+  await pane2.locator('[data-action="task-create"]').click();
 
   // the list shows it, the details below carry the server-made id
-  const row = pane2.locator(".conv-row").first();
+  const row = pane2.locator(".task-row").first();
   await expect(row).toContainText("Bee talk");
   await expect(row).toContainText("assistant · builtin · loco");
-  await expect(pane2.locator("#conv-count")).toHaveText("1 conversation");
-  await expect(pane2.locator(".conv-details code")).toHaveText(/^[0-9a-f]{32}$/);
-  await expect(pane2.locator(".conv-details")).toContainText("assistant — builtin");
-  await expect(pane2.locator('[data-f="conv-llm"]')).toHaveValue("loco");
-  await expect(pane2.locator("#conv-status")).toContainText("saved ✓");
+  await expect(pane2.locator("#task-count")).toHaveText("1 task");
+  await expect(pane2.locator(".task-details code")).toHaveText(/^[0-9a-f]{32}$/);
+  await expect(pane2.locator(".task-details")).toContainText("assistant — builtin");
+  await expect(pane2.locator('[data-f="task-llm"]')).toHaveValue("loco");
+  await expect(pane2.locator("#task-status")).toContainText("saved ✓");
 
-  // persisted server-side (one directory under conversations/) and
+  // persisted server-side (one directory under tasks/) and
   // selected again after a reload
-  const convs = await (await request.get("/api/conversations")).json();
-  expect(convs).toHaveLength(1);
-  expect(convs[0].agent).toBe("assistant");
-  expect(convs[0].llm).toBe("loco");
+  const tasks = await (await request.get("/api/tasks")).json();
+  expect(tasks).toHaveLength(1);
+  expect(tasks[0].agent).toBe("assistant");
+  expect(tasks[0].llm).toBe("loco");
 
   await page.reload();
   const pane2b = page.locator('.pane[data-pane="1"]');
-  await expect(pane2b.locator(".conv-row").first()).toContainText("Bee talk");
-  await expect(pane2b.locator(".conv-row")).toHaveClass(/active/);
-  await expect(pane2b.locator(".conv-details code"))
-    .toHaveText(convs[0].id);
+  await expect(pane2b.locator(".task-row").first()).toContainText("Bee talk");
+  await expect(pane2b.locator(".task-row")).toHaveClass(/active/);
+  await expect(pane2b.locator(".task-details code"))
+    .toHaveText(tasks[0].id);
 
   // the llm pick is editable and autosaves (the select knows the llms
   // that existed when the page loaded)
@@ -174,13 +174,13 @@ test("conversations: create with a builtin agent, details below, column three re
   ] });
   await page.reload();
   const pane2c = page.locator('.pane[data-pane="1"]');
-  await pane2c.locator(".conv-row").first().click();
-  await pane2c.locator('[data-f="conv-llm"]').selectOption("elsewhere");
+  await pane2c.locator(".task-row").first().click();
+  await pane2c.locator('[data-f="task-llm"]').selectOption("elsewhere");
   await expect
-    .poll(async () => (await (await request.get("/api/conversations")).json())[0].llm)
+    .poll(async () => (await (await request.get("/api/tasks")).json())[0].llm)
     .toBe("elsewhere");
 
-  // column three stays reserved for the conversation itself
+  // column three stays reserved for the task itself
   await expect(page.locator('.pane[data-pane="2"]')).toContainText("Nothing here yet");
 });
 
@@ -263,7 +263,7 @@ test("vanished directory: warning, blocked columns, refuses to save, recovers", 
   await expect(page.locator("#editor-status")).toContainText("saved ✓", { timeout: 5_000 });
   await expect(page.locator("#editor-warn")).toBeHidden();
   await expect(page.locator('.pane[data-pane="1"]')).not.toHaveClass(/blocked/);
-  await expect(page.locator("#new-conversation")).toBeVisible();
+  await expect(page.locator("#new-task")).toBeVisible();
   rmSync(`${WORK}/gone`, { recursive: true });
 });
 
@@ -274,7 +274,7 @@ test("mobile: swipe and dots move between the three columns", async ({ page, req
 
   const deck = page.locator("#deck");
   const pane2 = page.locator(".pane").nth(1);
-  await expect(pane2).toContainText("No conversations yet");
+  await expect(pane2).toContainText("No tasks yet");
   expect((await pane2.boundingBox())!.x).toBeGreaterThanOrEqual(390); // off-screen
 
   // swipe left -> column two

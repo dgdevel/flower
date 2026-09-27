@@ -1,9 +1,9 @@
-/* conversations — conversation store backend, mirroring the
+/* tasks — task store backend, mirroring the
  * projects.c/agents.c pattern: lenient load, strict save, atomic
- * tmp+rename writes, one directory per conversation. */
+ * tmp+rename writes, one directory per task. */
 #define _POSIX_C_SOURCE 200809L
 
-#include "conversations.h"
+#include "tasks.h"
 #include "agents.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
 
@@ -19,9 +19,9 @@
 
 /* ---------- helpers ---------- */
 
-static const char *convs_dir(char *buf, size_t n)
+static const char *tasks_dir(char *buf, size_t n)
 {
-    snprintf(buf, n, "%s/conversations", theme_dir());
+    snprintf(buf, n, "%s/tasks", theme_dir());
     return buf;
 }
 
@@ -54,8 +54,8 @@ static void gen_hex_id(char *buf, size_t n)
 
 static int valid_id(const char *s)
 {
-    if (strlen(s) != CONV_ID_LEN) return 0;
-    for (size_t i = 0; i < CONV_ID_LEN; i++)
+    if (strlen(s) != TASK_ID_LEN) return 0;
+    for (size_t i = 0; i < TASK_ID_LEN; i++)
         if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
             return 0;
     return 1;
@@ -106,9 +106,9 @@ static const agent_t *find_agent(const agents_t *agents, const char *name)
     return i >= 0 ? agents_builtin((size_t)i) : NULL;
 }
 
-/* the conversation's effective llm: its own override, else the bound
+/* the task's effective llm: its own override, else the bound
  * agent's; "" when neither has one */
-static void effective_llm(const conv_t *c, const agents_t *agents,
+static void effective_llm(const task_t *c, const agents_t *agents,
                           char *out, size_t out_n)
 {
     if (c->llm[0]) {
@@ -119,7 +119,7 @@ static void effective_llm(const conv_t *c, const agents_t *agents,
     snprintf(out, out_n, "%s", a ? a->llm : "");
 }
 
-static int id_used(const conversations_t *c, size_t upto, const char *id)
+static int id_used(const tasks_t *c, size_t upto, const char *id)
 {
     for (size_t i = 0; i < upto; i++)
         if (strcmp(c->items[i].id, id) == 0) return 1;
@@ -132,9 +132,9 @@ static int strptr_cmp(const void *a, const void *b)
 }
 
 /* newest first, id as the tiebreaker for a stable order */
-static int conv_cmp(const void *pa, const void *pb)
+static int task_cmp(const void *pa, const void *pb)
 {
-    const conv_t *a = pa, *b = pb;
+    const task_t *a = pa, *b = pb;
     if (a->created != b->created) return a->created < b->created ? 1 : -1;
     return strcmp(a->id, b->id);
 }
@@ -142,14 +142,14 @@ static int conv_cmp(const void *pa, const void *pb)
 /* ---------- entry parsing (shared by load & PUT) ---------- */
 
 /*
- * Parse one conversation object into *out. Strict mode (PUT) rejects
+ * Parse one task object into *out. Strict mode (PUT) rejects
  * any problem into err_field/err_msg; lenient mode (load) repairs
  * what it can and skips nothing short of an unusable agent name.
  * `seen` is the list being built (ids are generated to avoid the ids
  * already in it). Returns 0 on success.
  */
-static int parse_conv(const cJSON *obj, size_t index, conv_t *out,
-                      const conversations_t *seen,
+static int parse_task(const cJSON *obj, size_t index, task_t *out,
+                      const tasks_t *seen,
                       const llms_t *llms, const agents_t *agents,
                       int strict,
                       char *err_field, size_t err_field_n,
@@ -158,9 +158,9 @@ static int parse_conv(const cJSON *obj, size_t index, conv_t *out,
     memset(out, 0, sizeof *out);
     char prefix[48];
     const cJSON *j;
-    snprintf(prefix, sizeof prefix, "conversations[%zu]", index);
+    snprintf(prefix, sizeof prefix, "tasks[%zu]", index);
 
-    /* the id: optional on the wire (new conversations), never
+    /* the id: optional on the wire (new tasks), never
      * rewritten once assigned */
     j = cJSON_GetObjectItemCaseSensitive(obj, "id");
     if (cJSON_IsString(j) && j->valuestring && valid_id(j->valuestring)) {
@@ -168,10 +168,10 @@ static int parse_conv(const cJSON *obj, size_t index, conv_t *out,
     } else if (j && strict) {
         snprintf(err_field, err_field_n, "%s.id", prefix);
         snprintf(err_msg, err_msg_n,
-                 "must be %d lowercase hex characters", CONV_ID_LEN);
+                 "must be %d lowercase hex characters", TASK_ID_LEN);
         return -1;
     } else {
-        do gen_hex_id(out->id, CONV_ID_LEN);
+        do gen_hex_id(out->id, TASK_ID_LEN);
         while (seen && id_used(seen, seen->count, out->id));
     }
 
@@ -213,7 +213,7 @@ static int parse_conv(const cJSON *obj, size_t index, conv_t *out,
         return -1;
     }
 
-    /* a conversation must resolve to some llm: the builtin agents
+    /* a task must resolve to some llm: the builtin agents
      * carry none of their own, so theirs select one explicitly */
     if (strict) {
         char eff[CFG_NAME_MAX];
@@ -235,7 +235,7 @@ static int parse_conv(const cJSON *obj, size_t index, conv_t *out,
     } else if (j && strict) {
         snprintf(err_field, err_field_n, "%s.title", prefix);
         snprintf(err_msg, err_msg_n, "text, max %d bytes, no control characters",
-                 CONV_TITLE_MAX - 1);
+                 TASK_TITLE_MAX - 1);
         return -1;
     }
 
@@ -293,14 +293,14 @@ static char *read_file(const char *path, long cap)
     return buf;
 }
 
-int conversations_load(conversations_t *c)
+int tasks_load(tasks_t *c)
 {
     memset(c, 0, sizeof *c);
     char dir[4352];
-    convs_dir(dir, sizeof dir);
+    tasks_dir(dir, sizeof dir);
 
     DIR *d = opendir(dir);
-    if (!d) return 1; /* no conversations yet */
+    if (!d) return 1; /* no tasks yet */
 
     /* collect candidate directory names, sorted for a stable order */
     enum { MAX_ENTRIES = 1024 };
@@ -316,21 +316,21 @@ int conversations_load(conversations_t *c)
     closedir(d);
     qsort(names, nn, sizeof names[0], strptr_cmp);
 
-    for (size_t i = 0; i < nn && c->count < CONVERSATIONS_MAX; i++) {
-        char name[CONV_ID_LEN + 1];
+    for (size_t i = 0; i < nn && c->count < TASKS_MAX; i++) {
+        char name[TASK_ID_LEN + 1];
         snprintf(name, sizeof name, "%s", names[i]);
         free(names[i]);
         char path[4352 + 64];
-        snprintf(path, sizeof path, "%s/%s/conversation.json", dir, name);
+        snprintf(path, sizeof path, "%s/%s/task.json", dir, name);
         char *buf = read_file(path, 1024 * 1024);
         if (!buf) continue; /* directory without details: not listed */
         cJSON *j = cJSON_Parse(buf);
         free(buf);
         if (!j || !cJSON_IsObject(j)) { cJSON_Delete(j); continue; }
-        conv_t one;
+        task_t one;
         /* lenient: no llms/agents context here — dangling references
          * are kept and flagged by GET, like a vanished project dir */
-        if (parse_conv(j, c->count, &one, c, NULL, NULL, 0,
+        if (parse_task(j, c->count, &one, c, NULL, NULL, 0,
                        NULL, 0, NULL, 0) != 0) {
             cJSON_Delete(j);
             continue;
@@ -341,12 +341,12 @@ int conversations_load(conversations_t *c)
         if (id_used(c, c->count, one.id)) continue;
         c->items[c->count++] = one;
     }
-    qsort(c->items, c->count, sizeof c->items[0], conv_cmp);
+    qsort(c->items, c->count, sizeof c->items[0], task_cmp);
     return 0;
 }
 
-/* delete a directory tree (a conversation's); only ever called on
- * paths inside conversations/ whose name is a valid id */
+/* delete a directory tree (a task's); only ever called on
+ * paths inside tasks/ whose name is a valid id */
 static void rm_rf(const char *path)
 {
     DIR *d = opendir(path);
@@ -365,29 +365,29 @@ static void rm_rf(const char *path)
     rmdir(path);
 }
 
-int conversations_save(const conversations_t *c)
+int tasks_save(const tasks_t *c)
 {
     char dir[4352];
-    convs_dir(dir, sizeof dir);
-    mkdir(dir, 0700); /* first conversation creates the store */
+    tasks_dir(dir, sizeof dir);
+    mkdir(dir, 0700); /* first task creates the store */
 
     for (size_t i = 0; i < c->count; i++) {
-        const conv_t *cv = &c->items[i];
+        const task_t *tk = &c->items[i];
         char cdir[4352 + 64], path[4352 + 96], tmp[4352 + 160];
-        snprintf(cdir, sizeof cdir, "%s/%s", dir, cv->id);
-        snprintf(path, sizeof path, "%s/conversation.json", cdir);
+        snprintf(cdir, sizeof cdir, "%s/%s", dir, tk->id);
+        snprintf(path, sizeof path, "%s/task.json", cdir);
         snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
-        mkdir(cdir, 0700); /* exists for already-saved conversations */
+        mkdir(cdir, 0700); /* exists for already-saved tasks */
 
         FILE *f = fopen(tmp, "w");
         if (!f) return -1;
         cJSON *o = cJSON_CreateObject();
         cJSON *ok = o;
-        if (ok) ok = cJSON_AddStringToObject(o, "id", cv->id);
-        if (ok) ok = cJSON_AddStringToObject(o, "title", cv->title);
-        if (ok) ok = cJSON_AddStringToObject(o, "agent", cv->agent);
-        if (ok) ok = cJSON_AddStringToObject(o, "llm", cv->llm);
-        if (ok) ok = cJSON_AddNumberToObject(o, "created", (double)cv->created);
+        if (ok) ok = cJSON_AddStringToObject(o, "id", tk->id);
+        if (ok) ok = cJSON_AddStringToObject(o, "title", tk->title);
+        if (ok) ok = cJSON_AddStringToObject(o, "agent", tk->agent);
+        if (ok) ok = cJSON_AddStringToObject(o, "llm", tk->llm);
+        if (ok) ok = cJSON_AddNumberToObject(o, "created", (double)tk->created);
         char *out = ok ? cJSON_Print(o) : NULL; /* pretty-printed */
         cJSON_Delete(o);
 
@@ -404,7 +404,7 @@ int conversations_save(const conversations_t *c)
         }
     }
 
-    /* delete the directories of removed conversations */
+    /* delete the directories of removed tasks */
     DIR *d = opendir(dir);
     if (!d) return 0;
     const struct dirent *e;
@@ -424,10 +424,10 @@ int conversations_save(const conversations_t *c)
 
 /* ---------- JSON in (strict) / out ---------- */
 
-convs_parse_result_t conversations_from_json(const char *buf, size_t len,
+tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
                                              const llms_t *llms,
                                              const agents_t *agents,
-                                             conversations_t *out,
+                                             tasks_t *out,
                                              char *err_field,
                                              size_t err_field_n,
                                              char *err_msg, size_t err_msg_n)
@@ -439,7 +439,7 @@ convs_parse_result_t conversations_from_json(const char *buf, size_t len,
     char *copy = malloc(len + 1);
     if (!copy) {
         snprintf(err_msg, err_msg_n, "out of memory");
-        return CONVS_E_JSON;
+        return TASKS_E_JSON;
     }
     memcpy(copy, buf, len);
     copy[len] = '\0';
@@ -448,67 +448,67 @@ convs_parse_result_t conversations_from_json(const char *buf, size_t len,
     free(copy);
     if (!j || !cJSON_IsArray(j)) {
         cJSON_Delete(j);
-        snprintf(err_msg, err_msg_n, "expected a JSON array of conversations");
-        return CONVS_E_JSON;
+        snprintf(err_msg, err_msg_n, "expected a JSON array of tasks");
+        return TASKS_E_JSON;
     }
 
     int n = cJSON_GetArraySize(j);
-    if (n > CONVERSATIONS_MAX) {
+    if (n > TASKS_MAX) {
         cJSON_Delete(j);
-        snprintf(err_msg, err_msg_n, "too many conversations (max %d)",
-                 CONVERSATIONS_MAX);
-        return CONVS_E_FIELD;
+        snprintf(err_msg, err_msg_n, "too many tasks (max %d)",
+                 TASKS_MAX);
+        return TASKS_E_FIELD;
     }
 
     size_t i = 0;
     const cJSON *child = NULL;
     cJSON_ArrayForEach(child, j) {
         if (!cJSON_IsObject(child)) {
-            snprintf(err_field, err_field_n, "conversations[%zu]", i);
+            snprintf(err_field, err_field_n, "tasks[%zu]", i);
             snprintf(err_msg, err_msg_n, "must be an object");
             cJSON_Delete(j);
-            return CONVS_E_FIELD;
+            return TASKS_E_FIELD;
         }
-        conv_t one;
-        if (parse_conv(child, i, &one, out, llms, agents, 1,
+        task_t one;
+        if (parse_task(child, i, &one, out, llms, agents, 1,
                        err_field, err_field_n, err_msg, err_msg_n) != 0) {
             cJSON_Delete(j);
-            return CONVS_E_FIELD;
+            return TASKS_E_FIELD;
         }
         if (id_used(out, out->count, one.id)) {
-            snprintf(err_field, err_field_n, "conversations[%zu].id", i);
+            snprintf(err_field, err_field_n, "tasks[%zu].id", i);
             snprintf(err_msg, err_msg_n, "duplicate id");
             cJSON_Delete(j);
-            return CONVS_E_FIELD;
+            return TASKS_E_FIELD;
         }
         out->items[out->count++] = one;
         i++;
     }
 
     cJSON_Delete(j);
-    qsort(out->items, out->count, sizeof out->items[0], conv_cmp);
-    return CONVS_OK;
+    qsort(out->items, out->count, sizeof out->items[0], task_cmp);
+    return TASKS_OK;
 }
 
-char *conversations_to_json(const conversations_t *c, int with_flags,
+char *tasks_to_json(const tasks_t *c, int with_flags,
                             const llms_t *llms, const agents_t *agents)
 {
     cJSON *j = cJSON_CreateArray();
     if (!j) return NULL;
     for (size_t i = 0; i < c->count; i++) {
-        const conv_t *cv = &c->items[i];
+        const task_t *tk = &c->items[i];
         cJSON *o = cJSON_CreateObject();
         int ok = o &&
-            cJSON_AddStringToObject(o, "id", cv->id) &&
-            cJSON_AddStringToObject(o, "title", cv->title) &&
-            cJSON_AddStringToObject(o, "agent", cv->agent) &&
-            cJSON_AddStringToObject(o, "llm", cv->llm) &&
-            cJSON_AddNumberToObject(o, "created", (double)cv->created);
+            cJSON_AddStringToObject(o, "id", tk->id) &&
+            cJSON_AddStringToObject(o, "title", tk->title) &&
+            cJSON_AddStringToObject(o, "agent", tk->agent) &&
+            cJSON_AddStringToObject(o, "llm", tk->llm) &&
+            cJSON_AddNumberToObject(o, "created", (double)tk->created);
         if (ok && with_flags) {
             char eff[CFG_NAME_MAX];
-            effective_llm(cv, agents, eff, sizeof eff);
+            effective_llm(tk, agents, eff, sizeof eff);
             ok = cJSON_AddBoolToObject(o, "agent_ok",
-                                       agents && find_agent(agents, cv->agent)) &&
+                                       agents && find_agent(agents, tk->agent)) &&
                  cJSON_AddBoolToObject(
                      o, "llm_ok",
                      eff[0] && llms && llms_find(llms, eff) >= 0);

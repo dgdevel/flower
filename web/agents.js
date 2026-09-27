@@ -563,7 +563,7 @@ function renderAgents() {
       el("span", { class: "name", text: a.name || "(unnamed)" }),
       el("span", { class: "sub", text: sub })));
   });
-  // the builtins: shipped with flower, selectable in conversations,
+  // the builtins: shipped with flower, selectable in tasks,
   // never editable here
   builtins.forEach((b) => {
     list.append(el("button", {
@@ -571,7 +571,7 @@ function renderAgents() {
       title: "builtin agent — shipped with flower, not editable",
     },
       el("span", { class: "name", text: b.name }),
-      el("span", { class: "sub", text: "builtin · llm picked per conversation" })));
+      el("span", { class: "sub", text: "builtin · llm picked per task" })));
   });
 
   const editor = el("div", { class: "entity-editor card" });
