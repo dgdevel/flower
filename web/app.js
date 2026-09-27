@@ -17,6 +17,15 @@ const DEFAULT_COLORS = [
 ];
 const DEFAULT_EMOJIS = ["🌸", "🐝", "🌿", "🪴", "🌻", "🍄", "🌊", "🌙"];
 const FIELDS = ["dir", "title", "color", "emoji"];
+// project details: free-text textareas in column one (name, label, hint)
+const DETAILS = [
+  ["description", "Description", "What this project is about"],
+  ["objectives", "Output/Objectives", "What it should deliver"],
+  ["scope", "Scope/Constraints/Resources", "What's in, what's out, what's available"],
+  ["stakeholders", "Stakeholders", "Who is involved or affected"],
+];
+const ALL_FIELDS = [...FIELDS, ...DETAILS.map(([name]) => name)];
+const DETAIL_MAX = 4095; // bytes, mirrors PROJECT_TEXT_MAX-1 in src/projects.c
 const SAVE_DELAY = 500; // ms of quiet before a PUT
 
 const railEl = document.getElementById("rail");
@@ -39,6 +48,9 @@ let picker = null;   // open emoji picker element
 
 const bytes = (s) => new TextEncoder().encode(s).length;
 const noControls = (s) => !/[\x00-\x1f\x7f]/.test(s);
+// detail textareas are multi-line: newline and tab are fine (server-side
+// valid_text(..., multiline) in src/projects.c agrees)
+const noControlsMulti = (s) => !/[\x00-\x08\x0b-\x1f\x7f]/.test(s);
 
 // mirrors the server-side rules in src/projects.c
 const validators = {
@@ -49,6 +61,10 @@ const validators = {
   color: (v) => /^#[0-9a-fA-F]{6}$/.test(v) || "must be #rrggbb",
   emoji: (v) => (v.length > 0 && bytes(v) <= 31 && noControls(v)) || "pick one emoji",
 };
+for (const [name] of DETAILS)
+  validators[name] = (v) =>
+    (bytes(v || "") <= DETAIL_MAX && noControlsMulti(v || "")) ||
+    `too long (${DETAIL_MAX} bytes at most)`;
 
 const basename = (dir) => {
   const parts = dir.split("/").filter(Boolean);
@@ -114,6 +130,17 @@ function emojiField() {
       "aria-haspopup": "dialog", title: "Pick an emoji",
     }),
     el("span", { class: "field-error", id: "err-emoji" }));
+}
+
+/* a free-text details field: multi-line textarea */
+function detailField(name, label, hint) {
+  const ta = el("textarea", {
+    id: `f-${name}`, "data-f": name, rows: "3", placeholder: hint,
+  });
+  return el("div", { class: "field" },
+    el("label", { for: `f-${name}`, text: label }),
+    ta,
+    el("span", { class: "field-error", id: `err-${name}` }));
 }
 
 function openPicker(anchor) {
@@ -209,6 +236,14 @@ function editorForm(creating) {
     el("div", { class: "field-row" },
       field("Color", "color", { type: "color" }),
       emojiField()));
+
+  const details = el("section",
+    { class: "editor-details", "aria-label": "Project details" },
+    el("h3", { text: "Project details" }));
+  for (const [name, label, hint] of DETAILS)
+    details.append(detailField(name, label, hint));
+  frag.append(details);
+
   frag.append(el("p", { id: "editor-status", class: "muted", role: "status" }));
 
   const actions = el("div", { class: "editor-actions" });
@@ -253,13 +288,14 @@ function renderEditor() {
 function syncEditorFields() {
   const t = draft || projects[selected];
   if (!t) return;
-  for (const name of FIELDS) {
+  for (const name of ALL_FIELDS) {
     const control = editorEl.querySelector(`[data-f="${name}"]`);
     if (!control || document.activeElement === control) continue;
+    const v = t[name] ?? "";
     if (name === "emoji") {
-      if (control.textContent !== t[name]) control.textContent = t[name];
-    } else if (control.value !== t[name]) {
-      control.value = t[name];
+      if (control.textContent !== v) control.textContent = v;
+    } else if (control.value !== v) {
+      control.value = v;
     }
   }
   updateEditorHead();
@@ -293,8 +329,8 @@ function editorValid() {
   const t = draft || projects[selected];
   if (!t) return true;
   let ok = true;
-  for (const name of FIELDS) {
-    let msg = validators[name](t[name]);
+  for (const name of ALL_FIELDS) {
+    let msg = validators[name](t[name] ?? "");
     if (msg === true) msg = "";
     if (!msg && name === "dir") {
       const others = draft ? projects : projects.filter((_, i) => i !== selected);
@@ -398,7 +434,7 @@ async function saveNow() {
       const lp = sent[i];
       const cur = projects[i] || sp;
       const merged = { ...cur };
-      for (const f of FIELDS)
+      for (const f of ALL_FIELDS)
         if (lp && sp[f] !== lp[f] && cur[f] === lp[f]) merged[f] = sp[f];
       merged.exists = true; // saved == verified on disk
       return merged;
@@ -448,7 +484,8 @@ async function refreshExists() {
     }
     const typing = document.activeElement &&
                    editorEl.contains(document.activeElement) &&
-                   document.activeElement.tagName === "INPUT";
+                   ["INPUT", "TEXTAREA"].includes(
+                     document.activeElement.tagName);
     if (changed && !typing) render();
   } catch (_) {}
 }
@@ -460,6 +497,10 @@ function startDraft() {
     title: "",
     color: DEFAULT_COLORS[i % DEFAULT_COLORS.length],
     emoji: DEFAULT_EMOJIS[i % DEFAULT_EMOJIS.length],
+    description: "",
+    objectives: "",
+    scope: "",
+    stakeholders: "",
   };
   renderEditor();
   const dir = editorEl.querySelector('[data-f="dir"]');

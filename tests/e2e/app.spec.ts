@@ -80,11 +80,26 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   await expect(page.locator(".emoji-picker")).toHaveCount(0); // closed on pick
   await expect(page.locator("#editor-status")).toContainText("saved");
 
+  // project details: free-text notes below the identity fields
+  const details = page.locator(".editor-details");
+  await expect(details.locator("h3")).toHaveText("Project details");
+  await page.fill('[data-f="description"]', "A home for bees\nand their honey.");
+  await page.fill('[data-f="stakeholders"]', "the queen");
+  await expect
+    .poll(async () => {
+      const [p] = await (await request.get("/api/projects")).json();
+      return p?.description ?? "";
+    })
+    .toBe("A home for bees\nand their honey.");
+
   // everything persisted
   await page.reload();
   const chipAfter = page.locator(".chip[data-idx='0']");
   await expect(chipAfter).toHaveAttribute("aria-label", "Beekeeping");
   await expect(chipAfter).toHaveText("🐝");
+  await expect(page.locator('[data-f="description"]'))
+    .toHaveValue("A home for bees\nand their honey.");
+  await expect(page.locator('[data-f="stakeholders"]')).toHaveValue("the queen");
 
   // delete asks twice
   await page.click('[data-action="delete"]');

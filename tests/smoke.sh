@@ -92,6 +92,32 @@ assert all("exists" not in p for p in d), d   # exists only on GET
 ' || fail "PUT /api/projects did not apply the defaults"
 [ -f "$CFG/projects.json" ] || fail "projects.json not written to config dir"
 curl -s "$B/api/projects" | grep -q "$CFG/alpha" || fail "projects not persisted after PUT"
+
+echo "== 6a. project details: round-trip and validation =="
+curl -s -X PUT -H "Content-Type: application/json" --data-binary "
+ [{\"dir\":\"$CFG/alpha\",\"title\":\"Alpha\",
+   \"description\":\"two lines\nof context\",\"objectives\":\"ship it\",
+   \"scope\":\"2 weeks\",\"stakeholders\":\"the bees\"}]" "$B/api/projects" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d[0]["description"] == "two lines\nof context", d   # newlines allowed
+assert d[0]["objectives"] == "ship it", d
+assert d[0]["scope"] == "2 weeks", d
+assert d[0]["stakeholders"] == "the bees", d
+' || fail "PUT /api/projects did not keep the detail fields"
+grep -q '"description"' "$CFG/projects.json" || fail "detail fields not persisted to projects.json"
+curl -s "$B/api/projects" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)[0]
+assert p["description"] == "two lines\nof context", p   # survives GET (exists flag on)
+' || fail "GET /api/projects lost the detail fields"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"description\":\"$(printf 'x%.0s' $(seq 1 4200))\"}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: oversized description: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"description\":\"bad\\u0001ctrl\"}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: control character in a detail field: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"scope\":5}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: non-string detail field: expected 422, got $code"
+curl -s "$B/api/projects" | grep -q '"the bees"' || fail "rejected PUTs must not change stored details"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/projects")
 [ "$code" = 400 ] || fail "projects: malformed JSON: expected 400, got $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '{"dir":"/x"}' "$B/api/projects")

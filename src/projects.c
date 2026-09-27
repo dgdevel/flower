@@ -38,8 +38,10 @@ static int valid_color(const char *s)
 }
 
 /* Valid UTF-8 with no control characters (C0, DEL); n is the byte
- * length. Keeps emoji/titles/path names safe to store and re-emit. */
-static int valid_text(const char *s, size_t n)
+ * length. Keeps emoji/titles/path names safe to store and re-emit.
+ * multiline additionally allows \n and \t (the free-text detail
+ * fields are multi-line by nature). */
+static int valid_text(const char *s, size_t n, int multiline)
 {
     size_t i = 0;
     while (i < n) {
@@ -47,7 +49,13 @@ static int valid_text(const char *s, size_t n)
         unsigned cp;
         int need;
         if (c < 0x80) {
-            if (c < 0x20 || c == 0x7f) return 0;
+            if (c < 0x20 || c == 0x7f) {
+                if (multiline && (c == '\n' || c == '\t')) {
+                    i++;
+                    continue;
+                }
+                return 0;
+            }
             i++;
             continue;
         } else if ((c & 0xe0) == 0xc0) {
@@ -78,7 +86,7 @@ static int valid_text(const char *s, size_t n)
 static int valid_dir(const char *s)
 {
     size_t n = strlen(s);
-    return n >= 1 && n < PROJECT_DIR_MAX && s[0] == '/' && valid_text(s, n);
+    return n >= 1 && n < PROJECT_DIR_MAX && s[0] == '/' && valid_text(s, n, 0);
 }
 
 /* "last component" of a directory path, for the default title */
@@ -92,6 +100,15 @@ static const char *dir_basename(const char *dir)
 }
 
 /* ---------- entry parsing (shared by load & PUT) ---------- */
+
+/* the free-text detail fields: json key + offset into project_t */
+static const struct { const char *key; size_t off; } DETAIL_FIELDS[] = {
+    { "description",  offsetof(project_t, description) },
+    { "objectives",   offsetof(project_t, objectives) },
+    { "scope",        offsetof(project_t, scope) },
+    { "stakeholders", offsetof(project_t, stakeholders) },
+};
+#define DETAIL_N (sizeof DETAIL_FIELDS / sizeof DETAIL_FIELDS[0])
 
 /*
  * Parse one project object into *out. Strict mode (PUT) rejects any
@@ -139,7 +156,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     j = cJSON_GetObjectItemCaseSensitive(obj, "title");
     if (cJSON_IsString(j) && j->valuestring) {
         size_t n = strlen(j->valuestring);
-        if (n >= sizeof out->title || !valid_text(j->valuestring, n)) {
+        if (n >= sizeof out->title || !valid_text(j->valuestring, n, 0)) {
             if (strict) {
                 snprintf(err_field, err_field_n, "projects[%zu].title", index);
                 snprintf(err_msg, err_msg_n, "text, max %d bytes, no control characters",
@@ -169,7 +186,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     j = cJSON_GetObjectItemCaseSensitive(obj, "emoji");
     if (cJSON_IsString(j) && j->valuestring && j->valuestring[0] &&
         strlen(j->valuestring) < sizeof out->emoji &&
-        valid_text(j->valuestring, strlen(j->valuestring))) {
+        valid_text(j->valuestring, strlen(j->valuestring), 0)) {
         snprintf(out->emoji, sizeof out->emoji, "%s", j->valuestring);
     } else if (j && strict) {
         snprintf(err_field, err_field_n, "projects[%zu].emoji", index);
@@ -180,14 +197,38 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
         snprintf(out->emoji, sizeof out->emoji, "%s", DEFAULT_EMOJI);
     }
 
+    /* free-text detail fields: optional, multi-line, capped. Strict
+     * (PUT) rejects bad ones; lenient (load) keeps them empty. */
+    for (size_t k = 0; k < DETAIL_N; k++) {
+        j = cJSON_GetObjectItemCaseSensitive(obj, DETAIL_FIELDS[k].key);
+        if (!j) continue; /* missing -> stays empty */
+        const char *sv = cJSON_IsString(j) ? j->valuestring : NULL;
+        size_t n = sv ? strlen(sv) : 0;
+        if (!sv || n >= PROJECT_TEXT_MAX || !valid_text(sv, n, 1)) {
+            if (strict) {
+                snprintf(err_field, err_field_n, "projects[%zu].%s", index,
+                         DETAIL_FIELDS[k].key);
+                snprintf(err_msg, err_msg_n,
+                         "text, max %d bytes, no control characters "
+                         "except newlines", PROJECT_TEXT_MAX - 1);
+                return -1;
+            }
+            continue;
+        }
+        memcpy((char *)out + DETAIL_FIELDS[k].off, sv, n + 1);
+    }
+
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         cJSON_ArrayForEach(j, obj) {
-            if (j->string && strcmp(j->string, "dir") != 0 &&
-                strcmp(j->string, "title") != 0 &&
-                strcmp(j->string, "color") != 0 &&
-                strcmp(j->string, "emoji") != 0) {
+            int known = j->string && (strcmp(j->string, "dir") == 0 ||
+                strcmp(j->string, "title") == 0 ||
+                strcmp(j->string, "color") == 0 ||
+                strcmp(j->string, "emoji") == 0);
+            for (size_t k = 0; !known && k < DETAIL_N; k++)
+                if (strcmp(j->string, DETAIL_FIELDS[k].key) == 0) known = 1;
+            if (!known) {
                 snprintf(err_field, err_field_n, "projects[%zu].%s", index,
-                         j->string);
+                         j->string ? j->string : "");
                 snprintf(err_msg, err_msg_n, "unknown setting");
                 return -1;
             }
@@ -200,6 +241,16 @@ static int dir_used(const projects_t *p, size_t upto, const char *dir)
 {
     for (size_t i = 0; i < upto; i++)
         if (strcmp(p->items[i].dir, dir) == 0) return 1;
+    return 0;
+}
+
+/* add the detail fields of one project to json object o; 0 on success */
+static int add_details(cJSON *o, const project_t *p)
+{
+    for (size_t k = 0; k < DETAIL_N; k++)
+        if (!cJSON_AddStringToObject(o, DETAIL_FIELDS[k].key,
+                                     (const char *)p + DETAIL_FIELDS[k].off))
+            return -1;
     return 0;
 }
 
@@ -270,7 +321,8 @@ int projects_save(const projects_t *p)
                 !cJSON_AddStringToObject(o, "dir", p->items[i].dir) ||
                 !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
                 !cJSON_AddStringToObject(o, "color", p->items[i].color) ||
-                !cJSON_AddStringToObject(o, "emoji", p->items[i].emoji)) {
+                !cJSON_AddStringToObject(o, "emoji", p->items[i].emoji) ||
+                add_details(o, &p->items[i]) != 0) {
                 cJSON_Delete(o);
                 cJSON_Delete(j);
                 j = NULL;
@@ -378,6 +430,7 @@ char *projects_to_json(const projects_t *p, int with_exists)
             !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
             !cJSON_AddStringToObject(o, "color", p->items[i].color) ||
             !cJSON_AddStringToObject(o, "emoji", p->items[i].emoji) ||
+            add_details(o, &p->items[i]) != 0 ||
             (with_exists &&
              !cJSON_AddBoolToObject(o, "exists", dir_on_disk(p->items[i].dir)))) {
             cJSON_Delete(o);

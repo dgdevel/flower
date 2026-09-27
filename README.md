@@ -97,7 +97,11 @@ same lenient/strict contract, one file per concern:
     "dir":   "/home/dev/flower",
     "title": "flower",
     "color": "#58a6ff",
-    "emoji": "🌸"
+    "emoji": "🌸",
+    "description":  "A single-binary webapp in C11.",
+    "objectives":   "Ship part 4: llm-driven conversations.",
+    "scope":        "No TLS; POSIX only; evenings and weekends.",
+    "stakeholders": "me, the bees"
   }
 ]
 ```
@@ -106,7 +110,11 @@ A project's identity is its `dir` (unique, must be an absolute path);
 `title` defaults to the directory's basename when empty, `color` to a
 cycling palette and `emoji` to 🌸. Colors are `#rrggbb`, emoji/titles
 are valid UTF-8 without control characters (≤ 31 / 96 bytes), at most
-64 projects.
+64 projects. The four **detail fields** (`description`, `objectives`,
+`scope`, `stakeholders`) are free multi-line text (≤ 4095 bytes each,
+valid UTF-8, no control characters but newlines), edited in column one
+under "Project details". They are optional, default to empty, and are
+the project context the llm side will draw on later.
 
 Working directories must **exist on disk**: PUT validates each `dir`
 with `stat()` (422 `directory does not exist` / `not a directory`).
@@ -186,7 +194,8 @@ src/server.c          epoll event loop, connection lifecycle, routing, SSE ticks
 src/http.{c,h}        HTTP/1.1 parser (GET/HEAD/PUT/POST, Content-Length bodies)
                       + response builders
 src/theme.{c,h}       config dir resolution, theme.json load/save/validate (cJSON)
-src/projects.{c,h}    projects.json load/save/validate (same pattern)
+src/projects.{c,h}    projects.json load/save/validate (same pattern,
+                      incl. the four free-text detail fields)
 src/agents.{c,h}      llms.json + agents/ backends: named llm endpoints
                       and one file per agent (llm reference, inference
                       options, system prompt, mcp servers)
