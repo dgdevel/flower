@@ -413,7 +413,7 @@ static void handle_tasks_put(server_t *s, conn_t *c,
     tasks_t nc;
     char efield[96], emsg[160];
     tasks_parse_result_t pr = tasks_from_json(
-        body, body_len, &s->llms, &s->agents, &nc,
+        body, body_len, &s->llms, &s->agents, &s->projects, &nc,
         efield, sizeof efield, emsg, sizeof emsg);
     if (pr != TASKS_OK) {
         *status = (pr == TASKS_E_JSON) ? 400 : 422;
@@ -437,7 +437,7 @@ static void handle_tasks_put(server_t *s, conn_t *c,
     }
     s->tasks = nc;
     *status = 200;
-    char *j = tasks_to_json(&nc, 0, NULL, NULL); /* echo: validated */
+    char *j = tasks_to_json(&nc, 0, NULL, NULL, NULL); /* echo: validated */
     if (j) {
         respond_json(s, c, 200, j, req->keep_alive);
         free(j);
@@ -518,7 +518,7 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
             }
         } else if (strcmp(path, "/api/tasks") == 0) {
             char *j = tasks_to_json(&s->tasks, 1,
-                                            &s->llms, &s->agents);
+                                    &s->llms, &s->agents, &s->projects);
             if (j) {
                 respond(s, c, 200, "application/json", j, strlen(j),
                         req->keep_alive, head, NULL);

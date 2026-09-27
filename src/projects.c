@@ -384,6 +384,15 @@ int projects_load(projects_t *p)
     return 0;
 }
 
+/* id lookup: index, or -1 (tasks reference their project by id) */
+int projects_find_id(const projects_t *p, const char *id)
+{
+    if (!id) return -1;
+    for (size_t i = 0; i < p->count; i++)
+        if (strcmp(p->items[i].id, id) == 0) return (int)i;
+    return -1;
+}
+
 int projects_save(const projects_t *p)
 {
     char path[4352], tmp[4400];

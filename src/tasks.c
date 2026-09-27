@@ -5,6 +5,7 @@
 
 #include "tasks.h"
 #include "agents.h"
+#include "projects.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
 
 #include <cJSON.h>
@@ -56,6 +57,16 @@ static int valid_id(const char *s)
 {
     if (strlen(s) != TASK_ID_LEN) return 0;
     for (size_t i = 0; i < TASK_ID_LEN; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+            return 0;
+    return 1;
+}
+
+/* a project reference: PROJECT_ID_LEN lowercase hex chars */
+static int valid_project_id(const char *s)
+{
+    if (strlen(s) != PROJECT_ID_LEN) return 0;
+    for (size_t i = 0; i < PROJECT_ID_LEN; i++)
         if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
             return 0;
     return 1;
@@ -144,13 +155,14 @@ static int task_cmp(const void *pa, const void *pb)
 /*
  * Parse one task object into *out. Strict mode (PUT) rejects
  * any problem into err_field/err_msg; lenient mode (load) repairs
- * what it can and skips nothing short of an unusable agent name.
- * `seen` is the list being built (ids are generated to avoid the ids
- * already in it). Returns 0 on success.
+ * what it can and skips nothing short of an unusable agent or
+ * project reference. `seen` is the list being built (ids are
+ * generated to avoid the ids already in it). Returns 0 on success.
  */
 static int parse_task(const cJSON *obj, size_t index, task_t *out,
                       const tasks_t *seen,
                       const llms_t *llms, const agents_t *agents,
+                      const projects_t *projects,
                       int strict,
                       char *err_field, size_t err_field_n,
                       char *err_msg, size_t err_msg_n)
@@ -173,6 +185,28 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
     } else {
         do gen_hex_id(out->id, TASK_ID_LEN);
         while (seen && id_used(seen, seen->count, out->id));
+    }
+
+    /* the owning project: required, its id; the reference is checked
+     * against the project list when known (strict) and flagged by
+     * GET otherwise, like a dangling agent reference */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "project");
+    if (!cJSON_IsString(j) || !j->valuestring ||
+        strlen(j->valuestring) >= sizeof out->project ||
+        !valid_project_id(j->valuestring)) {
+        if (strict) {
+            snprintf(err_field, err_field_n, "%s.project", prefix);
+            snprintf(err_msg, err_msg_n,
+                     "required, the id of the project this task belongs to");
+            return -1;
+        }
+        return -1; /* lenient: unplaceable without a project */
+    }
+    snprintf(out->project, sizeof out->project, "%s", j->valuestring);
+    if (projects && strict && projects_find_id(projects, out->project) < 0) {
+        snprintf(err_field, err_field_n, "%s.project", prefix);
+        snprintf(err_msg, err_msg_n, "unknown project");
+        return -1;
     }
 
     /* the agent binding: required, must exist (user or builtin) */
@@ -255,7 +289,7 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
 
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         static const char *const keys[] = {
-            "id", "title", "agent", "llm", "created",
+            "id", "project", "title", "agent", "llm", "created",
         };
         cJSON_ArrayForEach(j, obj) {
             int known = 0;
@@ -330,7 +364,7 @@ int tasks_load(tasks_t *c)
         task_t one;
         /* lenient: no llms/agents context here — dangling references
          * are kept and flagged by GET, like a vanished project dir */
-        if (parse_task(j, c->count, &one, c, NULL, NULL, 0,
+        if (parse_task(j, c->count, &one, c, NULL, NULL, NULL, 0,
                        NULL, 0, NULL, 0) != 0) {
             cJSON_Delete(j);
             continue;
@@ -384,6 +418,7 @@ int tasks_save(const tasks_t *c)
         cJSON *o = cJSON_CreateObject();
         cJSON *ok = o;
         if (ok) ok = cJSON_AddStringToObject(o, "id", tk->id);
+        if (ok) ok = cJSON_AddStringToObject(o, "project", tk->project);
         if (ok) ok = cJSON_AddStringToObject(o, "title", tk->title);
         if (ok) ok = cJSON_AddStringToObject(o, "agent", tk->agent);
         if (ok) ok = cJSON_AddStringToObject(o, "llm", tk->llm);
@@ -425,12 +460,13 @@ int tasks_save(const tasks_t *c)
 /* ---------- JSON in (strict) / out ---------- */
 
 tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
-                                             const llms_t *llms,
-                                             const agents_t *agents,
-                                             tasks_t *out,
-                                             char *err_field,
-                                             size_t err_field_n,
-                                             char *err_msg, size_t err_msg_n)
+                                     const llms_t *llms,
+                                     const agents_t *agents,
+                                     const projects_t *projects,
+                                     tasks_t *out,
+                                     char *err_field,
+                                     size_t err_field_n,
+                                     char *err_msg, size_t err_msg_n)
 {
     err_field[0] = '\0';
     err_msg[0] = '\0';
@@ -470,7 +506,7 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
             return TASKS_E_FIELD;
         }
         task_t one;
-        if (parse_task(child, i, &one, out, llms, agents, 1,
+        if (parse_task(child, i, &one, out, llms, agents, projects, 1,
                        err_field, err_field_n, err_msg, err_msg_n) != 0) {
             cJSON_Delete(j);
             return TASKS_E_FIELD;
@@ -491,7 +527,8 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
 }
 
 char *tasks_to_json(const tasks_t *c, int with_flags,
-                            const llms_t *llms, const agents_t *agents)
+                    const llms_t *llms, const agents_t *agents,
+                    const projects_t *projects)
 {
     cJSON *j = cJSON_CreateArray();
     if (!j) return NULL;
@@ -500,6 +537,7 @@ char *tasks_to_json(const tasks_t *c, int with_flags,
         cJSON *o = cJSON_CreateObject();
         int ok = o &&
             cJSON_AddStringToObject(o, "id", tk->id) &&
+            cJSON_AddStringToObject(o, "project", tk->project) &&
             cJSON_AddStringToObject(o, "title", tk->title) &&
             cJSON_AddStringToObject(o, "agent", tk->agent) &&
             cJSON_AddStringToObject(o, "llm", tk->llm) &&
@@ -507,7 +545,11 @@ char *tasks_to_json(const tasks_t *c, int with_flags,
         if (ok && with_flags) {
             char eff[CFG_NAME_MAX];
             effective_llm(tk, agents, eff, sizeof eff);
-            ok = cJSON_AddBoolToObject(o, "agent_ok",
+            ok = cJSON_AddBoolToObject(o, "project_ok",
+                                       projects &&
+                                       projects_find_id(projects,
+                                                        tk->project) >= 0) &&
+                 cJSON_AddBoolToObject(o, "agent_ok",
                                        agents && find_agent(agents, tk->agent)) &&
                  cJSON_AddBoolToObject(
                      o, "llm_ok",

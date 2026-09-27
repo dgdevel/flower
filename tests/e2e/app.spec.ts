@@ -33,7 +33,7 @@ test("desktop: three columns side by side, placeholders visible", async ({ page,
   expect(b!.x).toBeGreaterThan(a!.x);
   expect(c!.x).toBeGreaterThan(b!.x);
 
-  await expect(panes.nth(1)).toContainText("Taskersations");
+  await expect(panes.nth(1)).toContainText("Tasks");
   await expect(panes.nth(1)).toContainText("No tasks yet");
   await expect(panes.nth(2)).toContainText("Nothing here yet");
   await expect(panes.nth(0)).toContainText("Projects");
@@ -115,18 +115,26 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   await expect(page.locator("#editor")).toContainText("No projects yet");
 });
 
-test("tasks: create with a builtin agent, details below, column three reserved", async ({ page, request }) => {
+test("tasks: per-project scoping — create, switch resets, column three follows", async ({ page, request }) => {
   await resetProjects(request);
-  await request.put("/api/tasks", { data: [] });
   await request.put("/api/llms", { data: [{
     name: "loco", endpoint_protocol: "openai",
     api_base: "http://localhost:11434/v1", model: "llama3.1",
   }] });
+  mkdirSync(`${WORK}/bees`, { recursive: true });
+  mkdirSync(`${WORK}/hives`, { recursive: true });
   await page.goto("/");
 
+  // a project first: tasks belong to one
+  await page.click("#add-project");
+  await page.fill('[data-f="dir"]', `${WORK}/bees`);
+  await page.click('[data-action="create"]');
+  await expect(page.locator("#editor-status")).toContainText("saved");
+
   const pane2 = page.locator('.pane[data-pane="1"]');
-  await expect(pane2.locator("h2")).toHaveText("Taskersations");
+  await expect(pane2.locator("h2")).toHaveText("Tasks");
   await expect(pane2).toContainText("No tasks yet");
+  await expect(pane2.locator("#new-task")).toBeVisible();
 
   // the top button opens the creation form; the builtin agent carries
   // no llm of its own, so one must be picked
@@ -145,26 +153,23 @@ test("tasks: create with a builtin agent, details below, column three reserved",
   // the list shows it, the details below carry the server-made id
   const row = pane2.locator(".task-row").first();
   await expect(row).toContainText("Bee talk");
-  await expect(row).toContainText("assistant · builtin · loco");
   await expect(pane2.locator("#task-count")).toHaveText("1 task");
   await expect(pane2.locator(".task-details code")).toHaveText(/^[0-9a-f]{32}$/);
-  await expect(pane2.locator(".task-details")).toContainText("assistant — builtin");
-  await expect(pane2.locator('[data-f="task-llm"]')).toHaveValue("loco");
-  await expect(pane2.locator("#task-status")).toContainText("saved ✓");
+  await expect(page.locator("#col3-text"))
+    .toContainText("The task \u201cBee talk\u201d opens here");
 
-  // persisted server-side (one directory under tasks/) and
-  // selected again after a reload
+  // persisted server-side, bound to the project, selected after reload
   const tasks = await (await request.get("/api/tasks")).json();
   expect(tasks).toHaveLength(1);
   expect(tasks[0].agent).toBe("assistant");
   expect(tasks[0].llm).toBe("loco");
+  const beesId = tasks[0].project;
 
   await page.reload();
   const pane2b = page.locator('.pane[data-pane="1"]');
   await expect(pane2b.locator(".task-row").first()).toContainText("Bee talk");
   await expect(pane2b.locator(".task-row")).toHaveClass(/active/);
-  await expect(pane2b.locator(".task-details code"))
-    .toHaveText(tasks[0].id);
+  await expect(pane2b.locator(".task-details code")).toHaveText(tasks[0].id);
 
   // the llm pick is editable and autosaves (the select knows the llms
   // that existed when the page loaded)
@@ -179,6 +184,39 @@ test("tasks: create with a builtin agent, details below, column three reserved",
   await expect
     .poll(async () => (await (await request.get("/api/tasks")).json())[0].llm)
     .toBe("elsewhere");
+
+  // New Task empties the column-three scope while drafting
+  await pane2c.locator("#new-task").click();
+  await expect(page.locator("#col3-text"))
+    .toContainText("keeps its place in the layout");
+  await pane2c.locator('[data-action="task-cancel"]').click();
+  await expect(page.locator("#col3-text")).toContainText("Bee talk");
+
+  // switching project resets column two and three
+  await page.click("#add-project");
+  await page.fill('[data-f="dir"]', `${WORK}/hives`);
+  await page.click('[data-action="create"]');
+  await expect(page.locator("#editor-status")).toContainText("saved");
+  await expect(pane2c).toContainText("No tasks yet");       // fresh project owns none
+  await expect(page.locator("#col3-text"))
+    .toContainText("keeps its place in the layout");
+
+  // the task is still there — under its own project
+  const allTasks = await (await request.get("/api/tasks")).json();
+  expect(allTasks).toHaveLength(1);
+  expect(allTasks[0].project).toBe(beesId);
+  const projects = await (await request.get("/api/projects")).json();
+  const bees = projects.find((x) => x.dir.endsWith("/bees"));
+  await page.reload();
+  await page.locator(`.chip[title="${bees.title}"]`).click();
+  await expect(pane2c.locator(".task-row").first()).toContainText("Bee talk");
+
+  // drafting a New project empties columns two and three
+  await page.click("#add-project");
+  await expect(pane2c).toContainText("No project selected");
+  await expect(page.locator("#col3-text"))
+    .toContainText("keeps its place in the layout");
+  await page.click('[data-action="cancel"]');
 
   // column three stays reserved for the task itself
   await expect(page.locator('.pane[data-pane="2"]')).toContainText("Nothing here yet");

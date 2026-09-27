@@ -465,6 +465,7 @@ function select(i) {
   selected = i;
   rememberSelection();
   setStatus("");
+  resetTaskScope(); // the task list follows the project: fresh scope
   render();
   refreshExists(); // flags go stale; re-check when a project takes focus
 }
@@ -504,6 +505,8 @@ function startDraft() {
     scope: "",
     stakeholders: "",
   };
+  resetTaskScope(); // drafting a project: no scope for columns 2-3
+  renderTaskPane();
   renderEditor();
   const dir = editorEl.querySelector('[data-f="dir"]');
   if (dir) dir.focus();
@@ -540,6 +543,7 @@ async function createProject() {
     selected = projects.length - 1;
     draft = null;
     rememberSelection();
+    resetTaskScope(); // a brand-new project owns no tasks yet
     render();
     setStatus("saved ✓", "ok");
   } catch (_) {
@@ -558,6 +562,7 @@ function deleteSelected(btn) {
   projects.splice(selected, 1);
   selected = Math.min(selected, projects.length - 1);
   rememberSelection();
+  resetTaskScope(); // a different (or no) project takes over
   render();
   saveNow();
 }
@@ -600,7 +605,7 @@ editorEl.addEventListener("click", (e) => {
   if (!btn) { disarmDelete(); return; }
   const act = btn.dataset.action;
   if (act === "new") startDraft();
-  else if (act === "cancel") { draft = null; closePicker(); renderEditor(); }
+  else if (act === "cancel") { draft = null; closePicker(); render(); }
   else if (act === "create") createProject();
   else if (act === "delete") deleteSelected(btn);
   else if (act === "pick-emoji") openPicker(btn);
@@ -704,7 +709,32 @@ function taskEffectiveLlm(c) {
 }
 
 function taskFlagged(c) {
-  return c.agent_ok === false || c.llm_ok === false;
+  return c.project_ok === false || c.agent_ok === false || c.llm_ok === false;
+}
+
+/* the hierarchy: tasks belong to the selected project. Column two
+ * lists only that project's tasks; switching project (or drafting a
+ * new one) resets the task scope, and with it column three. */
+function currentProjectId() {
+  return draft ? null : (projects[selected] || {}).id || null;
+}
+
+function visibleTasks() {
+  const pid = currentProjectId();
+  return pid ? tasks.filter((t) => t.project === pid) : [];
+}
+
+/* the selected task, but only while it belongs to the project in
+ * focus — a stale selection reads as "none" */
+function currentTask() {
+  const c = tasks[taskSel];
+  return c && c.project === currentProjectId() ? c : undefined;
+}
+
+function resetTaskScope() {
+  taskDraft = null;
+  taskSel = -1;
+  localStorage.removeItem("flower.task");
 }
 
 function setTaskStatus(text, kind) {
@@ -729,7 +759,7 @@ async function refreshTaskMeta() {
   } catch (_) { /* selects stay with what they had */ }
 }
 
-async function loadTaskersations() {
+async function loadTasks() {
   try {
     const r = await fetch("api/tasks");
     if (r.ok) tasks = await r.json();
@@ -780,7 +810,10 @@ function llmOptions(forBuiltin) {
 
 function renderTaskList() {
   taskListEl.textContent = "";
-  tasks.forEach((c, i) => {
+  const pid = currentProjectId();
+  const vis = visibleTasks();
+  vis.forEach((c) => {
+    const i = tasks.indexOf(c);
     const a = findAgentMeta(c.agent);
     const sub = `${c.agent}${a && a.builtin ? " · builtin" : ""}` +
                 ` · ${taskEffectiveLlm(c) || "no llm"}`;
@@ -794,13 +827,16 @@ function renderTaskList() {
       el("span", { class: "name", text: taskDisplayTitle(c) }),
       el("span", { class: "sub", text: sub })));
   });
-  if (!tasks.length)
+  if (!vis.length)
     taskListEl.append(el("p", {
       class: "task-none muted",
-      text: taskDraft ? "Creating the first one…" : "No tasks yet.",
+      text: taskDraft ? "Creating the first one…"
+        : !pid && projects.length ? "No project selected."
+        : "No tasks yet.",
     }));
-  const n = tasks.length;
-  taskCountEl.textContent = n ? `${n} task${n === 1 ? "" : "s"}` : "";
+  taskCountEl.textContent =
+    vis.length ? `${vis.length} task${vis.length === 1 ? "" : "s"}` : "";
+  document.getElementById("new-task").hidden = !pid;
 }
 
 function renderTaskDraft() {
@@ -833,16 +869,20 @@ function renderTaskDetails() {
     taskDraftValid(); // show required-field hints right away
     return;
   }
-  const c = tasks[taskSel];
+  const c = currentTask();
   if (!c) {
+    const pid = currentProjectId();
+    const vis = visibleTasks();
     taskDetailsEl.append(el("div", { class: "task-empty" },
       el("p", {
         class: "placeholder-title",
-        text: tasks.length ? "No task selected" : "Nothing open",
+        text: !pid ? "No project selected" : vis.length ? "No task selected" : "Nothing open",
       }),
       el("p", {
         class: "placeholder-text",
-        text: tasks.length
+        text: !pid
+          ? "Column two follows the project picked in column one."
+          : vis.length
           ? "Pick one from the list above — it becomes the scope for column three."
           : "Create one with the New task button above.",
       })));
@@ -871,9 +911,23 @@ function renderTaskDetails() {
   }
 }
 
+/* column three mirrors the task scope: named when a task is picked,
+ * generic while creating or when nothing is selected */
+function updateColumn3() {
+  const p = document.getElementById("col3-text");
+  if (!p) return;
+  const c = taskDraft ? null : currentTask();
+  p.textContent = c
+    ? `The task “${taskDisplayTitle(c)}” opens here — the talk itself, ` +
+      "once flower grows into it."
+    : "This column keeps its place in the layout. flower grows into " +
+      "it later.";
+}
+
 function renderTaskPane() {
   renderTaskList();
   renderTaskDetails();
+  updateColumn3();
 }
 
 /* ---------- validation (mirrors src/tasks.c) ---------- */
@@ -898,16 +952,17 @@ function taskDraftValid() {
 /* ---------- server sync ---------- */
 
 const taskWire = (c) => ({
-  id: c.id, title: c.title, agent: c.agent, llm: c.llm, created: c.created,
+  id: c.id, project: c.project, title: c.title, agent: c.agent,
+  llm: c.llm, created: c.created,
 });
 
 function scheduleTaskSave() {
   clearTimeout(taskSaveTimer);
   setTaskStatus("editing…");
-  taskSaveTimer = setTimeout(saveTaskersations, SAVE_DELAY);
+  taskSaveTimer = setTimeout(saveTasks, SAVE_DELAY);
 }
 
-async function putTaskersations(list, seq) {
+async function putTasks(list, seq) {
   const r = await fetch("api/tasks", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -926,13 +981,13 @@ async function putTaskersations(list, seq) {
   return r.json();
 }
 
-async function saveTaskersations() {
+async function saveTasks() {
   clearTimeout(taskSaveTimer);
   if (taskDraft) return;
   const sent = tasks.map(taskWire);
   const seq = ++taskSaveSeq;
   setTaskStatus("saving…");
-  const saved = await putTaskersations(sent, seq).catch(() => null);
+  const saved = await putTasks(sent, seq).catch(() => null);
   if (!saved) {
     if (seq === taskSaveSeq) setTaskStatus("network error — changes stay on this screen", "warn");
     return;
@@ -951,7 +1006,7 @@ async function saveTaskersations() {
 
 /* ---------- selection & creation ---------- */
 
-function selectTaskersation(i) {
+function selectTask(i) {
   taskDraft = null;
   taskSel = i;
   const c = tasks[i];
@@ -971,9 +1026,11 @@ async function refreshTaskFlags() {
     let changed = false;
     for (const c of tasks) {
       const f = fresh.find((x) => x.id === c.id);
+      const po = f ? f.project_ok !== false : true;
       const ao = f ? f.agent_ok !== false : true;
       const lo = f ? f.llm_ok !== false : true;
-      if (c.agent_ok !== ao || c.llm_ok !== lo) {
+      if (c.project_ok !== po || c.agent_ok !== ao || c.llm_ok !== lo) {
+        c.project_ok = po;
         c.agent_ok = ao;
         c.llm_ok = lo;
         changed = true;
@@ -985,6 +1042,7 @@ async function refreshTaskFlags() {
 }
 
 async function startTaskDraft() {
+  if (!currentProjectId()) return;
   await refreshTaskMeta();
   taskDraft = { agent: "", title: "", llm: "" };
   renderTaskPane();
@@ -994,17 +1052,19 @@ async function startTaskDraft() {
 
 /* Creating goes through its own PUT: the server generates the id and
  * the directory, and a rejection leaves the draft in place. */
-async function createTaskersation() {
-  if (!taskDraft || !taskDraftValid()) return;
+async function createTask() {
+  const pid = currentProjectId();
+  if (!taskDraft || !pid || !taskDraftValid()) return;
   const oldIds = new Set(tasks.map((c) => c.id));
   const next = [...tasks.map(taskWire), {
+    project: pid,
     agent: taskDraft.agent,
     title: taskDraft.title.trim(),
     llm: taskDraft.llm,
   }];
   const seq = ++taskSaveSeq;
   setTaskStatus("saving…");
-  const saved = await putTaskersations(next, seq).catch(() => null);
+  const saved = await putTasks(next, seq).catch(() => null);
   if (!saved) {
     if (seq === taskSaveSeq) setTaskStatus("network error — the task was not created", "warn");
     return;
@@ -1021,7 +1081,7 @@ async function createTaskersation() {
 
 taskListEl.addEventListener("click", (e) => {
   const row = e.target.closest(".task-row[data-idx]");
-  if (row) selectTaskersation(Number(row.dataset.idx));
+  if (row) selectTask(Number(row.dataset.idx));
 });
 
 document.getElementById("new-task").addEventListener("click", startTaskDraft);
@@ -1034,7 +1094,7 @@ taskDetailsEl.addEventListener("input", (e) => {
     taskDraftValid();
     return;
   }
-  const c = tasks[taskSel];
+  const c = currentTask();
   if (!c) return;
   c.title = e.target.value;
   showTaskError("task-title",
@@ -1060,7 +1120,7 @@ taskDetailsEl.addEventListener("change", (e) => {
     }
     return;
   }
-  const c = tasks[taskSel];
+  const c = currentTask();
   if (!c) return;
   if (name === "task-llm") {
     c.llm = e.target.value;
@@ -1073,7 +1133,7 @@ taskDetailsEl.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const act = btn.dataset.action;
-  if (act === "task-create") createTaskersation();
+  if (act === "task-create") createTask();
   else if (act === "task-cancel") {
     taskDraft = null;
     renderTaskPane();
@@ -1084,13 +1144,18 @@ taskDetailsEl.addEventListener("click", (e) => {
 
 (async () => {
   await loadProjects();
-  await Promise.all([loadTaskersations(), refreshTaskMeta()]);
+  await Promise.all([loadTasks(), refreshTaskMeta()]);
   const remembered = localStorage.getItem("flower.selected");
   const i = projects.findIndex((p) => p.dir === remembered);
   selected = i >= 0 ? i : projects.length ? 0 : -1;
+  const pid = currentProjectId();
   const wantedTask = localStorage.getItem("flower.task");
-  const ci = tasks.findIndex((c) => c.id === wantedTask);
-  taskSel = ci >= 0 ? ci : tasks.length ? 0 : -1;
+  let ci = tasks.findIndex((c) => c.id === wantedTask && c.project === pid);
+  if (ci < 0 && pid) {
+    const first = visibleTasks()[0];
+    ci = first ? tasks.indexOf(first) : -1;
+  }
+  taskSel = ci;
   render();
 
   const pane = Number(localStorage.getItem("flower.pane") || "0") || 0;

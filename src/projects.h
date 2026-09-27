@@ -57,6 +57,9 @@ int projects_load(projects_t *p);
 /* Persist as projects.json (atomic write). 0 on success. */
 int projects_save(const projects_t *p);
 
+/* Lookup by id: index, or -1. */
+int projects_find_id(const projects_t *p, const char *id);
+
 /* Strict parse+validate a full project array (PUT body). On failure
  * fills err_field (e.g. "projects[1].color", "" for whole-document
  * errors) and err_msg. */

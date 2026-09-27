@@ -197,13 +197,15 @@ a task bound to one selects its llm explicitly.
 
 `tasks/` — one directory per **task**, named by its
 server-generated 32-hex-char id, holding `task.json` with the
-details (column two: the list and create button on top, the selected
-task's details — id, agent binding, llm pick — below; the
-selected task is the scope for column three):
+details (column two lists the **selected project's** tasks with a
+create button on top and the selected task's details — id, agent
+binding, llm pick — below; the selected task is the scope for
+column three):
 
 ```json
 {
   "id":      "375b2ec7c276687f07218394e04a38c9",
+  "project": "9f2c4a1b0d7e6358",
   "title":   "first chat",
   "agent":   "assistant",
   "llm":     "ollama-local",
@@ -211,16 +213,22 @@ selected task is the scope for column three):
 }
 ```
 
-A task is bound to one `agent` (user-defined or builtin,
-checked on PUT); `llm` is an optional override — empty means "the
-agent's llm", and a task whose agent has none (the builtins)
-must select one. Same replaceable-list contract as projects: PUT the
-whole array, the server writes one `tasks/{ID}/` per entry
-and deletes the directories of removed ones; GET adds live
-`"agent_ok"`/`"llm_ok"` flags for dangling references (an agent
-renamed away, an llm deleted), which the UI flags like a missing
-project directory. The list is kept newest-first; later parts add
-the message log inside the same `{ID}` directory.
+The main screen is a hierarchy: a task belongs to one `project`
+(by id, checked on PUT) and is bound to one `agent` (user-defined
+or builtin, also checked). Switching project — or drafting a new
+one — resets the task list, the task selection and column three;
+drafting a task empties column three. `llm` is an optional
+override — empty means "the agent's llm", and a task whose agent
+has none (the builtins) must select one. Same replaceable-list
+contract as projects: PUT the whole array, the server writes one
+`tasks/{ID}/` per entry and deletes the directories of removed
+ones; GET adds live `"project_ok"`/`"agent_ok"`/`"llm_ok"` flags
+for dangling references (the project deleted, an agent renamed
+away, an llm deleted), which the UI flags like a missing project
+directory — tasks of a deleted project stay stored but are listed
+under no project. The list is kept newest-first; later parts add
+the conversation (the message log) inside the same `{ID}`
+directory.
 
 ## Repository layout
 
@@ -290,12 +298,13 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | 422 invalid entry/unknown llm/duplicate or    |
 |                   |              | builtin-reserved name                          |
 | `/api/tasks` | GET/HEAD  | task array (newest first) + live      |
-|                   |              | `agent_ok`/`llm_ok` flags per entry            |
+|                   |              | `project_ok`/`agent_ok`/`llm_ok` flags per     |
+|                   |              | entry                                          |
 | `/api/tasks` | PUT       | body: the whole array (see tasks/);   |
-|                   |              | validates agent/llm references, writes one    |
-|                   |              | `{ID}/task.json` per entry, deletes   |
+|                   |              | validates project/agent/llm references,        |
+|                   |              | writes one `{ID}/task.json` per entry, deletes |
 |                   |              | removed directories; 400 bad JSON; 422 invalid |
-|                   |              | entry/unknown agent/unknown llm/agent without |
+|                   |              | entry/unknown project/agent/llm/agent without |
 |                   |              | an llm and none picked                         |
 | anything else     | GET/HEAD     | 404; other methods → 405 (with `Allow`)         |
 
@@ -367,9 +376,11 @@ served automatically with the right MIME type. Dotfiles are skipped.
 - [x] automated smoke tests (`make check`) and e2e browser tests (playwright)
 - [x] part 3a: main screen shell — three-column layout, swipeable on
       mobile; projects column (projects.json + rail/editor UI) complete
-- [x] part 3b: column two is the tasks column (list + create
-      on top, selected task's details below; column three
-      reserved for the task itself)
+- [x] part 3b: column two is the tasks column, scoped hierarchically —
+      it lists the selected project's tasks (list + create on top,
+      selected task's details below); switching project or drafting
+      one resets columns two and three, drafting a task empties
+      column three (still a placeholder for the task itself)
 - [ ] part 4: llm interaction via llmkit
       - [x] llm endpoints (llms.json) + agents (agents/, one json file
             per agent: llm reference, inference options, system prompt,
@@ -377,8 +388,9 @@ served automatically with the right MIME type. Dotfiles are skipped.
       - [x] builtin agents (compiled in, read-only; tasks bound
             to one pick their llm themselves)
       - [x] task store: {config}/tasks/{ID}/ with the
-            details (agent binding, llm override, title), replaceable-
-            list API, project ids as stable identities
+            details (project and agent bindings, llm override,
+            title), replaceable-list API, project ids as stable
+            identities
       - [ ] drive `llmkit runner` conversations from a task (a task's
             agent + llm assembled into runner input)
       - [ ] custom-made mcp servers offered by flower itself

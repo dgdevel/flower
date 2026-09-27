@@ -4,8 +4,9 @@
 /*
  * tasks — one directory per task under
  * {config}/tasks/{ID}/, holding task.json with the
- * details: the agent it is bound to, an optional llm override, a
- * title and the creation time. Later parts add the message log
+ * details: the project it belongs to (by id), the agent it is
+ * bound to, an optional llm override, a title and the creation
+ * time. Later parts add the conversation (the message log)
  * inside the same directory.
  *
  * Same contract as projects.c/agents.c: lenient load (broken entries
@@ -13,15 +14,19 @@
  * save via atomic tmp+rename writes. A PUT replaces the whole list;
  * directories of removed tasks are deleted.
  *
- * A task is bound to one agent (user-defined or builtin).
- * The llm field is an override: "" means "use the agent's llm"; a
- * task whose agent has no llm of its own (the builtins) must
- * select one. GET reports live "agent_ok"/"llm_ok" flags for dangling
+ * The hierarchy of the main screen: column one lists projects,
+ * column two the tasks of the selected project, column three is
+ * scoped to the selected task. A task is bound to one project and
+ * one agent (user-defined or builtin). The llm field is an
+ * override: "" means "use the agent's llm"; a task whose agent has
+ * no llm of its own (the builtins) must select one. GET reports
+ * live "project_ok"/"agent_ok"/"llm_ok" flags for dangling
  * references, like the projects "exists" flag. The list is kept
  * sorted newest-first.
  */
 
 #include "agents.h" /* CFG_NAME_MAX */
+#include "projects.h" /* PROJECT_ID_LEN */
 
 #include <stddef.h>
 
@@ -31,6 +36,7 @@
 
 typedef struct {
     char id[TASK_ID_LEN + 1]; /* server-assigned, directory name */
+    char project[PROJECT_ID_LEN + 1]; /* the owning project, by id */
     char title[TASK_TITLE_MAX];
     char agent[CFG_NAME_MAX]; /* reference: user or builtin agent */
     char llm[CFG_NAME_MAX];   /* reference; "" = the agent's llm */
@@ -58,24 +64,25 @@ int tasks_load(tasks_t *c);
  * 0 on success. */
 int tasks_save(const tasks_t *c);
 
-/* Strict parse+validate a full task array (PUT body). `llms`
- * and `agents` are the current endpoint and agent lists: references
- * are checked against them. On failure fills err_field (e.g.
- * "tasks[1].agent", "" for whole-document errors) and
- * err_msg. Result is sorted newest-first. */
+/* Strict parse+validate a full task array (PUT body). `llms`,
+ * `agents` and `projects` are the current endpoint, agent and
+ * project lists: references are checked against them. On failure
+ * fills err_field (e.g. "tasks[1].agent", "" for whole-document
+ * errors) and err_msg. Result is sorted newest-first. */
 tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
-                                             const llms_t *llms,
-                                             const agents_t *agents,
-                                             tasks_t *out,
-                                             char *err_field,
-                                             size_t err_field_n,
-                                             char *err_msg, size_t err_msg_n);
+                                     const llms_t *llms,
+                                     const agents_t *agents,
+                                     const projects_t *projects,
+                                     tasks_t *out,
+                                     char *err_field, size_t err_field_n,
+                                     char *err_msg, size_t err_msg_n);
 
 /* Serialize as a compact JSON array. with_flags adds live
- * "agent_ok"/"llm_ok" reference flags per task (checked at
- * call time against llms/agents) — used by GET, omitted on the PUT
- * echo, like the projects "exists" flag. */
+ * "project_ok"/"agent_ok"/"llm_ok" reference flags per task (checked
+ * at call time against projects/agents/llms) — used by GET, omitted
+ * on the PUT echo, like the projects "exists" flag. */
 char *tasks_to_json(const tasks_t *c, int with_flags,
-                            const llms_t *llms, const agents_t *agents);
+                    const llms_t *llms, const agents_t *agents,
+                    const projects_t *projects);
 
 #endif
