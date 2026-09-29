@@ -1,0 +1,1 @@
+the item's text: short, self-contained, no control characters

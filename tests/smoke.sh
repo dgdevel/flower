@@ -194,7 +194,8 @@ curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert [a["name"] for a in d] == \
-    ["assistant", "filesystem_researcher", "online_researcher"], d  # builtins
+    ["assistant", "filesystem_researcher", "online_researcher",
+     "project_scanner"], d  # builtins
 assert d[0]["builtin"] is True and d[0]["llm"] == "", d
 assert "llm_ok" not in d[0], d    # builtins pick their llm per task
 for i in (1, 2):
@@ -204,6 +205,9 @@ for i in (1, 2):
 assert "researcher" in d[1]["system_prompt"].lower(), d  # prompts compiled in
 assert "filesystem" in d[1]["system_prompt"].lower(), d
 assert "web" in d[2]["system_prompt"].lower(), d
+assert d[3]["builtin"] is True, d
+assert d[3]["tools"][0]["url"] == "/scan/mcp", d     # the scan mcp server
+assert "project" in d[3]["system_prompt"].lower(), d
 ' || fail "GET /api/agents should start with the builtin agents"
 curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
@@ -221,7 +225,7 @@ curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = {a["name"]: a.get("llm_ok") for a in json.load(sys.stdin)}
 assert d == {"assistant": None, "filesystem_researcher": None,
-             "online_researcher": None,
+             "online_researcher": None, "project_scanner": None,
              "gardener": True, "thinker": True}, d
 ' || fail "GET /api/agents should report llm_ok flags (builtins carry none)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"Assistant","llm":"ollama"}]' "$B/api/agents")
@@ -239,6 +243,18 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"x","llm":
 curl -s -X PUT --data '[{"name":"thinker","llm":"anthropic","inference_options":{"max_tokens":4096}}]' "$B/api/agents" >/dev/null
 [ ! -f "$CFG/agents/gardener.json" ] || fail "removing an agent must delete its file"
 ls "$CFG/agents" | grep -qx 'thinker.json' || fail "the kept agent's file must stay"
+
+echo "== 6d2. scan API (status + rejected starts) =="
+curl -s "$B/api/scan" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["running"] is False and d["done"] is False, d  # idle, no result yet
+' || fail "GET /api/scan should start idle"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"project":"nope","llm":"ollama"}' "$B/api/scan")
+[ "$code" = 422 ] || fail "scan: unknown project: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"project":"nope","llm":"missing"}' "$B/api/scan")
+[ "$code" = 422 ] || fail "scan: unknown llm: expected 422, got $code"
+curl -s "$B/api/scan" | grep -q '"running":false' || fail "rejected scans must not flip the status"
 
 echo "== 6e. tasks API (actions per project) =="
 curl -s "$B/api/tasks" | grep -q '^\[\]$' || fail "GET /api/tasks should start as []"

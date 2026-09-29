@@ -28,6 +28,7 @@
  * against the current llms list.
  */
 
+#include <cJSON.h>
 #include <stddef.h>
 
 /* shared caps */
@@ -192,7 +193,29 @@ char *agents_to_json(const agents_t *a, const llms_t *llms,
  * user agents but not editable — they carry no llm reference of their
  * own (llm is ""), so a task bound to one must select an llm.
  * User agents may not take a builtin's name (case-insensitive). They
- * are surfaced through agents_to_json(with_builtins); the listing
- * helpers the conversation runner will need land with it. */
+ * are surfaced through agents_to_json(with_builtins). */
+
+/* Case-insensitive builtin lookup by name: the agent (with its
+ * system prompt resolved from prompts/), or NULL. */
+const agent_t *agents_builtin_get(const char *name);
+
+/* ---------- runner record assembly ----------
+ *
+ * The helpers that hand an agent to `llmkit runner`: the stored
+ * shapes are llmkit's record shapes, so this is assembly, not
+ * translation. */
+
+/* The runner's llm record: the referenced endpoint's fields plus the
+ * agent's inference_options. An anthropic endpoint without the
+ * agent's max_tokens gets 4096 — llmkit rejects a bare anthropic
+ * record. malloc'd cJSON object (type "llm"), caller deletes. */
+cJSON *agents_llm_record(const agent_t *a, const llm_t *l);
+
+/* The runner's tools record (a cJSON array of mcp servers): the
+ * agent's tools with urls of the form "/mcp" resolved against
+ * base_url ("http://127.0.0.1:port"); absolute urls pass verbatim.
+ * Empty array when the agent has no servers — the caller may append
+ * its own entries before handing the array to the runner. */
+cJSON *agents_tools_record(const agent_t *a, const char *base_url);
 
 #endif

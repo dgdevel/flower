@@ -15,7 +15,9 @@
 #include "agents.h"
 #include "tasks.h"
 #include "mcp.h"
+#include "scan.h"
 
+#include <cJSON.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -408,6 +410,52 @@ static void handle_tasks_put(server_t *s, conn_t *c, http_request_t *req,
     respond_saved(s, c, req, tasks_to_json(&nc, 0, NULL), "[]");
 }
 
+/* ---------- the project scan agent ---------- */
+
+/* POST /api/scan {"project": id, "llm": name} — spawn the llmkit
+ * runner for the project_scanner agent. The reply is immediate;
+ * progress arrives through GET /api/scan (the client polls). */
+static void handle_scan_post(server_t *s, conn_t *c, http_request_t *req,
+                             const char *body, size_t body_len, int *status)
+{
+    char err[192] = "";
+    const char *project = NULL, *llm = NULL;
+    cJSON *j = body_len ? cJSON_ParseWithLength(body, body_len) : NULL;
+    if (j) {
+        const cJSON *p = cJSON_GetObjectItemCaseSensitive(j, "project");
+        const cJSON *l = cJSON_GetObjectItemCaseSensitive(j, "llm");
+        if (cJSON_IsString(p) && p->valuestring) project = p->valuestring;
+        if (cJSON_IsString(l) && l->valuestring) llm = l->valuestring;
+    }
+    if (!project || !llm) {
+        cJSON_Delete(j);
+        *status = 422;
+        respond_invalid(s, c, req, 422, "",
+                        "expected {\"project\": id, \"llm\": name}",
+                        "scan request");
+        return;
+    }
+    scan_start_result_t r = scan_start(project, llm, err, sizeof err);
+    cJSON_Delete(j);
+
+    if (r == SCAN_START_OK) {
+        *status = 200;
+        respond_json(s, c, 200, "{\"ok\":true}", req->keep_alive);
+        return;
+    }
+    char *eb = theme_error_json(
+        r == SCAN_START_BUSY ? "a scan is already running" : err, NULL);
+    *status = r == SCAN_START_BUSY ? 409
+            : r == SCAN_START_REJECT ? 422 : 500;
+    if (eb) {
+        respond_json(s, c, *status, eb, req->keep_alive);
+        free(eb);
+    } else {
+        respond_json(s, c, *status, "{\"error\":\"cannot start the scan\"}",
+                     req->keep_alive);
+    }
+}
+
 /* ---------- GET: the current stores as json ---------- */
 
 static char *theme_json(server_t *s)    { return theme_to_json(&s->theme); }
@@ -415,6 +463,7 @@ static char *projects_json(server_t *s) { return projects_to_json(&s->projects, 
 static char *llms_json(server_t *s)     { return llms_to_json(&s->llms); }
 static char *agents_json(server_t *s)   { return agents_to_json(&s->agents, &s->llms, 1); }
 static char *tasks_json(server_t *s)    { return tasks_to_json(&s->tasks, 1, &s->projects); }
+static char *scan_json(server_t *s)     { (void)s; return scan_status_json(); }
 
 static const struct {
     const char *path;
@@ -425,6 +474,7 @@ static const struct {
     { "/api/llms",     llms_json },
     { "/api/agents",   agents_json },
     { "/api/tasks",    tasks_json },
+    { "/api/scan",     scan_json },
 };
 
 /* reply to GET /api/<store> (true) or say the path is none of them */
@@ -476,7 +526,8 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
             }
         } else if (api_get(s, c, req, path, head, &status)) {
             /* one of the stores, replied above */
-        } else if (strcmp(path, "/mcp") == 0) {
+        } else if (strcmp(path, "/mcp") == 0 ||
+                   strcmp(path, "/scan/mcp") == 0) {
             status = 405;
             respond(s, c, 405, "text/plain; charset=utf-8",
                     "method not allowed\n", 19, false, false,
@@ -519,13 +570,24 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         handle_agents_put(s, c, req, body, body_len, &status);
     } else if (put && strcmp(path, "/api/tasks") == 0) {
         handle_tasks_put(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/api/scan") == 0) {
+        handle_scan_post(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/api/scan/stop") == 0) {
+        if (scan_running()) {
+            scan_stop();
+            respond_json(s, c, 200, "{\"ok\":true}", req->keep_alive);
+        } else {
+            status = 409;
+            respond_json(s, c, 409, "{\"error\":\"no scan is running\"}",
+                         req->keep_alive);
+        }
     } else if (post && strcmp(path, "/mcp") == 0) {
         /* flower's own mcp server (streamable-http transport, plain
          * json replies). A tools/call fetches a web page while this
          * event loop waits — a known limit, fine for the runner's
          * rare, serial calls. */
         int note = 0;
-        char *j = mcp_handle_post(body, body_len, &note);
+        char *j = mcp_handle_post(&MCP_RESEARCH, body, body_len, &note);
         if (!j) { /* notification: accepted, nothing to say */
             status = 202;
             respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
@@ -542,11 +604,30 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false,
                 "Allow: GET, HEAD, PUT\r\n");
-    } else if (strcmp(path, "/api/theme/reset") == 0) {
+    } else if (post && strcmp(path, "/scan/mcp") == 0) {
+        /* the scan's write-back surface: same dispatch, the scan
+         * tool set (works only while a scan runs) */
+        int note = 0;
+        char *j = mcp_handle_post(&MCP_SCAN, body, body_len, &note);
+        if (!j) {
+            status = 202;
+            respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
+        } else {
+            respond_json(s, c, 200, j, req->keep_alive);
+            free(j);
+        }
+    } else if (strcmp(path, "/api/scan") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false,
+                "Allow: GET, HEAD, POST\r\n");
+    } else if (strcmp(path, "/api/scan/stop") == 0 ||
+               strcmp(path, "/api/theme/reset") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false, "Allow: POST\r\n");
-    } else if (strcmp(path, "/mcp") == 0) {
+    } else if (strcmp(path, "/mcp") == 0 ||
+               strcmp(path, "/scan/mcp") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false, "Allow: POST\r\n");
@@ -732,7 +813,22 @@ static int listen_socket(const char *bind_addr, uint16_t port,
 
 /* ---------- main loop ---------- */
 
-int server_run(const char *bind_addr, uint16_t port)
+/* the address the scan's tool servers reach this server on: the bind
+ * address when it is specific, loopback when flower binds all */
+static void scan_base_url(const char *bind_addr, uint16_t port,
+                          char *buf, size_t n)
+{
+    const char *host = "127.0.0.1";
+    if (bind_addr && *bind_addr && strcmp(bind_addr, "0.0.0.0") != 0 &&
+        strcmp(bind_addr, "::") != 0 && strcmp(bind_addr, "*") != 0)
+        host = bind_addr;
+    if (strchr(host, ':')) /* ipv6 literal needs brackets in a url */
+        snprintf(buf, n, "http://[%s]:%u", host, (unsigned)port);
+    else
+        snprintf(buf, n, "http://%s:%u", host, (unsigned)port);
+}
+
+int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
 {
     char url[128];
     int lfd = listen_socket(bind_addr, port, url, sizeof url);
@@ -767,6 +863,14 @@ int server_run(const char *bind_addr, uint16_t port)
     llms_load(&s.llms);
     agents_load(&s.agents);
     tasks_load(&s.tasks);
+
+    /* the scan agent: the stores to write into, the epoll set for
+     * the runner's stdout, the llmkit binary and this server's own
+     * url (its /mcp and /scan/mcp tool servers) */
+    char base[80];
+    scan_base_url(bind_addr, port, base, sizeof base);
+    scan_attach(epfd, &s.projects, &s.llms, llmkit, base);
+
     logmsg("config: %s (%s, %d project%s, %d llm%s, %d agent%s, "
            "%d task%s)", theme_dir(),
            tl == 0 ? "theme.json loaded" : "using default theme",
@@ -792,6 +896,11 @@ int server_run(const char *bind_addr, uint16_t port)
             uint32_t re = evs[i].events;
             if (fd == lfd) {
                 if (re & EPOLLIN) on_accept(&s);
+                continue;
+            }
+            /* the running scan's runner child: not a connection */
+            if (scan_fd() >= 0 && fd == scan_fd()) {
+                scan_on_readable();
                 continue;
             }
             conn_t *c = (fd >= 0 && fd < s.fd_cap) ? s.by_fd[fd] : NULL;
@@ -829,6 +938,7 @@ int server_run(const char *bind_addr, uint16_t port)
     for (int fd = 0; fd < s.fd_cap; fd++)
         if (s.by_fd[fd]) conn_destroy(&s, s.by_fd[fd]);
     free(s.by_fd);
+    scan_shutdown(); /* kill and reap a running scan's child */
     llms_free(&s.llms);
     agents_free(&s.agents);
     tasks_clear(&s.tasks);

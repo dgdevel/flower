@@ -276,6 +276,211 @@ function contextEditor(list = [], prefix = "P") {
   return sec;
 }
 
+/* ---------- project scan agent (project details) ----------
+ *
+ * A button in the project details runs the server-side scan agent:
+ * POST api/scan {project, llm} starts it — the llm is picked from
+ * the configured endpoints and remembered in localStorage — and
+ * GET api/scan is polled while it runs. The agent writes the
+ * project's detail fields and context items through its own tools,
+ * so the editor refreshes from the server as the writes land. */
+
+let llms = [];           // [{name, …}] — names for the scan pick
+let scanState = null;    // the last GET api/scan answer
+let scanSeenWrites = 0;  // writes at the last refresh from the server
+let scanTimer = 0;
+
+const scanEl = () => document.getElementById("scan-section");
+
+async function loadLlms() {
+  try {
+    const r = await fetch("api/llms");
+    if (r.ok) llms = await r.json();
+  } catch (_) { /* the select shows the empty hint */ }
+}
+
+function scanLlName() {
+  const sel = document.getElementById("scan-llm");
+  return sel && sel.value ? sel.value : "";
+}
+
+function scanLlmSelect() {
+  const sel = el("select", {
+    id: "scan-llm", "aria-label": "LLM to scan with",
+  });
+  if (!llms.length) {
+    const o = el("option", {
+      value: "", text: "no llm endpoints — add one in Config",
+    });
+    o.selected = true;
+    sel.append(o);
+    return sel;
+  }
+  const remembered = localStorage.getItem("flower.scan.llm") || "";
+  const chosen = llms.some((l) => l.name === remembered)
+    ? remembered : llms[0].name;
+  for (const l of llms) {
+    const o = el("option", { value: l.name, text: l.name });
+    if (l.name === chosen) o.selected = true;
+    sel.append(o);
+  }
+  return sel;
+}
+
+const SCAN_MARKS = {
+  start: "·", thinking: "…", response: "=",
+  tool: "→", tool_result: "←", error: "⚠",
+};
+
+function scanLogRow(e) {
+  return el("div", { class: "scan-entry k-" + (e.k || "start") },
+    el("span", { class: "scan-mark", text: SCAN_MARKS[e.k] || "·" }),
+    e.tool ? el("span", { class: "scan-tool mono", text: e.tool }) : null,
+    e.text ? el("span", { class: "scan-text", text: e.text }) : null);
+}
+
+/* the scan block, refreshed in place by updateScanUI() while the
+ * agent runs (no re-render: it would steal focus from the fields) */
+function scanSection() {
+  const sec = el("div", { class: "scan-editor", id: "scan-section" },
+    el("div", { class: "ctx-head" },
+      el("h3", { text: "Project scan" }),
+      el("button", {
+        type: "button", class: "btn btn-ghost scan-stop",
+        id: "scan-stop", "data-action": "scan-stop", hidden: "",
+        title: "Ask the scan to stop (click again to force)",
+        text: "Stop",
+      })),
+    el("div", { class: "scan-row" },
+      scanLlmSelect(),
+      el("button", {
+        type: "button", class: "btn btn-accent",
+        id: "scan-start", "data-action": "scan-start",
+        text: "Scan project",
+      })),
+    el("p", { id: "scan-status", class: "muted", role: "status" }),
+    el("div", { id: "scan-log", class: "scan-log", hidden: "" }));
+  return sec;
+}
+
+function updateScanUI() {
+  const sec = scanEl();
+  if (!sec) return;
+  const status = document.getElementById("scan-status");
+  const logBox = document.getElementById("scan-log");
+  const start = document.getElementById("scan-start");
+  const stop = document.getElementById("scan-stop");
+  const sel = document.getElementById("scan-llm");
+  const st = scanState;
+  const running = !!st && !!st.running;
+  const p = projects[selected];
+
+  if (start) {
+    const can = !running && !draft && llms.length > 0 &&
+                 !!p && p.exists !== false;
+    start.toggleAttribute("disabled", !can);
+    start.textContent = running ? "Scanning…" : "Scan project";
+    start.title = can
+      ? "Run the scan agent on this project's directory"
+      : llms.length ? "" : "add an llm endpoint on the Config page first";
+  }
+  if (stop) stop.hidden = !running;
+  if (sel) sel.toggleAttribute("disabled", running);
+
+  if (status) {
+    if (running) {
+      const whose = st.project && p && st.project === p.id
+        ? "" : " — another project";
+      status.className = "muted";
+      status.textContent = `Scanning with ${st.llm}${whose}…` +
+        (st.writes ? ` ${st.writes} write${st.writes === 1 ? "" : "s"} so far` : "");
+    } else if (st && st.done) {
+      if (st.ok) {
+        status.className = "cfg-ok";
+        status.textContent = `Scan complete ✓ — ${st.writes} ` +
+          `write${st.writes === 1 ? "" : "s"}`;
+      } else {
+        status.className = "cfg-warn";
+        status.textContent = `Scan failed — ${st.error || "the runner exited"}`;
+      }
+    } else {
+      status.textContent = "";
+      status.className = "muted";
+    }
+  }
+  if (logBox) {
+    const entries = (st && st.log) || [];
+    logBox.hidden = entries.length === 0;
+    logBox.textContent = "";
+    for (const e of entries.slice(-40)) logBox.append(scanLogRow(e));
+  }
+}
+
+/* the scan writes through the server; adopt its version of the
+ * project list without disturbing a field mid-edit */
+async function refreshScanWrites() {
+  if (draft) return;
+  try {
+    const r = await fetch("api/projects");
+    if (!r.ok) return;
+    const fresh = await r.json();
+    projects = fresh.map((p) => ({ ...p, context: p.context || [] }));
+    if (editingIn(editorEl)) syncEditorFields();
+    else { renderRail(); renderEditor(); }
+  } catch (_) { /* keep showing what we have */ }
+}
+
+async function pollScan() {
+  clearTimeout(scanTimer);
+  try {
+    const r = await fetch("api/scan");
+    if (r.ok) scanState = await r.json();
+  } catch (_) { /* transient: try again on the next tick */ }
+  if (scanState && scanState.writes > scanSeenWrites) {
+    scanSeenWrites = scanState.writes;
+    refreshScanWrites();
+  }
+  updateScanUI();
+  if (scanState && scanState.running)
+    scanTimer = setTimeout(pollScan, 1200);
+  else {
+    scanSeenWrites = 0;
+    refreshScanWrites(); /* the final state, whatever it was */
+  }
+}
+
+async function startScan() {
+  const p = projects[selected];
+  const name = scanLlName();
+  const status = document.getElementById("scan-status");
+  if (!p || !name || p.exists === false) return;
+  try {
+    const r = await fetch("api/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: p.id, llm: name }),
+    });
+    if (!r.ok) {
+      let msg = `scan failed (${r.status})`;
+      try { msg = (await r.json()).error || msg; } catch (_) {}
+      if (status) { status.textContent = msg; status.className = "cfg-warn"; }
+      return;
+    }
+    localStorage.setItem("flower.scan.llm", name);
+    pollScan();
+  } catch (_) {
+    if (status) {
+      status.textContent = "network error — the scan was not started";
+      status.className = "cfg-warn";
+    }
+  }
+}
+
+async function stopScan() {
+  try { await fetch("api/scan/stop", { method: "POST" }); } catch (_) {}
+  pollScan(); /* pick up the stop (or send the force kill next click) */
+}
+
 /* context-item wiring shared by the project editor and the task
  * details — both panes own a context list edited in place. `owner`
  * finds the list's owner (or null), `save` autosaves after an edit,
@@ -428,6 +633,7 @@ function editorForm(creating) {
     el("h3", { text: "Project details" }));
   for (const [name, label, hint] of DETAILS)
     details.append(detailField(name, label, hint));
+  if (!creating) details.append(scanSection()); // needs a saved project
   frag.append(details);
 
   frag.append(contextEditor(
@@ -472,6 +678,7 @@ function renderEditor() {
   editorEl.append(editorForm(false));
   syncEditorFields();
   editorValid(); // show the missing-directory state right after load
+  updateScanUI(); // the scan block reflects the live scan state
 }
 
 function syncEditorFields() {
@@ -820,6 +1027,8 @@ editorEl.addEventListener("click", (e) => {
   else if (act === "create") createProject();
   else if (act === "delete") deleteSelected(btn);
   else if (act === "pick-emoji") openPicker(btn);
+  else if (act === "scan-start") startScan();
+  else if (act === "scan-stop") stopScan();
 });
 
 // close the picker when clicking elsewhere or pressing Escape
@@ -1658,6 +1867,7 @@ actionListEl.addEventListener("input", (e) => {
 (async () => {
   await loadProjects();
   await loadTasks();
+  await loadLlms(); // the scan agent's llm pick
   const remembered = localStorage.getItem("flower.selected");
   const i = projects.findIndex((p) => p.dir === remembered);
   selected = i >= 0 ? i : projects.length ? 0 : -1;
@@ -1670,6 +1880,16 @@ actionListEl.addEventListener("input", (e) => {
   }
   taskSel = ci;
   render();
+
+  /* a scan may outlive a page reload: pick up its progress */
+  try {
+    const r = await fetch("api/scan");
+    if (r.ok) {
+      scanState = await r.json();
+      updateScanUI(); // show a finished scan's result too
+      if (scanState.running) pollScan();
+    }
+  } catch (_) { /* no scan state, no polling */ }
 
   const pane = Number(localStorage.getItem("flower.pane") || "0") || 0;
   if (narrow.matches && pane > 0) deckEl.scrollLeft = pane * deckEl.clientWidth;

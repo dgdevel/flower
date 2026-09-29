@@ -1,7 +1,8 @@
 /*
- * mcp — flower's own mcp server: the json-rpc dispatch behind
- * POST /mcp. See mcp.h for the surface; the tools themselves live
- * in src/web.c, their prompt texts under prompts/mcp/.
+ * mcp — flower's own mcp servers: the json-rpc dispatch behind
+ * POST /mcp and POST /scan/mcp. See mcp.h for the surface; the
+ * research tools live in src/web.c and src/fs.c, the scan write-back
+ * tools in src/scan.c, their prompt texts under prompts/mcp/.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -11,14 +12,13 @@
 #include "prompts.h"
 #include "web.h"
 
-#include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define PROTOCOL_REV "2025-11-25" /* the revision llmkit speaks */
 
-/* ---------- tool implementations ---------- */
+/* ---------- tool implementations (the research set) ---------- */
 
 static char *fn_web_search(const cJSON *args, char *err, size_t err_n)
 {
@@ -40,47 +40,39 @@ static char *fn_web_fetch(const cJSON *args, char *err, size_t err_n)
     return web_read(u->valuestring, err, err_n);
 }
 
-typedef struct {
-    const char *name;
-    const char *type;         /* json-schema type: "string"/"number" */
-    int required;
-} tool_arg_t;
-
-typedef struct {
-    const char *name;
-    tool_arg_t args[6];       /* NULL-name terminated */
-    char *(*fn)(const cJSON *args, char *err, size_t err_n);
-} tool_def_t;
-
-static const tool_def_t TOOLS[] = {
-    { "web_search",
-      { { "query", "string", 1 }, { NULL } },
-      fn_web_search },
-    { "web_fetch",
-      { { "url", "string", 1 }, { NULL } },
-      fn_web_fetch },
-    { "read_file",
-      { { "path",   "string", 1 },
-        { "offset", "number", 0 },
-        { "length", "number", 0 },
-        { NULL } },
-      fs_tool_read_file },
-    { "list_files",
-      { { "path", "string", 1 },
-        { "glob", "string", 1 },
-        { NULL } },
-      fs_tool_list_files },
+static const mcp_arg_t ARGS_WEB_SEARCH[] = {
+    { "query", "string", 1 }, { NULL }
 };
-#define TOOL_COUNT (sizeof TOOLS / sizeof TOOLS[0])
+static const mcp_arg_t ARGS_WEB_FETCH[] = {
+    { "url", "string", 1 }, { NULL }
+};
+static const mcp_arg_t ARGS_READ_FILE[] = {
+    { "path",   "string", 1 },
+    { "offset", "number", 0 },
+    { "length", "number", 0 },
+    { NULL }
+};
+static const mcp_arg_t ARGS_LIST_FILES[] = {
+    { "path", "string", 1 },
+    { "glob", "string", 1 },
+    { NULL }
+};
 
-size_t mcp_tool_count(void)
-{
-    return TOOL_COUNT;
-}
+/* the research surface behind POST /mcp. The scan surface (MCP_SCAN)
+ * is defined next to its tools, in src/scan.c. */
+static const mcp_tool_t RESEARCH_TOOLS[] = {
+    { "web_search", ARGS_WEB_SEARCH, fn_web_search },
+    { "web_fetch",  ARGS_WEB_FETCH,  fn_web_fetch },
+    { "read_file",  ARGS_READ_FILE,  fs_tool_read_file },
+    { "list_files", ARGS_LIST_FILES, fs_tool_list_files },
+};
+const mcp_table_t MCP_RESEARCH = {
+    RESEARCH_TOOLS, sizeof RESEARCH_TOOLS / sizeof RESEARCH_TOOLS[0]
+};
 
 /* ---------- prompt-file lookups with compiled-in fallbacks ---------- */
 
-static char *tool_description(const tool_def_t *t)
+static char *tool_description(const mcp_tool_t *t)
 {
     char path[128];
     snprintf(path, sizeof path, "mcp/%s/description.txt", t->name);
@@ -90,7 +82,7 @@ static char *tool_description(const tool_def_t *t)
     return strdup(t->name);
 }
 
-static char *arg_description(const tool_def_t *t, const char *arg)
+static char *arg_description(const mcp_tool_t *t, const char *arg)
 {
     char path[192];
     snprintf(path, sizeof path, "mcp/%s/arguments/%s.txt", t->name, arg);
@@ -156,24 +148,24 @@ static cJSON *handle_initialize(void)
     return res;
 }
 
-static cJSON *handle_tools_list(void)
+static cJSON *handle_tools_list(const mcp_table_t *t)
 {
     cJSON *tools = cJSON_CreateArray();
-    for (size_t i = 0; i < TOOL_COUNT; i++) {
-        const tool_def_t *t = &TOOLS[i];
+    for (size_t i = 0; i < t->count; i++) {
+        const mcp_tool_t *one = &t->tools[i];
         cJSON *props = cJSON_CreateObject();
         cJSON *required = cJSON_CreateArray();
-        for (size_t a = 0; t->args[a].name; a++) {
+        for (size_t a = 0; one->args[a].name; a++) {
             cJSON *p = cJSON_CreateObject();
-            cJSON_AddStringToObject(p, "type", t->args[a].type);
-            char *d = arg_description(t, t->args[a].name);
+            cJSON_AddStringToObject(p, "type", one->args[a].type);
+            char *d = arg_description(one, one->args[a].name);
             cJSON_AddStringToObject(p, "description",
-                                     d ? d : t->args[a].name);
+                                     d ? d : one->args[a].name);
             free(d);
-            cJSON_AddItemToObject(props, t->args[a].name, p);
-            if (t->args[a].required)
+            cJSON_AddItemToObject(props, one->args[a].name, p);
+            if (one->args[a].required)
                 cJSON_AddItemToArray(required,
-                                     cJSON_CreateString(t->args[a].name));
+                                     cJSON_CreateString(one->args[a].name));
         }
         cJSON *schema = cJSON_CreateObject();
         cJSON_AddStringToObject(schema, "type", "object");
@@ -181,9 +173,9 @@ static cJSON *handle_tools_list(void)
         cJSON_AddItemToObject(schema, "required", required);
 
         cJSON *tool = cJSON_CreateObject();
-        cJSON_AddStringToObject(tool, "name", t->name);
-        char *d = tool_description(t);
-        cJSON_AddStringToObject(tool, "description", d ? d : t->name);
+        cJSON_AddStringToObject(tool, "name", one->name);
+        char *d = tool_description(one);
+        cJSON_AddStringToObject(tool, "description", d ? d : one->name);
         free(d);
         cJSON_AddItemToObject(tool, "inputSchema", schema);
         cJSON_AddItemToArray(tools, tool);
@@ -193,26 +185,27 @@ static cJSON *handle_tools_list(void)
     return res;
 }
 
-static cJSON *handle_tools_call(const cJSON *params, const cJSON *id)
+static cJSON *handle_tools_call(const mcp_table_t *t, const cJSON *params,
+                                const cJSON *id)
 {
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(params, "name");
     if (!cJSON_IsString(name) || !name->valuestring[0])
         return rpc_error(id, -32602, "tools/call needs a tool name");
 
-    const tool_def_t *t = NULL;
-    for (size_t i = 0; i < TOOL_COUNT; i++)
-        if (strcmp(TOOLS[i].name, name->valuestring) == 0) {
-            t = &TOOLS[i];
+    const mcp_tool_t *one = NULL;
+    for (size_t i = 0; i < t->count; i++)
+        if (strcmp(t->tools[i].name, name->valuestring) == 0) {
+            one = &t->tools[i];
             break;
         }
-    if (!t)
+    if (!one)
         return rpc_error(id, -32602, "unknown tool");
 
     const cJSON *arguments =
         cJSON_GetObjectItemCaseSensitive(params, "arguments");
 
     char err[512] = "";
-    char *out = t->fn(arguments, err, sizeof err);
+    char *out = one->fn(arguments, err, sizeof err);
 
     /* one text block either way; a tool failure is content the model
      * can read, flagged isError — the run keeps going (llmkit maps
@@ -232,7 +225,8 @@ static cJSON *handle_tools_call(const cJSON *params, const cJSON *id)
 
 /* ---------- entry point ---------- */
 
-char *mcp_handle_post(const char *body, size_t len, int *is_notification)
+char *mcp_handle_post(const mcp_table_t *t, const char *body, size_t len,
+                      int *is_notification)
 {
     *is_notification = 0;
     cJSON *msg = cJSON_ParseWithLength(body, len);
@@ -264,9 +258,9 @@ char *mcp_handle_post(const char *body, size_t len, int *is_notification)
     if (strcmp(m, "initialize") == 0) {
         reply = rpc_result(id, handle_initialize());
     } else if (strcmp(m, "tools/list") == 0) {
-        reply = rpc_result(id, handle_tools_list());
+        reply = rpc_result(id, handle_tools_list(t));
     } else if (strcmp(m, "tools/call") == 0) {
-        reply = handle_tools_call(params, id);
+        reply = handle_tools_call(t, params, id);
     } else if (strcmp(m, "ping") == 0) {
         reply = rpc_result(id, cJSON_CreateObject());
     } else {

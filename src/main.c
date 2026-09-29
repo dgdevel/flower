@@ -14,13 +14,15 @@ static void usage(FILE *out, const char *prog)
     fprintf(out,
         "flower — single-binary webapp server\n"
         "\n"
-        "usage: %s [-b ADDR] [-p PORT] [-c DIR] [-h]\n"
+        "usage: %s [-b ADDR] [-p PORT] [-c DIR] [-l BIN] [-h]\n"
         "\n"
         "options:\n"
         "  -b ADDR   address to bind (default 0.0.0.0 = all interfaces)\n"
         "  -p PORT   port to listen on (default 8080)\n"
         "  -c DIR    config directory (default: $XDG_CONFIG_HOME/flower,\n"
         "            or ~/.config/flower)\n"
+        "  -l BIN    the llmkit binary the project scan agent runs\n"
+        "            (default: $FLOWER_LLMKIT, or llmkit from PATH)\n"
         "  -h        show this help\n",
         prog);
 }
@@ -29,16 +31,20 @@ int main(int argc, char **argv)
 {
     const char *addr = NULL; /* NULL = bind all interfaces (0.0.0.0) */
     const char *cfg_dir = NULL;
+    const char *llmkit = NULL;
     long port = 8080;
 
     int opt;
-    while ((opt = getopt(argc, argv, "b:c:hp:")) != -1) {
+    while ((opt = getopt(argc, argv, "b:c:hl:p:")) != -1) {
         switch (opt) {
         case 'b':
             addr = strcmp(optarg, "*") == 0 ? NULL : optarg;
             break;
         case 'c':
             cfg_dir = optarg;
+            break;
+        case 'l':
+            llmkit = optarg;
             break;
         case 'p': {
             char *end = NULL;
@@ -63,5 +69,7 @@ int main(int argc, char **argv)
                 "(set HOME, XDG_CONFIG_HOME, or use -c DIR)\n");
         return 1;
     }
-    return server_run(addr, (uint16_t)port);
+    if (!llmkit)
+        llmkit = getenv("FLOWER_LLMKIT"); /* may stay NULL: "llmkit" */
+    return server_run(addr, (uint16_t)port, llmkit);
 }

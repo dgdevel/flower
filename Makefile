@@ -24,7 +24,7 @@ ASSET_SRCS   := $(shell find web -type f ! -name '.*' 2>/dev/null | LC_ALL=C sor
 PROMPT_SRCS  := $(shell find prompts -type f ! -name '.*' 2>/dev/null | LC_ALL=C sort)
 SRCS := src/main.c src/server.c src/http.c src/theme.c src/projects.c src/agents.c \
         src/tasks.c src/context.c src/prompts.c src/html.c src/web.c src/fs.c \
-        src/mcp.c src/util.c $(GEN_C) $(GEN_PC)
+        src/mcp.c src/scan.c src/util.c $(GEN_C) $(GEN_PC)
 OBJS := $(SRCS:.c=.o)
 
 all: $(BIN)

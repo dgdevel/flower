@@ -86,7 +86,7 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
 
   // project details: free-text notes below the identity fields
   const details = page.locator(".editor-details");
-  await expect(details.locator("h3")).toHaveText("Project details");
+  await expect(details.locator("> h3")).toHaveText("Project details");
   await page.fill('[data-f="description"]', "A home for bees\nand their honey.");
   await page.fill('[data-f="stakeholders"]', "the queen");
   await expect

@@ -19,7 +19,7 @@ static const char *const CTX_TYPE_NAMES[] = {
 };
 #define TYPE_COUNT (sizeof CTX_TYPE_NAMES / sizeof CTX_TYPE_NAMES[0])
 
-static int type_from_name(const char *s)
+int ctx_type_from_name(const char *s)
 {
     for (size_t i = 0; i < TYPE_COUNT; i++)
         if (strcmp(CTX_TYPE_NAMES[i], s) == 0) return (int)i;
@@ -71,7 +71,7 @@ static int parse_item(const cJSON *obj, ctx_item_t *out, int strict,
     snprintf(out->text, sizeof out->text, "%s", j->valuestring);
 
     j = cJSON_GetObjectItemCaseSensitive(obj, "type");
-    if (j && (!cJSON_IsString(j) || type_from_name(j->valuestring) < 0)) {
+    if (j && (!cJSON_IsString(j) || ctx_type_from_name(j->valuestring) < 0)) {
         if (strict) {
             path_set(field, sizeof field, prefix);
             path_add(field, sizeof field, ".type");
@@ -81,7 +81,7 @@ static int parse_item(const cJSON *obj, ctx_item_t *out, int strict,
             return -1;
         } /* lenient: stays "fact" */
     } else if (j && cJSON_IsString(j)) {
-        out->type = type_from_name(j->valuestring);
+        out->type = ctx_type_from_name(j->valuestring);
     }
 
     /* the update time; "created" is the retired name, still honored

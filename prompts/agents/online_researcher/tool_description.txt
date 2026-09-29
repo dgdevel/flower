@@ -1,0 +1,1 @@
+Research the web: pass a research query and get a detailed, source-backed answer, with the urls it used.

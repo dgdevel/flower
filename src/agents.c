@@ -910,6 +910,24 @@ static agent_t BUILTIN_AGENTS[] = {
         },
         .tool_count = 1,
     },
+    {
+        /* the scan orchestrator: its two researcher sub-agents are
+         * stdio servers whose command lines are only known at scan
+         * time (llmkit path + generated seed files), so src/scan.c
+         * adds them to the tools record when it spawns the runner */
+        .name = "project_scanner",
+        .llm = "",
+        .system_prompt = "",
+        .tools = {
+            {
+                .type = "http",
+                .name = "flower",
+                .url = "/scan/mcp",
+                .required = 1,
+            },
+        },
+        .tool_count = 1,
+    },
 };
 #define BUILTIN_N (sizeof BUILTIN_AGENTS / sizeof BUILTIN_AGENTS[0])
 
@@ -950,6 +968,14 @@ static int agents_builtin_find(const char *name)
     for (size_t i = 0; i < BUILTIN_N; i++)
         if (strcasecmp(BUILTIN_AGENTS[i].name, name) == 0) return (int)i;
     return -1;
+}
+
+const agent_t *agents_builtin_get(const char *name)
+{
+    int i = agents_builtin_find(name);
+    if (i < 0) return NULL;
+    builtins_init(); /* their prompts resolve from prompts/ on first use */
+    return &BUILTIN_AGENTS[i];
 }
 
 static const char *agents_dir(char *buf, size_t n)
@@ -1323,6 +1349,107 @@ static cJSON *agent_to_cjson(const agent_t *a)
 fail:
     cJSON_Delete(o);
     return NULL;
+}
+
+/* ---------- runner record assembly ----------
+ *
+ * The stored shapes are llmkit's record shapes, so driving the runner
+ * is assembly, not translation: an agent plus its referenced llm
+ * become the llm record, the agent's tools array becomes the tools
+ * record. Shared by everything that hands work to a runner (the
+ * project scan today, conversations later). */
+
+cJSON *agents_llm_record(const agent_t *a, const llm_t *l)
+{
+    if (!a || !l) return NULL;
+    cJSON *o = cJSON_CreateObject();
+    if (!o ||
+        !cJSON_AddStringToObject(o, "type", "llm") ||
+        !cJSON_AddStringToObject(o, "endpoint_protocol", l->endpoint_protocol) ||
+        !cJSON_AddStringToObject(o, "api_base", l->api_base))
+        goto fail;
+    if (l->model[0] && !cJSON_AddStringToObject(o, "model", l->model))
+        goto fail;
+    if (l->api_key[0] && !cJSON_AddStringToObject(o, "api_key", l->api_key))
+        goto fail;
+    {
+        cJSON *h = headers_to_cjson(l->headers, l->header_count);
+        if (h) cJSON_AddItemToObject(o, "headers", h);
+    }
+    {
+        cJSON *io = inference_to_cjson(&a->infer);
+        if (!io) {
+            /* nothing of the agent's own — but anthropic demands
+             * max_tokens, and the runner rejects a bare record */
+            if (strcmp(l->endpoint_protocol, "anthropic") == 0) {
+                io = cJSON_CreateObject();
+                if (io) add_num(io, "max_tokens", 4096);
+            }
+        } else if (strcmp(l->endpoint_protocol, "anthropic") == 0 &&
+                   !a->infer.max_tokens.set) {
+            add_num(io, "max_tokens", 4096);
+        }
+        if (io) cJSON_AddItemToObject(o, "inference_options", io);
+    }
+    return o;
+fail:
+    cJSON_Delete(o);
+    return NULL;
+}
+
+/* the tools record's server list: the agent's mcp servers, with
+ * urls of the form "/mcp" (this flower instance) resolved against
+ * base_url; absolute urls pass through verbatim. An empty array
+ * when the agent has no servers (the caller may append its own). */
+cJSON *agents_tools_record(const agent_t *a, const char *base_url)
+{
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) return NULL;
+    if (!a) return arr;
+    for (size_t i = 0; i < a->tool_count; i++) {
+        const agent_tool_t *t = &a->tools[i];
+        cJSON *one = cJSON_CreateObject();
+        if (!one ||
+            !cJSON_AddStringToObject(one, "type", t->type) ||
+            !cJSON_AddStringToObject(one, "name", t->name))
+            goto fail;
+        if (strcmp(t->type, "stdio") == 0) {
+            if (!cJSON_AddStringToObject(one, "command_line", t->command_line))
+                goto fail;
+        } else {
+            if (t->url[0] == '/') { /* "/mcp": this flower instance */
+                char url[CFG_URL_MAX + 32];
+                if (snprintf(url, sizeof url, "%s%s", base_url, t->url) >=
+                        (int)sizeof url)
+                    goto fail;
+                if (!cJSON_AddStringToObject(one, "url", url)) goto fail;
+            } else if (!cJSON_AddStringToObject(one, "url", t->url)) {
+                goto fail;
+            }
+            cJSON *h = headers_to_cjson(t->headers, t->header_count);
+            if (h) cJSON_AddItemToObject(one, "headers", h);
+        }
+        if (t->protocol[0] &&
+            !cJSON_AddStringToObject(one, "protocol", t->protocol))
+            goto fail;
+        if (t->required && !cJSON_AddBoolToObject(one, "required", 1))
+            goto fail;
+        if (t->term_count) {
+            cJSON *terms = cJSON_CreateArray();
+            if (!terms) goto fail;
+            for (size_t k = 0; k < t->term_count; k++)
+                cJSON_AddItemToArray(terms,
+                                     cJSON_CreateString(t->terminal_tools[k]));
+            cJSON_AddItemToObject(one, "terminal_tools", terms);
+        }
+        cJSON_AddItemToArray(arr, one);
+        continue;
+fail:
+        cJSON_Delete(one);
+        cJSON_Delete(arr);
+        return NULL;
+    }
+    return arr;
 }
 
 char *agents_to_json(const agents_t *a, const llms_t *llms, int with_builtins)

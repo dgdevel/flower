@@ -1,0 +1,1 @@
+Write the scanned project's four detail fields: description (what the project is about), objectives (what it should deliver), scope (what is in, what is out, what is available) and stakeholders (who is involved or affected). Pass only the fields to write; each one replaces the stored value. Multi-line text is fine. Keep the text concise and grounded in what the research found.

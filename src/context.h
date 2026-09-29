@@ -71,4 +71,8 @@ cJSON *context_to_cjson(const ctx_item_t *head, char id_prefix);
  * Shared by the stores and the prompt renderer. */
 const char *ctx_type_name(int type);
 
+/* The ctx_type_t for a wire name, or -1 when unknown. Shared by the
+ * stores and the scan tool that adds items. */
+int ctx_type_from_name(const char *name);
+
 #endif
