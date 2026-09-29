@@ -705,7 +705,7 @@ input.invalid { border-color: var(--warning); }
 .cfg-ok { color: var(--success); font-size: var(--size-secondary); }
 .cfg-warn { color: var(--warning); font-size: var(--size-secondary); }
 
-/* config page: llm endpoints + agents (master list / editor) */
+/* config page: llm endpoints (master list / editor) */
 main.page h2 { margin-top: 0; }
 .entity {
   display: grid;
@@ -744,15 +744,6 @@ main.page h2 { margin-top: 0; }
 }
 .entity-row:hover { background: var(--bg-tertiary); }
 .entity-row.active { background: var(--bg-tertiary); box-shadow: inset 3px 0 0 var(--accent); }
-.entity-row.missing .name::after { content: " ⚠"; color: var(--warning); }
-/* builtin agents: listed for reference, not editable */
-.entity-row.builtin { cursor: default; }
-.entity-row.builtin:hover { background: transparent; }
-.entity-row.builtin .name::after {
-  content: " · builtin";
-  color: var(--accent);
-  font-size: var(--size-secondary);
-}
 .entity-row .name {
   display: block;
   overflow: hidden;
@@ -779,7 +770,7 @@ main.page h2 { margin-top: 0; }
 }
 .entity-del { margin-top: .9rem; }
 
-/* name/value header rows (llm + mcp servers) */
+/* name/value header rows (llm http headers) */
 .kv-list { margin: .4rem 0 .2rem; }
 .kv-row { display: flex; gap: .5rem; margin: .35rem 0; }
 .kv-row input:first-child { flex: 0 0 11.5rem; }
@@ -798,34 +789,6 @@ details.opts summary {
 }
 details.opts summary:hover { color: var(--accent); }
 details.opts > .muted { margin: .5rem 0; }
-
-/* inference option grid */
-.opt-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: .6rem 1rem;
-  margin: .5rem 0;
-}
-.opt-grid input[type="number"] {
-  background: var(--bg-primary);
-  color: var(--fg-primary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
-  padding: .45rem .6rem;
-  font: inherit;
-  width: 100%;
-}
-.field-check { display: flex; align-items: center; gap: .55rem; }
-.field-check label { margin: 0; }
-.field-check input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }
-
-/* mcp server cards */
-.tool-card {
-  border: 1px solid var(--bg-tertiary);
-  border-radius: var(--radius);
-  padding: .8rem .9rem .6rem;
-  margin: .7rem 0;
-}
 
 /* textareas share the input look */
 textarea {

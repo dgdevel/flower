@@ -27,7 +27,7 @@ done
 curl -s -o /dev/null "$B/" || fail "server did not come up on $B"
 
 echo "== 1. embedded assets are byte-identical, no stray bytes =="
-for f in index.html config.html components.html style.css theme.js config.js agents.js app.js emoji.js; do
+for f in index.html config.html components.html style.css theme.js config.js llms.js app.js emoji.js; do
     curl -s "$B/$f" | cmp -s - "web/$f" || fail "$f: served bytes differ from web/$f"
 done
 for p in / /config.html /style.css /app.js /api/theme; do
