@@ -4,6 +4,7 @@
 
 #include "projects.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
+#include "util.h"
 
 #include <cJSON.h>
 #include <stdio.h>
@@ -11,8 +12,6 @@
 #include <string.h>
 #include <sys/stat.h> /* stat: working dirs must exist on save */
 #include <sys/types.h> /* mkdir */
-#include <time.h>
-#include <unistd.h> /* getpid */
 
 /* ---------- defaults & limits ---------- */
 
@@ -25,33 +24,6 @@ static const char *const DEFAULT_COLORS[] = {
 #define DEFAULT_EMOJI "\xf0\x9f\x8c\xb8" /* 🌸 */
 
 /* ---------- validation ---------- */
-
-/* random lowercase-hex id, n chars (buf holds n+1). /dev/urandom with
- * a time+pid fallback — uniqueness, not secrecy, is the goal. */
-static void gen_hex_id(char *buf, size_t n)
-{
-    static const char hex[] = "0123456789abcdef";
-    unsigned char raw[16];
-    size_t nb = (n + 1) / 2;
-    int ok = 0;
-    if (nb <= sizeof raw) {
-        FILE *f = fopen("/dev/urandom", "rb");
-        if (f) {
-            ok = fread(raw, 1, nb, f) == nb;
-            fclose(f);
-        }
-    }
-    if (!ok) {
-        unsigned seed = (unsigned)getpid() ^ (unsigned)time(NULL);
-        for (size_t i = 0; i < nb && i < sizeof raw; i++) {
-            seed = seed * 1103515245u + 12345u;
-            raw[i] = (unsigned char)(seed >> 16);
-        }
-    }
-    for (size_t i = 0; i < n; i++)
-        buf[i] = hex[(raw[i / 2] >> (i % 2 ? 0 : 4)) & 0xf];
-    buf[n] = '\0';
-}
 
 /* exactly PROJECT_ID_LEN lowercase hex chars */
 static int valid_id(const char *s)
@@ -76,56 +48,11 @@ static int valid_color(const char *s)
     return 1;
 }
 
-/* Valid UTF-8 with no control characters (C0, DEL); n is the byte
- * length. Keeps emoji/titles/path names safe to store and re-emit.
- * multiline additionally allows \n and \t (the free-text detail
- * fields are multi-line by nature). */
-static int valid_text(const char *s, size_t n, int multiline)
-{
-    size_t i = 0;
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        unsigned cp;
-        int need;
-        if (c < 0x80) {
-            if (c < 0x20 || c == 0x7f) {
-                if (multiline && (c == '\n' || c == '\t')) {
-                    i++;
-                    continue;
-                }
-                return 0;
-            }
-            i++;
-            continue;
-        } else if ((c & 0xe0) == 0xc0) {
-            cp = c & 0x1f; need = 1;
-        } else if ((c & 0xf0) == 0xe0) {
-            cp = c & 0x0f; need = 2;
-        } else if ((c & 0xf8) == 0xf0) {
-            cp = c & 0x07; need = 3;
-        } else {
-            return 0; /* stray continuation / invalid lead */
-        }
-        if (i + (size_t)need >= n) return 0; /* truncated sequence */
-        for (int k = 1; k <= need; k++) {
-            unsigned char cc = (unsigned char)s[i + (size_t)k];
-            if ((cc & 0xc0) != 0x80) return 0;
-            cp = (cp << 6) | (cc & 0x3f);
-        }
-        if (need == 1 && cp < 0x80) return 0;            /* overlong */
-        if (need == 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff)))
-            return 0;                                     /* overlong/surrogate */
-        if (need == 3 && (cp < 0x10000 || cp > 0x10ffff)) return 0;
-        i += (size_t)need + 1;
-    }
-    return 1;
-}
-
 /* absolute path (starts with '/'), sane length, no control characters */
 static int valid_dir(const char *s)
 {
     size_t n = strlen(s);
-    return n >= 1 && n < PROJECT_DIR_MAX && s[0] == '/' && valid_text(s, n, 0);
+    return n >= 1 && n < PROJECT_DIR_MAX && s[0] == '/' && valid_utf8_text(s, n, 0);
 }
 
 /* "last component" of a directory path, for the default title */
@@ -223,7 +150,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     j = cJSON_GetObjectItemCaseSensitive(obj, "title");
     if (cJSON_IsString(j) && j->valuestring) {
         size_t n = strlen(j->valuestring);
-        if (n >= sizeof out->title || !valid_text(j->valuestring, n, 0)) {
+        if (n >= sizeof out->title || !valid_utf8_text(j->valuestring, n, 0)) {
             if (strict) {
                 snprintf(err_field, err_field_n, "projects[%zu].title", index);
                 snprintf(err_msg, err_msg_n, "text, max %d bytes, no control characters",
@@ -253,7 +180,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     j = cJSON_GetObjectItemCaseSensitive(obj, "emoji");
     if (cJSON_IsString(j) && j->valuestring && j->valuestring[0] &&
         strlen(j->valuestring) < sizeof out->emoji &&
-        valid_text(j->valuestring, strlen(j->valuestring), 0)) {
+        valid_utf8_text(j->valuestring, strlen(j->valuestring), 0)) {
         snprintf(out->emoji, sizeof out->emoji, "%s", j->valuestring);
     } else if (j && strict) {
         snprintf(err_field, err_field_n, "projects[%zu].emoji", index);
@@ -271,7 +198,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
         if (!j) continue; /* missing -> stays empty */
         const char *sv = cJSON_IsString(j) ? j->valuestring : NULL;
         size_t n = sv ? strlen(sv) : 0;
-        if (!sv || n >= PROJECT_TEXT_MAX || !valid_text(sv, n, 1)) {
+        if (!sv || n >= PROJECT_TEXT_MAX || !valid_utf8_text(sv, n, 1)) {
             if (strict) {
                 snprintf(err_field, err_field_n, "projects[%zu].%s", index,
                          DETAIL_FIELDS[k].key);
@@ -349,21 +276,10 @@ int projects_load(projects_t *p)
 {
     memset(p, 0, sizeof *p);
 
-    char path[4352], *buf = NULL;
-    FILE *f = fopen(projects_path(path, sizeof path), "rb");
-    if (!f) return 1; /* no file yet -> empty list */
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long sz = ftell(f);
-        if (sz > 0 && sz < 1024 * 1024) {
-            rewind(f);
-            buf = malloc((size_t)sz + 1);
-            if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz)
-                buf[sz] = '\0';
-            else { free(buf); buf = NULL; }
-        }
-    }
-    fclose(f);
-    if (!buf) return 1;
+    char path[4352];
+    char *buf = read_whole_file(projects_path(path, sizeof path),
+                                1024 * 1024);
+    if (!buf) return 1; /* no file (or unreadable) -> empty list */
 
     cJSON *j = cJSON_Parse(buf);
     free(buf);
@@ -420,12 +336,8 @@ void projects_clear(projects_t *p)
 
 int projects_save(const projects_t *p)
 {
-    char path[4352], tmp[4400];
+    char path[4352];
     projects_path(path, sizeof path);
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
-
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
 
     cJSON *j = cJSON_CreateArray();
     if (j)
@@ -455,21 +367,9 @@ int projects_save(const projects_t *p)
             }
             cJSON_AddItemToArray(j, o);
         }
-    char *out = j ? cJSON_Print(j) : NULL; /* pretty-printed */
+    int rc = save_json_atomic(path, j);
     cJSON_Delete(j);
-
-    int ok = out && fputs(out, f) != EOF && fputc('\n', f) != EOF &&
-             fclose(f) == 0;
-    free(out);
-    if (!ok) {
-        remove(tmp);
-        return -1;
-    }
-    if (rename(tmp, path) != 0) {
-        remove(tmp);
-        return -1;
-    }
-    return 0;
+    return rc;
 }
 
 /* ---------- JSON in (strict) / out ---------- */

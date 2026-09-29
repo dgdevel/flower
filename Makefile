@@ -24,7 +24,7 @@ ASSET_SRCS   := $(shell find web -type f ! -name '.*' 2>/dev/null | LC_ALL=C sor
 PROMPT_SRCS  := $(shell find prompts -type f ! -name '.*' 2>/dev/null | LC_ALL=C sort)
 SRCS := src/main.c src/server.c src/http.c src/theme.c src/projects.c src/agents.c \
         src/tasks.c src/context.c src/prompts.c src/html.c src/web.c src/fs.c \
-        src/mcp.c $(GEN_C) $(GEN_PC)
+        src/mcp.c src/util.c $(GEN_C) $(GEN_PC)
 OBJS := $(SRCS:.c=.o)
 
 all: $(BIN)
@@ -63,10 +63,10 @@ check: $(BIN) $(SELFTEST)
 # parser self-test: html tokenizer/readability/markdown, ddg extraction,
 # prompt templating, fs tools — runs offline against tests/fixtures/
 $(SELFTEST): tests/selftest.c src/html.o src/web.o src/fs.o src/prompts.o \
-             src/context.o src/prompts_gen.o
+             src/context.o src/util.o src/prompts_gen.o
 	$(CC) $(WARN) $(CFLAGS) -Isrc $(CJSON_CFLAGS) $(CURL_CFLAGS) -o $@ $< \
 	      src/html.o src/web.o src/fs.o src/prompts.o src/context.o \
-	      src/prompts_gen.o $(CJSON_LIBS) $(CURL_LIBS)
+	      src/util.o src/prompts_gen.o $(CJSON_LIBS) $(CURL_LIBS)
 
 clean:
 	rm -f $(BIN) $(EMBED) $(GEN_C) $(GEN_H) $(GEN_PC) $(GEN_PH) \

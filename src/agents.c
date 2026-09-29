@@ -15,6 +15,7 @@
 #include "agents.h"
 #include "prompts.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
+#include "util.h"
 
 #include <cJSON.h>
 #include <dirent.h>
@@ -26,7 +27,6 @@
 #include <strings.h> /* strcasecmp */
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h> /* getpid */
 
 static cJSON *llm_to_cjson(const llm_t *l);
 static cJSON *agent_to_cjson(const agent_t *a);
@@ -63,49 +63,9 @@ static const cJSON *unknown_key(const cJSON *obj, const char *const *keys,
 
 /* ---------- shared validation ---------- */
 
-/* Valid UTF-8 with no control characters; multiline also allows \n, \t
- * (system prompts, stop sequences, multi-line command lines). */
-static int valid_utf8(const char *s, size_t n, int multiline)
-{
-    size_t i = 0;
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        unsigned cp;
-        int need;
-        if (c < 0x80) {
-            if (c < 0x20 || c == 0x7f) {
-                if (multiline && (c == '\n' || c == '\t')) { i++; continue; }
-                return 0;
-            }
-            i++;
-            continue;
-        } else if ((c & 0xe0) == 0xc0) {
-            cp = c & 0x1f; need = 1;
-        } else if ((c & 0xf0) == 0xe0) {
-            cp = c & 0x0f; need = 2;
-        } else if ((c & 0xf8) == 0xf0) {
-            cp = c & 0x07; need = 3;
-        } else {
-            return 0; /* stray continuation / invalid lead */
-        }
-        if (i + (size_t)need >= n) return 0; /* truncated sequence */
-        for (int k = 1; k <= need; k++) {
-            unsigned char cc = (unsigned char)s[i + (size_t)k];
-            if ((cc & 0xc0) != 0x80) return 0;
-            cp = (cp << 6) | (cc & 0x3f);
-        }
-        if (need == 1 && cp < 0x80) return 0;            /* overlong */
-        if (need == 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff)))
-            return 0;                                     /* overlong/surrogate */
-        if (need == 3 && (cp < 0x10000 || cp > 0x10ffff)) return 0;
-        i += (size_t)need + 1;
-    }
-    return 1;
-}
-
 static int str_ok(const char *s, size_t cap, int multiline)
 {
-    return s[0] && strlen(s) < cap && valid_utf8(s, strlen(s), multiline);
+    return s[0] && strlen(s) < cap && valid_utf8_text(s, strlen(s), multiline);
 }
 
 /* an http(s) URL: scheme, nothing whitespace-ish or control */
@@ -327,25 +287,6 @@ void llms_free(llms_t *l)
     l->count = 0;
 }
 
-static char *read_file(const char *path, long cap)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    char *buf = NULL;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long sz = ftell(f);
-        if (sz > 0 && sz < cap) {
-            rewind(f);
-            buf = malloc((size_t)sz + 1);
-            if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz)
-                buf[sz] = '\0';
-            else { free(buf); buf = NULL; }
-        }
-    }
-    fclose(f);
-    return buf;
-}
-
 /* parse a whole llm array; strict = PUT (errors), lenient = load */
 static llms_parse_result_t llms_parse(const char *buf, size_t len,
                                       int strict, llms_t *out,
@@ -426,7 +367,7 @@ int llms_load(llms_t *l)
     memset(l, 0, sizeof *l);
     char path[4352];
     snprintf(path, sizeof path, "%s/llms.json", theme_dir());
-    char *buf = read_file(path, 1024 * 1024);
+    char *buf = read_whole_file(path, 1024 * 1024);
     if (!buf) return 1;
     llms_parse(buf, strlen(buf), 0, l, NULL, 0, NULL, 0); /* lenient */
     free(buf);
@@ -435,12 +376,8 @@ int llms_load(llms_t *l)
 
 int llms_save(const llms_t *l)
 {
-    char path[4352], tmp[4400];
+    char path[4352];
     snprintf(path, sizeof path, "%s/llms.json", theme_dir());
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
-
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
     cJSON *j = cJSON_CreateArray();
     if (j)
         for (size_t i = 0; i < l->count; i++) {
@@ -448,14 +385,9 @@ int llms_save(const llms_t *l)
             if (!o) { cJSON_Delete(j); j = NULL; break; }
             cJSON_AddItemToArray(j, o);
         }
-    char *out = j ? cJSON_Print(j) : NULL; /* pretty-printed */
+    int rc = save_json_atomic(path, j);
     cJSON_Delete(j);
-    int ok = out && fputs(out, f) != EOF && fputc('\n', f) != EOF &&
-             fclose(f) == 0;
-    free(out);
-    if (!ok) { remove(tmp); return -1; }
-    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
-    return 0;
+    return rc;
 }
 
 llms_parse_result_t llms_from_json(const char *buf, size_t len, llms_t *out,
@@ -850,7 +782,7 @@ static int parse_agent(const cJSON *obj, agent_t *out, size_t index,
     if (j && (!cJSON_IsString(j) ||
               strlen(cJSON_IsString(j) ? j->valuestring : "") >=
                   AGENT_PROMPT_MAX ||
-              !valid_utf8(j->valuestring, strlen(j->valuestring), 1))) {
+              !valid_utf8_text(j->valuestring, strlen(j->valuestring), 1))) {
         snprintf(field, sizeof field, "%s.system_prompt", prefix);
         if (strict)
             return vfail(strict, ef, efn, em, emn, field,
@@ -1005,35 +937,18 @@ static void builtins_init(void)
     }
 }
 
-const agent_t *agents_builtin(size_t i)
-{
-    builtins_init();
-    return i < BUILTIN_N ? &BUILTIN_AGENTS[i] : NULL;
-}
-
-size_t agents_builtin_count(void)
-{
-    return BUILTIN_N;
-}
-
-int agents_builtin_find(const char *name)
-{
-    if (!name) return -1;
-    for (size_t i = 0; i < BUILTIN_N; i++)
-        if (strcasecmp(BUILTIN_AGENTS[i].name, name) == 0) return (int)i;
-    return -1;
-}
-
 static int is_builtin(const agent_t *a)
 {
     return a >= BUILTIN_AGENTS && a < BUILTIN_AGENTS + BUILTIN_N;
 }
 
-int agents_find(const agents_t *a, const char *name)
+/* case-insensitive builtin lookup: index, or -1. User agents may not
+ * take a builtin's name. */
+static int agents_builtin_find(const char *name)
 {
     if (!name) return -1;
-    for (size_t i = 0; i < a->count; i++)
-        if (strcasecmp(a->items[i]->name, name) == 0) return (int)i;
+    for (size_t i = 0; i < BUILTIN_N; i++)
+        if (strcasecmp(BUILTIN_AGENTS[i].name, name) == 0) return (int)i;
     return -1;
 }
 
@@ -1077,7 +992,7 @@ int agents_load(agents_t *a)
         char path[4352 + 160];
         snprintf(path, sizeof path, "%s/%s", dir, names[i]);
         free(names[i]);
-        char *buf = read_file(path, 1024 * 1024);
+        char *buf = read_whole_file(path, 1024 * 1024);
         if (!buf) continue;
         cJSON *j = cJSON_Parse(buf);
         free(buf);
@@ -1148,20 +1063,12 @@ int agents_save(const agents_t *a)
         agent_file(a, i, (const char (*)[96])files, files[i], sizeof files[i]);
 
     for (size_t i = 0; i < a->count; i++) {
-        char path[8704], tmp[8704 + 32];
+        char path[8704];
         snprintf(path, sizeof path, "%s/%s", dir, files[i]);
-        snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
-
-        FILE *f = fopen(tmp, "w");
-        if (!f) return -1;
         cJSON *j = agent_to_cjson(a->items[i]);
-        char *out = j ? cJSON_Print(j) : NULL; /* pretty-printed */
+        int rc = j ? save_json_atomic(path, j) : -1;
         cJSON_Delete(j);
-        int ok = out && fputs(out, f) != EOF && fputc('\n', f) != EOF &&
-                 fclose(f) == 0;
-        free(out);
-        if (!ok) { remove(tmp); return -1; }
-        if (rename(tmp, path) != 0) { remove(tmp); return -1; }
+        if (rc != 0) return -1;
     }
 
     /* delete agent files that are no longer in the list */

@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "context.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,70 +30,6 @@ const char *ctx_type_name(int t)
 {
     return (t >= 0 && (size_t)t < TYPE_COUNT) ? CTX_TYPE_NAMES[t]
                                               : CTX_TYPE_NAMES[CTX_FACT];
-}
-
-/* valid UTF-8 with no control characters; the text is multi-line */
-static int valid_text(const char *s, size_t n)
-{
-    size_t i = 0;
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        unsigned cp;
-        int need;
-        if (c < 0x80) {
-            if (c < 0x20 || c == 0x7f) {
-                if (c == '\n' || c == '\t') { i++; continue; }
-                return 0;
-            }
-            i++;
-            continue;
-        } else if ((c & 0xe0) == 0xc0) {
-            cp = c & 0x1f; need = 1;
-        } else if ((c & 0xf0) == 0xe0) {
-            cp = c & 0x0f; need = 2;
-        } else if ((c & 0xf8) == 0xf0) {
-            cp = c & 0x07; need = 3;
-        } else {
-            return 0;
-        }
-        if (i + (size_t)need >= n) return 0;
-        for (int k = 1; k <= need; k++) {
-            unsigned char cc = (unsigned char)s[i + (size_t)k];
-            if ((cc & 0xc0) != 0x80) return 0;
-            cp = (cp << 6) | (cc & 0x3f);
-        }
-        if (need == 1 && cp < 0x80) return 0;
-        if (need == 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff)))
-            return 0;
-        if (need == 3 && (cp < 0x10000 || cp > 0x10ffff)) return 0;
-        i += (size_t)need + 1;
-    }
-    return 1;
-}
-
-/* ---------- json error paths (same clamp-not-warn trick as
- * tasks.c: memcpy paths cannot trip -Wformat-truncation) ---------- */
-
-static void path_set(char *dst, size_t n, const char *src)
-{
-    size_t l = strnlen(src, n - 1);
-    memcpy(dst, src, l);
-    dst[l] = '\0';
-}
-
-static void path_add(char *dst, size_t n, const char *suffix)
-{
-    size_t l = strnlen(dst, n - 1);
-    size_t m = strnlen(suffix, n - 1 - l);
-    memcpy(dst + l, suffix, m);
-    dst[l + m] = '\0';
-}
-
-static void path_add_index(char *dst, size_t n, size_t i)
-{
-    char idx[24];
-    snprintf(idx, sizeof idx, "[%zu]", i);
-    path_add(dst, n, idx);
 }
 
 /* ---------- list ---------- */
@@ -123,7 +60,7 @@ static int parse_item(const cJSON *obj, ctx_item_t *out, int strict,
     j = cJSON_GetObjectItemCaseSensitive(obj, "text");
     if (!cJSON_IsString(j) || !j->valuestring || !j->valuestring[0] ||
         strlen(j->valuestring) >= sizeof out->text ||
-        !valid_text(j->valuestring, strlen(j->valuestring))) {
+        !valid_utf8_text(j->valuestring, strlen(j->valuestring), 1)) {
         path_set(field, sizeof field, prefix);
         path_add(field, sizeof field, ".text");
         snprintf(ef, efn, "%s", field);

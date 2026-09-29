@@ -28,28 +28,9 @@ static const char *DDG_URL = "https://html.duckduckgo.com/html/?q=";
 
 /* ---------- url helpers ---------- */
 
-/* percent-encode everything but unreserved characters */
-static char *url_encode(const char *s)
-{
-    size_t n = strlen(s);
-    char *out = malloc(n * 3 + 1);
-    if (!out) return NULL;
-    char *w = out;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-            c == '.' || c == '~') {
-            *w++ = (char)c;
-        } else {
-            w += sprintf(w, "%%%02X", c);
-        }
-    }
-    *w = '\0';
-    return out;
-}
-
-/* percent-decode '+' as space too (query-string semantics) */
+/* percent-decode, hand-rolled on purpose: '+' must become a space
+ * (query-string semantics, duckduckgo's uddg= uses it), which
+ * curl_easy_unescape does not do */
 static char *url_decode(const char *s, size_t n)
 {
     char *out = malloc(n + 1);
@@ -292,14 +273,14 @@ char *web_search(const char *query, char *err, size_t err_n)
         snprintf(err, err_n, "empty query");
         return NULL;
     }
-    char *q = url_encode(query);
+    char *q = curl_easy_escape(NULL, query, (int)strlen(query));
     if (!q) {
         snprintf(err, err_n, "out of memory");
         return NULL;
     }
     char url[2048];
     snprintf(url, sizeof url, "%s%s", DDG_URL, q);
-    free(q);
+    curl_free(q);
 
     char *body = NULL;
     size_t len = 0;

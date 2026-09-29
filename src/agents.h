@@ -191,12 +191,8 @@ char *agents_to_json(const agents_t *a, const llms_t *llms,
 /* Compiled-in agents shipped with flower: listed and selectable like
  * user agents but not editable — they carry no llm reference of their
  * own (llm is ""), so a task bound to one must select an llm.
- * User agents may not take a builtin's name (case-insensitive). */
-const agent_t *agents_builtin(size_t i); /* i < agents_builtin_count() */
-size_t agents_builtin_count(void);
-int agents_builtin_find(const char *name); /* index, or -1 */
-
-/* Case-insensitive lookup across user agents only: index, or -1. */
-int agents_find(const agents_t *a, const char *name);
+ * User agents may not take a builtin's name (case-insensitive). They
+ * are surfaced through agents_to_json(with_builtins); the listing
+ * helpers the conversation runner will need land with it. */
 
 #endif

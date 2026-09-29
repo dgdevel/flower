@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "theme.h"
+#include "util.h"
 
 #include <cJSON.h>
 #include <errno.h>
@@ -9,7 +10,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 /* ---------- schema table ---------- */
 
@@ -176,21 +176,10 @@ int theme_load(theme_t *t)
 {
     theme_defaults(t);
 
-    char path[4352], *buf = NULL;
-    FILE *f = fopen(theme_path(path, sizeof path), "rb");
-    if (!f) return 1; /* no file yet */
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long sz = ftell(f);
-        if (sz > 0 && sz < 1024 * 1024) {
-            rewind(f);
-            buf = malloc((size_t)sz + 1);
-            if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz)
-                buf[sz] = '\0';
-            else { free(buf); buf = NULL; }
-        }
-    }
-    fclose(f);
-    if (!buf) return 1;
+    char path[4352];
+    char *buf = read_whole_file(theme_path(path, sizeof path),
+                                1024 * 1024);
+    if (!buf) return 1; /* no file (or unreadable) -> defaults */
 
     cJSON *j = cJSON_Parse(buf);
     free(buf);
@@ -214,32 +203,16 @@ int theme_load(theme_t *t)
 
 int theme_save(const theme_t *t)
 {
-    char path[4352], tmp[4400];
+    char path[4352];
     theme_path(path, sizeof path);
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
-
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
 
     cJSON *j = cJSON_CreateObject();
     for (size_t i = 0; i < FIELD_COUNT; i++)
         cJSON_AddStringToObject(j, fields[i].key,
                                 (const char *)t + fields[i].offset);
-    char *out = cJSON_Print(j); /* pretty-printed */
+    int rc = save_json_atomic(path, j);
     cJSON_Delete(j);
-
-    int ok = out && fputs(out, f) != EOF && fputc('\n', f) != EOF &&
-             fclose(f) == 0;
-    free(out);
-    if (!ok) {
-        remove(tmp);
-        return -1;
-    }
-    if (rename(tmp, path) != 0) {
-        remove(tmp);
-        return -1;
-    }
-    return 0;
+    return rc;
 }
 
 /* ---------- JSON in (strict) / out ---------- */

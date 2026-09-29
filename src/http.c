@@ -3,29 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static char lower(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-}
+#include <strings.h> /* strncasecmp */
 
 /* case-insensitive substring search (ASCII) */
 static bool ci_contains(const char *h, const char *n)
 {
-    for (; *h; h++) {
-        size_t i = 0;
-        while (n[i] && h[i] && lower(h[i]) == lower(n[i])) i++;
-        if (!n[i]) return true;
-    }
+    size_t nl = strlen(n);
+    for (; *h; h++)
+        if (strncasecmp(h, n, nl) == 0) return true;
     return false;
-}
-
-/* case-insensitive equality of the first n chars (t must be lowercase) */
-static bool ci_eq_n(const char *s, const char *t, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        if (lower(s[i]) != t[i]) return false;
-    return true;
 }
 
 static bool is_tchar(unsigned char c)
@@ -116,13 +102,13 @@ int http_parse_request(const char *buf, size_t len,
                 memcpy(val, v, vl);
                 val[vl] = '\0';
             }
-            if (name_len == 10 && ci_eq_n(buf + pos, "connection", 10)) {
+            if (name_len == 10 && strncasecmp(buf + pos, "connection", 10) == 0) {
                 if (have_val) {
                     if (ci_contains(val, "close")) hdr_close = true;
                     if (ci_contains(val, "keep-alive")) hdr_keepalive = true;
                 }
             } else if (name_len == 14 &&
-                       ci_eq_n(buf + pos, "content-length", 14)) {
+                       strncasecmp(buf + pos, "content-length", 14) == 0) {
                 if (!have_val || has_cl) return -1; /* dup CL: smuggling */
                 char *end = NULL;
                 unsigned long long clv = strtoull(val, &end, 10);
@@ -131,7 +117,7 @@ int http_parse_request(const char *buf, size_t len,
                 req->content_length = (size_t)clv;
                 has_cl = true;
             } else if (name_len == 17 &&
-                       ci_eq_n(buf + pos, "transfer-encoding", 17)) {
+                       strncasecmp(buf + pos, "transfer-encoding", 17) == 0) {
                 if (have_val && ci_contains(val, "chunked"))
                     req->chunked = true;
             }

@@ -8,8 +8,8 @@
  *
  * Usage: embed <out.c> <out.h> <dir> [prefix]
  * The optional prefix (default "asset") names the generated API:
- * asset_t/assets_all/asset_find, or e.g. prompt_t/prompts_all/prompt_find
- * for the second table flower compiles from prompts/.
+ * asset_t/asset_find, or e.g. prompt_t/prompt_find for the second
+ * table flower compiles from prompts/.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -247,10 +247,9 @@ static void write_header(FILE *f, const char *prefix, const char *dir)
         "    const unsigned char *data; /* file bytes, not NUL-terminated */\n"
         "    size_t size;\n"
         "} %s_t;\n\n"
-        "const %s_t *%ss_all(size_t *count);\n"
         "const %s_t *%s_find(const char *path); /* exact match, NULL if absent */\n\n"
         "#endif\n",
-        dir, guard, guard, prefix, prefix, prefix, prefix, prefix);
+        dir, guard, guard, prefix, prefix, prefix);
 }
 
 static void write_source(FILE *f, const char *prefix, const char *h_name)
@@ -269,11 +268,6 @@ static void write_source(FILE *f, const char *prefix, const char *h_name)
                 entries[i].url_path, entries[i].mime, prefix, i, prefix, i);
     fprintf(f, "};\n\n");
     fprintf(f,
-        "const %s_t *%ss_all(size_t *count)\n"
-        "{\n"
-        "    if (count) *count = sizeof %s_table / sizeof %s_table[0];\n"
-        "    return %s_table;\n"
-        "}\n\n"
         "const %s_t *%s_find(const char *path)\n"
         "{\n"
         "    for (size_t i = 0; i < sizeof %s_table / sizeof %s_table[0]; i++)\n"
@@ -281,7 +275,6 @@ static void write_source(FILE *f, const char *prefix, const char *h_name)
         "            return &%s_table[i];\n"
         "    return NULL;\n"
         "}\n",
-        prefix, prefix, prefix, prefix, prefix,
         prefix, prefix, prefix, prefix, prefix, prefix);
 }
 

@@ -250,6 +250,46 @@ static void respond_json(server_t *s, conn_t *c, int code, const char *json,
             keep_alive, false, NULL);
 }
 
+/* ---------- store PUT handlers ----------
+ *
+ * Every store PUT replies with one of three answers; these helpers
+ * shrink each handler to parse -> save -> swap -> echo. */
+
+/* 400/422: the parse error (field + message), or a plain fallback */
+static void respond_invalid(server_t *s, conn_t *c, http_request_t *req,
+                            int code, const char *ef, const char *em,
+                            const char *what)
+{
+    char *eb = theme_error_json(em, ef);
+    if (eb) {
+        respond_json(s, c, code, eb, req->keep_alive);
+        free(eb);
+    } else {
+        char fb[96];
+        snprintf(fb, sizeof fb, "{\"error\":\"invalid %s\"}", what);
+        respond_json(s, c, code, fb, req->keep_alive);
+    }
+}
+
+/* 500: the store could not be written to the config dir */
+static void respond_unwritable(server_t *s, conn_t *c, http_request_t *req,
+                               int *status, const char *file)
+{
+    char msg[128];
+    *status = 500;
+    snprintf(msg, sizeof msg,
+             "{\"error\":\"cannot write %s in config dir\"}", file);
+    respond_json(s, c, 500, msg, req->keep_alive);
+}
+
+/* 200: the saved store (already swapped in), or the fallback on OOM */
+static void respond_saved(server_t *s, conn_t *c, http_request_t *req,
+                          char *j, const char *fallback)
+{
+    respond_json(s, c, 200, j ? j : fallback, req->keep_alive);
+    free(j);
+}
+
 static void handle_theme_put(server_t *s, conn_t *c, http_request_t *req,
                              const char *body, size_t body_len, int *status)
 {
@@ -259,33 +299,17 @@ static void handle_theme_put(server_t *s, conn_t *c, http_request_t *req,
                                               efield, sizeof efield,
                                               emsg, sizeof emsg);
     if (pr != THEME_OK) {
-        *status = (pr == THEME_E_JSON) ? 400 : 422;
-        char *eb = theme_error_json(emsg, efield);
-        if (eb) {
-            respond_json(s, c, *status, eb, req->keep_alive);
-            free(eb);
-        } else {
-            respond_json(s, c, *status, "{\"error\":\"invalid theme\"}",
-                         req->keep_alive);
-        }
+        *status = pr == THEME_E_JSON ? 400 : 422;
+        respond_invalid(s, c, req, *status, efield, emsg, "theme");
         return;
     }
     if (theme_save(&nt) != 0) {
-        *status = 500;
-        respond_json(s, c, 500,
-                     "{\"error\":\"cannot write theme.json in config dir\"}",
-                     req->keep_alive);
+        respond_unwritable(s, c, req, status, "theme.json");
         return;
     }
     s->theme = nt;
     *status = 200;
-    char *j = theme_to_json(&nt);
-    if (j) {
-        respond_json(s, c, 200, j, req->keep_alive);
-        free(j);
-    } else {
-        respond_json(s, c, 200, "{}", req->keep_alive);
-    }
+    respond_saved(s, c, req, theme_to_json(&nt), "{}");
 }
 
 static void handle_projects_put(server_t *s, conn_t *c, http_request_t *req,
@@ -297,35 +321,19 @@ static void handle_projects_put(server_t *s, conn_t *c, http_request_t *req,
                                                     efield, sizeof efield,
                                                     emsg, sizeof emsg);
     if (pr != PROJECTS_OK) {
-        *status = (pr == PROJECTS_E_JSON) ? 400 : 422;
-        char *eb = theme_error_json(emsg, efield);
-        if (eb) {
-            respond_json(s, c, *status, eb, req->keep_alive);
-            free(eb);
-        } else {
-            respond_json(s, c, *status, "{\"error\":\"invalid project list\"}",
-                         req->keep_alive);
-        }
+        *status = pr == PROJECTS_E_JSON ? 400 : 422;
+        respond_invalid(s, c, req, *status, efield, emsg, "project list");
         return;
     }
     if (projects_save(&np) != 0) {
         projects_clear(&np);
-        *status = 500;
-        respond_json(s, c, 500,
-                     "{\"error\":\"cannot write projects.json in config dir\"}",
-                     req->keep_alive);
+        respond_unwritable(s, c, req, status, "projects.json");
         return;
     }
     projects_clear(&s->projects); /* the replaced contexts are heap now */
     s->projects = np;
     *status = 200;
-    char *j = projects_to_json(&np, 0);
-    if (j) {
-        respond_json(s, c, 200, j, req->keep_alive);
-        free(j);
-    } else {
-        respond_json(s, c, 200, "[]", req->keep_alive);
-    }
+    respond_saved(s, c, req, projects_to_json(&np, 0), "[]");
 }
 
 static void handle_llms_put(server_t *s, conn_t *c, http_request_t *req,
@@ -337,35 +345,19 @@ static void handle_llms_put(server_t *s, conn_t *c, http_request_t *req,
                                              efield, sizeof efield,
                                              emsg, sizeof emsg);
     if (pr != LLMS_OK) {
-        *status = (pr == LLMS_E_JSON) ? 400 : 422;
-        char *eb = theme_error_json(emsg, efield);
-        if (eb) {
-            respond_json(s, c, *status, eb, req->keep_alive);
-            free(eb);
-        } else {
-            respond_json(s, c, *status, "{\"error\":\"invalid llm list\"}",
-                         req->keep_alive);
-        }
+        *status = pr == LLMS_E_JSON ? 400 : 422;
+        respond_invalid(s, c, req, *status, efield, emsg, "llm list");
         return;
     }
     if (llms_save(&nl) != 0) {
         llms_free(&nl);
-        *status = 500;
-        respond_json(s, c, 500,
-                     "{\"error\":\"cannot write llms.json in config dir\"}",
-                     req->keep_alive);
+        respond_unwritable(s, c, req, status, "llms.json");
         return;
     }
     llms_free(&s->llms);
     s->llms = nl;
     *status = 200;
-    char *j = llms_to_json(&nl);
-    if (j) {
-        respond_json(s, c, 200, j, req->keep_alive);
-        free(j);
-    } else {
-        respond_json(s, c, 200, "[]", req->keep_alive);
-    }
+    respond_saved(s, c, req, llms_to_json(&nl), "[]");
 }
 
 static void handle_agents_put(server_t *s, conn_t *c, http_request_t *req,
@@ -377,78 +369,83 @@ static void handle_agents_put(server_t *s, conn_t *c, http_request_t *req,
                                                  &na, efield, sizeof efield,
                                                  emsg, sizeof emsg);
     if (pr != AGENTS_OK) {
-        *status = (pr == AGENTS_E_JSON) ? 400 : 422;
-        char *eb = theme_error_json(emsg, efield);
-        if (eb) {
-            respond_json(s, c, *status, eb, req->keep_alive);
-            free(eb);
-        } else {
-            respond_json(s, c, *status, "{\"error\":\"invalid agent list\"}",
-                         req->keep_alive);
-        }
+        *status = pr == AGENTS_E_JSON ? 400 : 422;
+        respond_invalid(s, c, req, *status, efield, emsg, "agent list");
         return;
     }
     if (agents_save(&na) != 0) {
         agents_free(&na);
-        *status = 500;
-        respond_json(s, c, 500,
-                     "{\"error\":\"cannot write agents/ in config dir\"}",
-                     req->keep_alive);
+        respond_unwritable(s, c, req, status, "agents/");
         return;
     }
     agents_free(&s->agents);
     s->agents = na;
     *status = 200;
-    char *j = agents_to_json(&na, NULL, 0); /* PUT echo: refs just validated */
-    if (j) {
-        respond_json(s, c, 200, j, req->keep_alive);
-        free(j);
-    } else {
-        respond_json(s, c, 200, "[]", req->keep_alive);
-    }
+    respond_saved(s, c, req, agents_to_json(&na, NULL, 0), "[]");
 }
 
-static void handle_tasks_put(server_t *s, conn_t *c,
-                                     http_request_t *req,
-                                     const char *body, size_t body_len,
-                                     int *status)
+static void handle_tasks_put(server_t *s, conn_t *c, http_request_t *req,
+                             const char *body, size_t body_len, int *status)
 {
     tasks_t nc;
     char efield[96], emsg[160];
-    tasks_parse_result_t pr = tasks_from_json(
-        body, body_len, &nc,
-        efield, sizeof efield, emsg, sizeof emsg);
+    tasks_parse_result_t pr = tasks_from_json(body, body_len, &nc,
+                                              efield, sizeof efield,
+                                              emsg, sizeof emsg);
     if (pr != TASKS_OK) {
-        *status = (pr == TASKS_E_JSON) ? 400 : 422;
-        char *eb = theme_error_json(emsg, efield);
-        if (eb) {
-            respond_json(s, c, *status, eb, req->keep_alive);
-            free(eb);
-        } else {
-            respond_json(s, c, *status,
-                         "{\"error\":\"invalid task list\"}",
-                         req->keep_alive);
-        }
+        *status = pr == TASKS_E_JSON ? 400 : 422;
+        respond_invalid(s, c, req, *status, efield, emsg, "task list");
         return;
     }
     if (tasks_save(&nc) != 0) {
         tasks_clear(&nc);
-        *status = 500;
-        respond_json(s, c, 500,
-                     "{\"error\":\"cannot write tasks/ in config dir\"}",
-                     req->keep_alive);
+        respond_unwritable(s, c, req, status, "tasks/");
         return;
     }
     tasks_clear(&s->tasks);
     s->tasks = nc;
     *status = 200;
-    char *j = tasks_to_json(&nc, 0, NULL); /* echo: validated */
-    if (j) {
-        respond_json(s, c, 200, j, req->keep_alive);
-        free(j);
-    } else {
-        respond_json(s, c, 200, "[]", req->keep_alive);
+    respond_saved(s, c, req, tasks_to_json(&nc, 0, NULL), "[]");
+}
+
+/* ---------- GET: the current stores as json ---------- */
+
+static char *theme_json(server_t *s)    { return theme_to_json(&s->theme); }
+static char *projects_json(server_t *s) { return projects_to_json(&s->projects, 1); }
+static char *llms_json(server_t *s)     { return llms_to_json(&s->llms); }
+static char *agents_json(server_t *s)   { return agents_to_json(&s->agents, &s->llms, 1); }
+static char *tasks_json(server_t *s)    { return tasks_to_json(&s->tasks, 1, &s->projects); }
+
+static const struct {
+    const char *path;
+    char *(*json)(server_t *);
+} API_GET[] = {
+    { "/api/theme",    theme_json },
+    { "/api/projects", projects_json },
+    { "/api/llms",     llms_json },
+    { "/api/agents",   agents_json },
+    { "/api/tasks",    tasks_json },
+};
+
+/* reply to GET /api/<store> (true) or say the path is none of them */
+static bool api_get(server_t *s, conn_t *c, http_request_t *req,
+                    const char *path, bool head, int *status)
+{
+    for (size_t i = 0; i < sizeof API_GET / sizeof API_GET[0]; i++) {
+        if (strcmp(path, API_GET[i].path) != 0) continue;
+        char *j = API_GET[i].json(s);
+        if (j) {
+            respond(s, c, 200, "application/json", j, strlen(j),
+                    req->keep_alive, head, NULL);
+            free(j);
+        } else {
+            *status = 500;
+            respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
+                         req->keep_alive);
+        }
+        return true;
     }
+    return false;
 }
 
 static void handle_request(server_t *s, conn_t *c, http_request_t *req,
@@ -477,61 +474,8 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 sse_start(s, c);
                 return;
             }
-        } else if (strcmp(path, "/api/theme") == 0) {
-            char *j = theme_to_json(&s->theme);
-            if (j) {
-                respond(s, c, 200, "application/json", j, strlen(j),
-                        req->keep_alive, head, NULL);
-                free(j);
-            } else {
-                status = 500;
-                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
-                             req->keep_alive);
-            }
-        } else if (strcmp(path, "/api/projects") == 0) {
-            char *j = projects_to_json(&s->projects, 1);
-            if (j) {
-                respond(s, c, 200, "application/json", j, strlen(j),
-                        req->keep_alive, head, NULL);
-                free(j);
-            } else {
-                status = 500;
-                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
-                             req->keep_alive);
-            }
-        } else if (strcmp(path, "/api/llms") == 0) {
-            char *j = llms_to_json(&s->llms);
-            if (j) {
-                respond(s, c, 200, "application/json", j, strlen(j),
-                        req->keep_alive, head, NULL);
-                free(j);
-            } else {
-                status = 500;
-                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
-                             req->keep_alive);
-            }
-        } else if (strcmp(path, "/api/agents") == 0) {
-            char *j = agents_to_json(&s->agents, &s->llms, 1);
-            if (j) {
-                respond(s, c, 200, "application/json", j, strlen(j),
-                        req->keep_alive, head, NULL);
-                free(j);
-            } else {
-                status = 500;
-                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
-                             req->keep_alive);
-            }
-        } else if (strcmp(path, "/api/tasks") == 0) {
-            char *j = tasks_to_json(&s->tasks, 1, &s->projects);
-            if (j) {
-                respond(s, c, 200, "application/json", j, strlen(j),
-                        req->keep_alive, head, NULL);
-                free(j);
-            } else {
-                status = 500;
-                respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
-                             req->keep_alive);
-            }
+        } else if (api_get(s, c, req, path, head, &status)) {
+            /* one of the stores, replied above */
         } else if (strcmp(path, "/mcp") == 0) {
             status = 405;
             respond(s, c, 405, "text/plain; charset=utf-8",

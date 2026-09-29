@@ -276,6 +276,59 @@ function contextEditor(list = [], prefix = "P") {
   return sec;
 }
 
+/* context-item wiring shared by the project editor and the task
+ * details — both panes own a context list edited in place. `owner`
+ * finds the list's owner (or null), `save` autosaves after an edit,
+ * `rerender` rebuilds the pane after a structural change. Each
+ * helper returns true when the event was a context-item event. */
+function onCtxInput(e, owner, save) {
+  const ci = e.target.dataset.ci;
+  if (ci == null || e.target.dataset.cf !== "text") return false;
+  const t = owner();
+  const c = t && t.context && t.context[+ci];
+  if (!c) return true;
+  c.text = e.target.value;
+  const row = e.target.closest(".ctx-item");
+  showCtxErrors(c, row);
+  touchCtxItem(c, row);
+  save();
+  return true;
+}
+
+function onCtxTypeChange(e, owner, save) {
+  if (!e.target.classList.contains("ctx-type")) return false;
+  const t = owner();
+  const c = t && t.context && t.context[+e.target.dataset.ci];
+  if (!c) return true;
+  c.type = e.target.value;
+  const row = e.target.closest(".ctx-item");
+  const ta = row?.querySelector('[data-cf="text"]');
+  if (ta) ta.placeholder = CTX_PLACEHOLDER[c.type] || "";
+  touchCtxItem(c, row);
+  save();
+  return true;
+}
+
+function onCtxClick(e, container, owner, save, rerender) {
+  const btn = e.target.closest("[data-action]");
+  const act = btn && btn.dataset.action;
+  if (act !== "ctx-add" && act !== "ctx-del") return false;
+  const t = owner();
+  if (!t) return true;
+  if (act === "ctx-add") {
+    const list = t.context || (t.context = []);
+    if (list.length >= CTX_MAX) return true;
+    list.push(newContextItem());
+    rerender();
+    container.querySelector(".ctx-item:last-of-type [data-cf='text']")?.focus();
+  } else {
+    t.context?.splice(+btn.dataset.ci, 1);
+    rerender();
+    save();
+  }
+  return true;
+}
+
 function openPicker(anchor) {
   closePicker();
   const total = EMOJI_GROUPS.reduce((a, [, items]) => a + items.length, 0);
@@ -729,18 +782,9 @@ railEl.addEventListener("click", (e) => {
 
 editorEl.addEventListener("input", (e) => {
   /* context item text: live state + live errors, autosave below */
-  const ci = e.target.dataset.ci;
-  if (ci != null && e.target.dataset.cf === "text") {
-    const t = draft || projects[selected];
-    const c = t && t.context && t.context[+ci];
-    if (!c) return;
-    c.text = e.target.value;
-    const row = e.target.closest(".ctx-item");
-    showCtxErrors(c, row);
-    touchCtxItem(c, row);
-    if (!draft) scheduleSave();
+  if (onCtxInput(e, () => draft || projects[selected],
+                 () => { if (!draft) scheduleSave(); }))
     return;
-  }
   const name = e.target.dataset.f;
   if (!name) return;
   const t = draft || projects[selected];
@@ -759,19 +803,15 @@ editorEl.addEventListener("input", (e) => {
 });
 
 editorEl.addEventListener("change", (e) => {
-  if (!e.target.classList.contains("ctx-type")) return;
-  const t = draft || projects[selected];
-  const c = t && t.context && t.context[+e.target.dataset.ci];
-  if (!c) return;
-  c.type = e.target.value;
-  const row = e.target.closest(".ctx-item");
-  const ta = row?.querySelector('[data-cf="text"]');
-  if (ta) ta.placeholder = CTX_PLACEHOLDER[c.type] || "";
-  touchCtxItem(c, row);
-  if (!draft) scheduleSave();
+  if (onCtxTypeChange(e, () => draft || projects[selected],
+                      () => { if (!draft) scheduleSave(); }))
+    return;
 });
 
 editorEl.addEventListener("click", (e) => {
+  if (onCtxClick(e, editorEl, () => draft || projects[selected],
+                 () => { if (!draft) scheduleSave(); }, renderEditor))
+    return;
   const btn = e.target.closest("[data-action]");
   if (!btn) { disarmDelete(); return; }
   const act = btn.dataset.action;
@@ -780,21 +820,6 @@ editorEl.addEventListener("click", (e) => {
   else if (act === "create") createProject();
   else if (act === "delete") deleteSelected(btn);
   else if (act === "pick-emoji") openPicker(btn);
-  else if (act === "ctx-add" || act === "ctx-del") {
-    const t = draft || projects[selected];
-    if (!t) return;
-    if (act === "ctx-add") {
-      const list = t.context || (t.context = []);
-      if (list.length >= CTX_MAX) return;
-      list.push(newContextItem());
-      renderEditor();
-      editorEl.querySelector(".ctx-item:last-of-type [data-cf='text']")?.focus();
-    } else {
-      t.context?.splice(+btn.dataset.ci, 1);
-      renderEditor();
-      if (!draft) scheduleSave();
-    }
-  }
 });
 
 // close the picker when clicking elsewhere or pressing Escape
@@ -1057,13 +1082,11 @@ function renderTaskPane() {
 /* ---------- validation (mirrors src/tasks.c) ---------- */
 
 function taskDraftValid() {
-  const errs = {};
-  const titleErr = bytes(taskDraft.title || "") <= 95 && noControls(taskDraft.title || "")
+  const t = taskDraft.title || "";
+  const msg = bytes(t) <= 95 && noControls(t)
     ? "" : "too long (95 bytes at most)";
-  if (titleErr) errs["task-title"] = titleErr;
-  for (const name of ["task-title"])
-    showTaskError(name, errs[name] || "");
-  return !Object.keys(errs).length;
+  showTaskError("task-title", msg);
+  return !msg;
 }
 
 /* ---------- server sync ---------- */
@@ -1327,18 +1350,7 @@ document.getElementById("new-task").addEventListener("click", startTaskDraft);
 
 taskDetailsEl.addEventListener("input", (e) => {
   /* context item text: live state + live errors, autosave below */
-  const ci = e.target.dataset.ci;
-  if (ci != null && e.target.dataset.cf === "text") {
-    const c = currentTask();
-    const item = c && c.context && c.context[+ci];
-    if (!item) return;
-    item.text = e.target.value;
-    const row = e.target.closest(".ctx-item");
-    showCtxErrors(item, row);
-    touchCtxItem(item, row);
-    scheduleTaskSave();
-    return;
-  }
+  if (onCtxInput(e, currentTask, scheduleTaskSave)) return;
   const name = e.target.dataset.f;
   if (!name || name !== "task-title") return;
   if (taskDraft) {
@@ -1356,19 +1368,13 @@ taskDetailsEl.addEventListener("input", (e) => {
 });
 
 taskDetailsEl.addEventListener("change", (e) => {
-  if (!e.target.classList.contains("ctx-type")) return;
-  const c = currentTask();
-  const item = c && c.context && c.context[+e.target.dataset.ci];
-  if (!item) return;
-  item.type = e.target.value;
-  const row = e.target.closest(".ctx-item");
-  const ta = row?.querySelector('[data-cf="text"]');
-  if (ta) ta.placeholder = CTX_PLACEHOLDER[item.type] || "";
-  touchCtxItem(item, row);
-  scheduleTaskSave();
+  onCtxTypeChange(e, currentTask, scheduleTaskSave);
 });
 
 taskDetailsEl.addEventListener("click", (e) => {
+  if (onCtxClick(e, taskDetailsEl, currentTask, scheduleTaskSave,
+                 renderTaskPane))
+    return;
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const act = btn.dataset.action;
@@ -1376,21 +1382,6 @@ taskDetailsEl.addEventListener("click", (e) => {
   else if (act === "task-cancel") {
     taskDraft = null;
     renderTaskPane();
-  } else if (act === "ctx-add" || act === "ctx-del") {
-    const c = currentTask();
-    if (!c) return;
-    if (act === "ctx-add") {
-      const list = c.context || (c.context = []);
-      if (list.length >= CTX_MAX) return;
-      list.push(newContextItem());
-      renderTaskPane();
-      taskDetailsEl.querySelector(".ctx-item:last-of-type [data-cf='text']")
-        ?.focus();
-    } else {
-      c.context?.splice(+btn.dataset.ci, 1);
-      renderTaskPane();
-      scheduleTaskSave();
-    }
   }
 });
 

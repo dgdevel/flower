@@ -9,6 +9,7 @@
 
 #include "context.h"
 #include "prompts_gen.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,52 +38,22 @@ char *prompt_text(const char *name)
     return s;
 }
 
-/* ---------- template rendering ---------- */
-
-/* growable output buffer */
-typedef struct {
-    char *data;
-    size_t len, cap;
-} sbuf_t;
-
-static int sbuf_putn(sbuf_t *b, const char *s, size_t n)
-{
-    if (!n) return 0;
-    if (b->len + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 256;
-        while (b->len + n + 1 > cap) cap *= 2;
-        char *d = realloc(b->data, cap);
-        if (!d) return -1;
-        b->data = d;
-        b->cap = cap;
-    }
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = '\0';
-    return 0;
-}
-
-static int sbuf_puts(sbuf_t *b, const char *s)
-{
-    return sbuf_putn(b, s ? s : "", s ? strlen(s) : 0);
-}
-
 /* "Field: text" with multi-line text indented two spaces; skipped
  * entirely when the field is empty */
 static int put_field(sbuf_t *out, const char *field, const char *text)
 {
     if (!text || !*text) return 0;
-    if (sbuf_puts(out, field) != 0) return -1;
-    if (sbuf_puts(out, ": ") != 0) return -1;
+    if (sb_puts(out, field) != 0) return -1;
+    if (sb_puts(out, ": ") != 0) return -1;
     for (const char *p = text; *p; p++) {
         char c[2] = { *p, '\0' };
         if (*p == '\n') {
-            if (sbuf_puts(out, "\n  ") != 0) return -1;
-        } else if (sbuf_putn(out, c, 1) != 0) {
+            if (sb_puts(out, "\n  ") != 0) return -1;
+        } else if (sb_putn(out, c, 1) != 0) {
             return -1;
         }
     }
-    if (sbuf_puts(out, "\n") != 0) return -1;
+    if (sb_puts(out, "\n") != 0) return -1;
     return 0;
 }
 
@@ -101,19 +72,19 @@ static int put_context(sbuf_t *out, const project_t *p)
 {
     if (!p) return 0;
     for (const ctx_item_t *it = p->context; it; it = it->next) {
-        if (sbuf_puts(out, "- [") != 0) return -1;
-        if (sbuf_puts(out, ctx_type_name(it->type)) != 0) return -1;
-        if (sbuf_puts(out, "] ") != 0) return -1;
+        if (sb_puts(out, "- [") != 0) return -1;
+        if (sb_puts(out, ctx_type_name(it->type)) != 0) return -1;
+        if (sb_puts(out, "] ") != 0) return -1;
         /* indent continuation lines of multi-line item text */
         for (const char *c = it->text; *c; c++) {
             if (*c == '\n') {
-                if (sbuf_puts(out, "\n  ") != 0) return -1;
+                if (sb_puts(out, "\n  ") != 0) return -1;
             } else {
                 char one[2] = { *c, '\0' };
-                if (sbuf_putn(out, one, 1) != 0) return -1;
+                if (sb_putn(out, one, 1) != 0) return -1;
             }
         }
-        if (sbuf_puts(out, "\n") != 0) return -1;
+        if (sb_puts(out, "\n") != 0) return -1;
     }
     return 0;
 }
@@ -124,9 +95,9 @@ static int render_var(sbuf_t *out, const char *name, size_t name_len,
                       const project_t *p)
 {
     if (name_len == 12 && strncmp(name, "project_path", 12) == 0)
-        return p ? sbuf_puts(out, p->dir) : 0;
+        return p ? sb_puts(out, p->dir) : 0;
     if (name_len == 12 && strncmp(name, "project_name", 12) == 0)
-        return p ? sbuf_puts(out, p->title) : 0;
+        return p ? sb_puts(out, p->title) : 0;
     if (name_len == 18 && strncmp(name, "project_attributes", 18) == 0)
         return put_attributes(out, p);
     if (name_len == 15 && strncmp(name, "project_context", 15) == 0)
@@ -147,13 +118,13 @@ char *prompt_render(const char *tpl, const project_t *proj)
     while (*p) {
         const char *open = strstr(p, "{{");
         if (!open) {
-            if (sbuf_puts(&out, p) != 0) goto oom;
+            if (sb_puts(&out, p) != 0) goto oom;
             break;
         }
-        if (sbuf_putn(&out, p, (size_t)(open - p)) != 0) goto oom;
+        if (sb_putn(&out, p, (size_t)(open - p)) != 0) goto oom;
         const char *close = strstr(open + 2, "}}");
         if (!close) { /* unterminated: keep the rest verbatim */
-            if (sbuf_puts(&out, open) != 0) goto oom;
+            if (sb_puts(&out, open) != 0) goto oom;
             break;
         }
         const char *name = open + 2;
@@ -163,14 +134,14 @@ char *prompt_render(const char *tpl, const project_t *proj)
         sbuf_t val = { 0 };
         int known = render_var(&val, name, name_len, proj);
         if (known == 0) {
-            if (sbuf_putn(&out, val.data ? val.data : "",
+            if (sb_putn(&out, val.data ? val.data : "",
                           val.len) != 0) {
                 free(val.data);
                 goto oom;
             }
             free(val.data);
         } else { /* unknown token: emit verbatim, typos stay visible */
-            if (sbuf_putn(&out, open, (size_t)(close + 2 - open)) != 0)
+            if (sb_putn(&out, open, (size_t)(close + 2 - open)) != 0)
                 goto oom;
         }
         p = close + 2;

@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "html.h"
+#include "util.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -16,40 +17,6 @@
 
 #define NODE_MAX  120000  /* nodes kept; further markup is dropped */
 #define DEPTH_MAX 400
-
-/* ---------- growable buffer ---------- */
-
-typedef struct {
-    char *data;
-    size_t len, cap;
-} sbuf_t;
-
-static int sb_putn(sbuf_t *b, const char *s, size_t n)
-{
-    if (!n) return 0;
-    if (b->len + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 256;
-        while (b->len + n + 1 > cap) cap *= 2;
-        char *d = realloc(b->data, cap);
-        if (!d) return -1;
-        b->data = d;
-        b->cap = cap;
-    }
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = '\0';
-    return 0;
-}
-
-static int sb_puts(sbuf_t *b, const char *s)
-{
-    return sb_putn(b, s ? s : "", s ? strlen(s) : 0);
-}
-
-static int sb_putc(sbuf_t *b, char c)
-{
-    return sb_putn(b, &c, 1);
-}
 
 static const char *find_sub(const char *hay, size_t n, const char *needle)
 {
