@@ -1,0 +1,3 @@
+The search query in plain natural language. Keep it short and
+specific; the exact phrasing matters, so strip filler words like
+"please" or "can you tell me".

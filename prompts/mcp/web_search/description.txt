@@ -1,0 +1,5 @@
+Search the web via DuckDuckGo and return the top results as a plain
+list. Each record is a Url line followed by a Description line (the
+result's title and snippet). Use this first when you need facts,
+current information, or candidate pages to read in full; then use
+flower.web_fetch on the most promising Urls.

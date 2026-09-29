@@ -17,7 +17,12 @@ create button on top, the selected task's details (id, project,
 title) and its typed **context items** below. A task is a **list of
 actions** (nested without a depth limit, each with a title,
 description, state and refinement type) edited in column three;
-projects carry context items of the same shape. See *Roadmap*.
+projects carry context items of the same shape. Part 4's web side
+has landed: flower offers its own **mcp server** at `POST /mcp`
+(`web_search`, `web_fetch`), builtin agents get their prompts from
+tweakable, template-capable **prompt files** under `prompts/`, and
+**`online_researcher`** — a research agent built on the two tools —
+ships compiled in. See *Roadmap*.
 
 ## Quick start
 
@@ -33,17 +38,21 @@ Pages: `/` (main app — three columns, projects manager), `/config.html`
 component gallery).
 
 Requires: Linux, a C11 compiler (`cc`), GNU make ≥ 4.3 (grouped targets),
-and **cJSON** (system package `libcjson`, discovered via pkg-config).
+and **cJSON** (system package `libcjson`, discovered via pkg-config)
+and **libcurl** (package `libcurl`, also via pkg-config — it powers the
+web tools behind `/mcp`).
 
 ## How it works
 
 **Build time** — assets are compiled into the binary:
 
 ```
-web/*.html ─┐
-web/*.css   ─┼─ tools/embed ──> src/assets_gen.{c,h} ──> linked into `flower`
-web/*.js    ─┘   (host tool,      (C arrays + MIME        (serves everything
-                       run by make)     + served path)          from memory)
+web/*.html  ─┐                 prompts/agents/…/system_prompt.txt
+web/*.css   ─┼─ tools/embed ──> src/assets_gen.{c,h}   ─┐
+web/*.js    ─┘   (host tool,   (C arrays + mime +       ├─ linked into `flower`
+                              served path)              │  (serves everything
+prompts/**/*.txt ─ tools/embed ─> src/prompts_gen.{c,h}─┘   from memory)
+                   (same tool, "prompt" prefix; never served over http)
 ```
 
 **Run time** — one thread, one `epoll` loop, all sockets non-blocking:
@@ -214,11 +223,63 @@ vanished project directory. A PUT replaces the whole
 list: files of removed agents are deleted.
 
 **Builtin agents** are compiled into the binary (currently:
-`assistant`) and merged into `GET /api/agents`, sorted by name and
-flagged `"builtin": true` — never written to `agents/` and their
-names are reserved (PUT rejects a user agent taking one). Tasks no longer reference agents or llms (see
+`assistant` and `online_researcher`) and merged into
+`GET /api/agents`, sorted by name and flagged `"builtin": true` —
+never written to `agents/`, their names are reserved (PUT rejects a
+user agent taking one). Their system prompts are not C strings but
+compiled-in **prompt files** (see below), tweakable without touching
+code. `online_researcher` carries flower's own mcp server as its
+tool (`{"type":"http","name":"flower","url":"/mcp"}` — the url
+means "this flower instance" and is resolved when a task is handed
+to the runner). Tasks no longer reference agents or llms (see
 below); the stores remain for the conversation runner later parts
 will add.
+
+**Prompts** live as plain `.txt` files under `prompts/` in the repo,
+compiled into the binary at build time by the same embedder that
+compiles `web/` (into a second, private table — they are never
+served over http):
+
+```
+prompts/
+  agents/<name>/system_prompt.txt        builtin agents' prompts
+  mcp/<tool>/description.txt             tool description (tools/list)
+  mcp/<tool>/arguments/<arg>.txt         per-argument hint
+```
+
+They support a small `{{variable}}` template language
+(`src/prompts.c`), meant to inject task/project context into a
+prompt when the runner lands:
+
+```
+{{project_path}}        the project's working directory
+{{project_name}}        the project's title
+{{project_attributes}}  its detail fields, "Field: text" per line
+{{project_context}}     its typed context items, "- [type] text" per line
+```
+
+Unknown tokens stay verbatim so typos remain visible; a NULL
+project renders the known variables as empty strings.
+
+**flower as an mcp server** — `POST /mcp` speaks mcp's json-rpc
+subset over the streamable-http transport with plain json replies
+(revision `2025-11-25`, matching what llmkit's client speaks):
+`initialize`, `notifications/*` (answered `202`), `tools/list`,
+`tools/call`, `ping`. The tools are flower's own web readers
+(`src/web.c`, libcurl + `src/html.c`):
+
+- **`web_search`** — queries DuckDuckGo's html endpoint and returns
+  the top ten results as `Url: …` / `Description: title — snippet`
+  records.
+- **`web_fetch`** — fetches one page, picks its main content
+  (readability-lite: obvious boilerplate stripped, paragraph
+  containers scored) and returns it as markdown (headings, lists,
+  links, code fences survive).
+
+Any mcp client can use them — the llmkit runner included — by
+registering `{"type":"http","name":"flower","url":"http://host:port/mcp"}`
+as a tool server; the model then sees `flower.web_search` and
+`flower.web_fetch`.
 
 `tasks/` — one directory per **task**, named by its
 server-generated 32-hex-char id, holding `task.json` with the
@@ -282,9 +343,15 @@ directory.
 ## Repository layout
 
 ```
-Makefile              build: embed assets, compile (cJSON via pkg-config), link
-tools/embed.c         asset compiler: web/** -> C arrays (deterministic, sorted,
-                      MIME table, escaping-safe for any binary content)
+Makefile              build: embed assets + prompts, compile (cJSON and
+                      libcurl via pkg-config), selftest, link
+tools/embed.c         asset compiler: web/** and prompts/** -> C arrays
+                      (deterministic, sorted, escaping-safe for any
+                      binary content; second table under the "prompt" prefix)
+tools/emoji.py        regenerates web/emoji.js from Unicode's emoji-test.txt
+                      (the emoji picker data; run manually per Unicode release)
+prompts/              tweakable prompt files, compiled in (see Prompts):
+                      agents/<name>/system_prompt.txt, mcp/<tool>/*.txt
 tools/emoji.py        regenerates web/emoji.js from Unicode's emoji-test.txt
                       (the emoji picker data; run manually per Unicode release)
 src/main.c            CLI entry point (-b addr, -p port, -c config dir, -h)
@@ -304,7 +371,14 @@ src/tasks.{c,h} tasks/ backend: one directory per
 src/context.{c,h}    typed context items shared by projects and
                       tasks (fact/pattern/risk/… — parse/emit
                       rules live once for both stores)
+src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
+src/html.{c,h}        tolerant html tokenizer/DOM, readability-lite and the
+                      markdown emitter (src/web.c's reading engine)
+src/web.{c,h}         outbound fetching (libcurl) + the web tools: ddg search
+                      record extraction, page-to-markdown
+src/mcp.{c,h}         flower's own mcp server: json-rpc dispatch for POST /mcp
 src/assets_gen.{c,h}  GENERATED — do not edit; regenerated by `make`
+src/prompts_gen.{c,h} GENERATED — do not edit; regenerated by `make`
 web/index.html        main app: three-column deck (projects,
                       tasks, actions)
 web/config.html       config page: theme, llm endpoints
@@ -319,6 +393,8 @@ web/emoji.js          GENERATED by tools/emoji.py — the full Unicode emoji
                       list for the picker (v18.0, 3,963 emojis)
 web/style.css         styles driven entirely by theme variables
 tests/smoke.sh        end-to-end smoke tests (make check)
+tests/selftest.c      offline parser checks: ddg extraction, readability/
+                      markdown, prompt templating (fixtures in tests/fixtures)
 tests/e2e/            playwright browser tests (firefox; config in
                       playwright.config.ts, server on :8120 with .e2e-config)
 ```
@@ -350,6 +426,9 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | deletes removed agents' files; 400 bad JSON;   |
 |                   |              | 422 invalid entry/unknown llm/duplicate or    |
 |                   |              | builtin-reserved name                          |
+| `/mcp`            | POST         | flower's own mcp server (see above):         |
+|                   |              | initialize/tools/list/tools/call json-rpc;   |
+|                   |              | notifications 202; parse error -32700        |
 | `/api/tasks` | GET/HEAD  | task array (newest first) + live      |
 |                   |              | `project_ok` flag per entry                    |
 | `/api/tasks` | PUT       | body: the whole array (see tasks/);   |
@@ -418,6 +497,9 @@ served automatically with the right MIME type. Dotfiles are skipped.
 
 - No TLS, no URL percent-decoding (exact path match only).
 - No idle keep-alive timeouts.
+- A `tools/call` on `/mcp` fetches its web page synchronously in the
+  event loop, so the whole server waits (capped at ~25 s). Fine for
+  the runner's rare, serial calls; revisit if tools get chatty.
 - Access log goes to stderr, one line per request.
 - Linux-only for now (`epoll`, POSIX sockets). Windows later needs:
   `epoll` → `select`/IOCP, `winsock2` init + `closesocket`, and a
@@ -455,8 +537,13 @@ served automatically with the right MIME type. Dotfiles are skipped.
             pattern, risk, success_metric, failure_sign,
             evaluation_method, rule — text + creation time), with
             editors in column one and column two
-      - [ ] drive `llmkit runner` conversations from a task
-      - [ ] custom-made mcp servers offered by flower itself
+      - [x] custom-made mcp servers offered by flower itself —
+            POST /mcp (streamable-http json-rpc) with the web tools
+            web_search (DuckDuckGo html) and web_fetch (readability +
+            markdown), prompt files under prompts/mcp/, and the
+            builtin online_researcher agent using them
+      - [ ] drive `llmkit runner` conversations from a task (renders
+            the selected agent's prompt with the project's context)
 - [ ] idle connection timeouts
 - [ ] Windows build (winsock + select/IOCP)
 - [ ] Dockerfile / packaging

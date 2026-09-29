@@ -193,10 +193,14 @@ echo "== 6d. agents API =="
 curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert [a["name"] for a in d] == ["assistant"], d      # only the builtin so far
+assert [a["name"] for a in d] == ["assistant", "online_researcher"], d  # builtins
 assert d[0]["builtin"] is True and d[0]["llm"] == "", d
 assert "llm_ok" not in d[0], d    # builtins pick their llm per task
-' || fail "GET /api/agents should start with only the builtin agents"
+assert d[1]["builtin"] is True, d
+assert d[1]["tools"][0]["name"] == "flower", d           # flower own mcp server
+assert d[1]["tools"][0]["url"] == "/mcp", d              # resolved when a task runs
+assert "researcher" in d[1]["system_prompt"].lower(), d  # prompt compiled in
+' || fail "GET /api/agents should start with the builtin agents"
 curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
  {"name":"thinker","llm":"anthropic","inference_options":{"max_tokens":4096,"thinking_budget":2048}}]' "$B/api/agents" | python3 -c '
@@ -212,7 +216,8 @@ assert "llm_ok" not in d[0] or d[0]["llm_ok"], d         # PUT echo may omit, ne
 curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = {a["name"]: a.get("llm_ok") for a in json.load(sys.stdin)}
-assert d == {"assistant": None, "gardener": True, "thinker": True}, d
+assert d == {"assistant": None, "online_researcher": None,
+             "gardener": True, "thinker": True}, d
 ' || fail "GET /api/agents should report llm_ok flags (builtins carry none)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"Assistant","llm":"ollama"}]' "$B/api/agents")
 [ "$code" = 422 ] || fail "agents: builtin name collision: expected 422, got $code"
@@ -389,6 +394,67 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PI
 [ "$code" = 422 ] || fail "tasks: non-string action type: expected 422, got $code"
 curl -s "$B/api/projects" | grep -q '"server room floods"' || fail "rejected PUTs must not change stored context"
 curl -s "$B/api/tasks" | grep -q '"no deploys on fridays"' || fail "rejected PUTs must not change stored task context"
+
+echo "== 6g. mcp endpoint (flower's own tools) =="
+cat > "$CFG/fixture.html" <<'HTML'
+<!doctype html><html><body><nav>skip this nav</nav>
+<article><h1>Fixture page</h1>
+<p>A paragraph with <a href="https://example.com/x">a link</a>.</p>
+</article></body></html>
+HTML
+rpc() { curl -s -X POST -H "Content-Type: application/json" --data "$1" "$B/mcp"; }
+rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["id"] == 1, d
+assert d["result"]["protocolVersion"] == "2025-11-25", d
+assert d["result"]["serverInfo"]["name"] == "flower", d
+' || fail "mcp: initialize handshake"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+      --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$B/mcp")
+[ "$code" = 202 ] || fail "mcp: notification should 202, got $code"
+rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+tools = {t["name"]: t for t in d["result"]["tools"]}
+assert set(tools) >= {"web_search", "web_fetch"}, d
+assert tools["web_fetch"]["inputSchema"]["required"] == ["url"], d
+assert "description" in tools["web_fetch"]["inputSchema"]["properties"]["url"], d
+assert "duckduckgo" in tools["web_search"]["description"].lower(), d  # from prompts/
+' || fail "mcp: tools/list with prompt-file descriptions"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"file://$CFG/fixture.html\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+b = d["result"]["content"][0]
+assert b["type"] == "text", d
+assert "# Fixture page" in b["text"], d            # readability picked the article
+assert "[a link](https://example.com/x)" in b["text"], d
+assert "skip this nav" not in b["text"], d
+assert d["result"]["isError"] is False, d
+' || fail "mcp: tools/call web_fetch on a file:// fixture"
+rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"web_search","arguments":{}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d           # tool failure is readable content
+assert "query" in d["result"]["content"][0]["text"], d
+' || fail "mcp: tools/call with a missing argument"
+rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["error"]["code"] == -32602, d
+' || fail "mcp: unknown tool should be -32602"
+rpc '{"jsonrpc":"2.0","id":6,"method":"bogus"}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["error"]["code"] == -32601, d
+' || fail "mcp: unknown method should be -32601"
+curl -s -X POST --data 'not json' "$B/mcp" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["error"]["code"] == -32700, d
+' || fail "mcp: bad json should be -32700"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/mcp")
+[ "$code" = 405 ] || fail "mcp: GET should be 405, got $code"
 curl -s -X PUT --data '[]' "$B/api/projects" >/dev/null
 curl -s -X PUT --data '[]' "$B/api/tasks" >/dev/null
 

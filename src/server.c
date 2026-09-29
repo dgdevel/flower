@@ -14,6 +14,7 @@
 #include "projects.h"
 #include "agents.h"
 #include "tasks.h"
+#include "mcp.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -531,6 +532,11 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 respond_json(s, c, 500, "{\"error\":\"out of memory\"}",
                              req->keep_alive);
             }
+        } else if (strcmp(path, "/mcp") == 0) {
+            status = 405;
+            respond(s, c, 405, "text/plain; charset=utf-8",
+                    "method not allowed\n", 19, false, false,
+                    "Allow: POST\r\n");
         } else {
             const asset_t *a = asset_find(path);
             if (!a) {
@@ -569,6 +575,20 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         handle_agents_put(s, c, req, body, body_len, &status);
     } else if (put && strcmp(path, "/api/tasks") == 0) {
         handle_tasks_put(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/mcp") == 0) {
+        /* flower's own mcp server (streamable-http transport, plain
+         * json replies). A tools/call fetches a web page while this
+         * event loop waits — a known limit, fine for the runner's
+         * rare, serial calls. */
+        int note = 0;
+        char *j = mcp_handle_post(body, body_len, &note);
+        if (!j) { /* notification: accepted, nothing to say */
+            status = 202;
+            respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
+        } else {
+            respond_json(s, c, 200, j, req->keep_alive);
+            free(j);
+        }
     } else if (strcmp(path, "/api/theme") == 0 ||
                strcmp(path, "/api/projects") == 0 ||
                strcmp(path, "/api/llms") == 0 ||
@@ -579,6 +599,10 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 "method not allowed\n", 19, false, false,
                 "Allow: GET, HEAD, PUT\r\n");
     } else if (strcmp(path, "/api/theme/reset") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false, "Allow: POST\r\n");
+    } else if (strcmp(path, "/mcp") == 0) {
         status = 405;
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false, "Allow: POST\r\n");

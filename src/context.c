@@ -25,7 +25,7 @@ static int type_from_name(const char *s)
     return -1;
 }
 
-static const char *type_name(int t)
+const char *ctx_type_name(int t)
 {
     return (t >= 0 && (size_t)t < TYPE_COUNT) ? CTX_TYPE_NAMES[t]
                                               : CTX_TYPE_NAMES[CTX_FACT];
@@ -290,7 +290,7 @@ cJSON *context_to_cjson(const ctx_item_t *head, char id_prefix)
             return NULL;
         }
         if (p->type != CTX_FACT &&
-            !cJSON_AddStringToObject(o, "type", type_name(p->type))) {
+            !cJSON_AddStringToObject(o, "type", ctx_type_name(p->type))) {
             cJSON_Delete(o);
             cJSON_Delete(arr);
             return NULL;

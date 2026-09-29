@@ -67,4 +67,8 @@ int context_from_json(const cJSON *j, ctx_item_t **head, int strict,
  * "T2", …) — pass 0 to emit none, for the copy on disk. */
 cJSON *context_to_cjson(const ctx_item_t *head, char id_prefix);
 
+/* The wire name of a ctx_type_t ("fact" for anything out of range).
+ * Shared by the stores and the prompt renderer. */
+const char *ctx_type_name(int type);
+
 #endif

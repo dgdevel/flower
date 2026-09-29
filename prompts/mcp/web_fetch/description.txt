@@ -1,0 +1,4 @@
+Fetch one web page and return its main readable content converted to
+markdown (headings, paragraphs, lists, links and code blocks survive;
+navigation, ads and boilerplate are stripped). Use it to read in full
+the pages flower.web_search surfaced. One url per call.

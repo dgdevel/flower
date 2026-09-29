@@ -4,9 +4,11 @@
 *.o
 *.d
 
-# generated asset table
+# generated asset/prompt tables (tools/embed)
 /src/assets_gen.c
 /src/assets_gen.h
+/src/prompts_gen.c
+/src/prompts_gen.h
 
 # agent session files
 /.reasonix/
@@ -21,3 +23,6 @@
 
 # llmkit reference checkout (read-only; not part of flower)
 /llmkit/
+
+# parser self-test binary (built by make check)
+/tests/selftest

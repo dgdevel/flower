@@ -1,0 +1,2 @@
+The full http(s) URL of the page to read — copy it verbatim from the
+Url line of a search result, do not guess or truncate it.

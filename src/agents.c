@@ -13,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agents.h"
+#include "prompts.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
 
 #include <cJSON.h>
@@ -937,19 +938,62 @@ void agents_free(agents_t *a)
 
 /* Compiled in, shipped with flower, never written to agents/. The llm
  * reference is "" by design: tasks bound to a builtin select
- * their llm themselves (the task's llm field). */
-static const agent_t BUILTIN_AGENTS[] = {
+ * their llm themselves. System prompts live as tweakable prompt
+ * files (prompts/agents/<name>/system_prompt.txt) and are resolved
+ * on first use; the fallbacks below only cover a missing file.
+ * online_researcher carries flower's own mcp server as its tool —
+ * url "/mcp" means "this flower instance" and is resolved to a real
+ * url when a task is handed to the runner. */
+static agent_t BUILTIN_AGENTS[] = {
     {
         .name = "assistant",
         .llm = "",
-        .system_prompt =
-            "You are a helpful assistant. Answer clearly and concisely.",
+        .system_prompt = "",
+    },
+    {
+        .name = "online_researcher",
+        .llm = "",
+        .system_prompt = "",
+        .tools = {
+            {
+                .type = "http",
+                .name = "flower",
+                .url = "/mcp",
+                .required = 1,
+            },
+        },
+        .tool_count = 1,
     },
 };
 #define BUILTIN_N (sizeof BUILTIN_AGENTS / sizeof BUILTIN_AGENTS[0])
 
+/* fill a builtin's system_prompt from the compiled-in prompt files */
+static void builtins_init(void)
+{
+    for (size_t i = 0; i < BUILTIN_N; i++) {
+        if (BUILTIN_AGENTS[i].system_prompt[0]) continue;
+        char nm[CFG_NAME_MAX + 1];
+        size_t nl = strlen(BUILTIN_AGENTS[i].name);
+        if (nl > CFG_NAME_MAX) nl = CFG_NAME_MAX;
+        memcpy(nm, BUILTIN_AGENTS[i].name, nl);
+        nm[nl] = '\0';
+        char path[128];
+        snprintf(path, sizeof path, "agents/%s/system_prompt.txt", nm);
+        char *p = prompt_text(path);
+        const char *fallback = "You are a helpful assistant.";
+        const char *src = p && *p ? p : fallback;
+        size_t n = strlen(src);
+        char *dst = BUILTIN_AGENTS[i].system_prompt;
+        if (n >= AGENT_PROMPT_MAX) n = AGENT_PROMPT_MAX - 1;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        free(p);
+    }
+}
+
 const agent_t *agents_builtin(size_t i)
 {
+    builtins_init();
     return i < BUILTIN_N ? &BUILTIN_AGENTS[i] : NULL;
 }
 
@@ -1362,6 +1406,7 @@ fail:
 
 char *agents_to_json(const agents_t *a, const llms_t *llms, int with_builtins)
 {
+    builtins_init(); /* their prompts resolve from prompts/ on first use */
     /* user agents (and the builtins when asked), sorted by name */
     const agent_t *all[AGENTS_MAX + BUILTIN_N];
     size_t n = 0;
