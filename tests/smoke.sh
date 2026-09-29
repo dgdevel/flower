@@ -230,49 +230,82 @@ curl -s -X PUT --data '[{"name":"thinker","llm":"anthropic","inference_options":
 [ ! -f "$CFG/agents/gardener.json" ] || fail "removing an agent must delete its file"
 ls "$CFG/agents" | grep -qx 'thinker.json' || fail "the kept agent's file must stay"
 
-echo "== 6e. tasks API (per project) =="
+echo "== 6e. tasks API (actions per project) =="
 curl -s "$B/api/tasks" | grep -q '^\[\]$' || fail "GET /api/tasks should start as []"
-PID=$(curl -s -X PUT --data "[{\"dir\":\"$CFG/alpha\"}]" "$B/api/projects" | python3 -c '
+PRJ=$(curl -s -X PUT --data "[{\"dir\":\"$CFG/alpha\"}]" "$B/api/projects" | python3 -c '
 import json, sys
 print(json.load(sys.stdin)[0]["id"])')
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"agent":"assistant","llm":"ollama"}]' "$B/api/tasks")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{}]' "$B/api/tasks")
 [ "$code" = 422 ] || fail "tasks: missing project: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"0123456789abcdef0\",\"agent\":\"assistant\",\"llm\":\"ollama\"}]" "$B/api/tasks")
-[ "$code" = 422 ] || fail "tasks: unknown project: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PID\",\"agent\":\"assistant\"}]" "$B/api/tasks")
-[ "$code" = 422 ] || fail "tasks: builtin agent without an llm: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"0123456789abcdef0\"}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: malformed project id: expected 422, got $code"
+# a well-formed reference to a deleted project must stay savable —
+# the whole list is PUT after every edit, so rejecting it would
+# block all further saves; GET flags the dangling reference instead
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"project":"0011223344556677","title":"orphan"}]' "$B/api/tasks")
+[ "$code" = 200 ] || fail "tasks: dangling project reference must be accepted, got $code"
+curl -s "$B/api/tasks" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d[0]["project_ok"] is False, d
+' || fail "GET /api/tasks should flag the dangling reference"
 CID=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary "[
- {\"project\":\"$PID\",\"agent\":\"assistant\",\"llm\":\"ollama\",\"title\":\"first chat\",\"created\":1000},
- {\"project\":\"$PID\",\"agent\":\"thinker\",\"created\":2000}]" "$B/api/tasks" | python3 -c '
+ {\"project\":\"$PRJ\",\"title\":\"build\",\"created\":1000,\"actions\":[
+   {\"title\":\"plan\",\"state\":\"in_progress\",\"children\":[
+     {\"title\":\"sketch\",\"description\":\"rough first\",\"state\":\"completed\"},
+     {\"title\":\"review\"}]},
+   {\"title\":\"ship\",\"state\":\"partial\"}]},
+ {\"project\":\"$PRJ\",\"title\":\"talk\",\"created\":2000}]" "$B/api/tasks" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert len(d) == 2, d
 for c in d:
     assert len(c["id"]) == 32 and all(ch in "0123456789abcdef" for ch in c["id"]), d
-    assert c["project"] == "'"$PID"'", d                            # bound to the project
-assert d[0]["agent"] == "thinker" and d[0]["created"] == 2000, d  # newest first
-assert d[1]["llm"] == "ollama", d
+    assert c["project"] == "'"$PRJ"'", d
+assert d[0]["title"] == "talk" and d[0]["created"] == 2000, d  # newest first
+a = d[1]["actions"]
+assert a[0]["title"] == "plan" and a[0]["state"] == "in_progress", d
+assert a[0]["children"][0]["state"] == "completed", d
+assert a[0]["children"][0]["description"] == "rough first", d
+assert "state" not in a[0]["children"][1] and "children" not in a[0]["children"][1], d  # defaults omitted
+assert a[1]["state"] == "partial", d
 print(d[1]["id"])')
 [ -f "$CFG/tasks/$CID/task.json" ] || fail "tasks/$CID/task.json not written"
-grep -q '"assistant"' "$CFG/tasks/$CID/task.json" || fail "task details not persisted"
+grep -q '"sketch"' "$CFG/tasks/$CID/task.json" || fail "nested actions not persisted"
 curl -s "$B/api/tasks" | python3 -c '
 import json, sys
-d = {c["agent"]: c for c in json.load(sys.stdin)}
-assert d["assistant"]["project_ok"] is True, d
-assert d["assistant"]["llm_ok"] is True and d["assistant"]["agent_ok"] is True, d
-assert d["thinker"]["llm"] == "" and d["thinker"]["llm_ok"] is True, d  # inherits
-' || fail "GET /api/tasks should report live reference flags"
+d = {c["title"]: c for c in json.load(sys.stdin)}
+assert d["build"]["project_ok"] is True, d
+assert "agent" not in d["build"] and "llm" not in d["build"], d  # binding is gone
+' || fail "GET /api/tasks should report the project_ok flag"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/tasks")
 [ "$code" = 400 ] || fail "tasks: malformed JSON: expected 400, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PID\",\"agent\":\"nope\",\"llm\":\"ollama\"}]" "$B/api/tasks")
-[ "$code" = 422 ] || fail "tasks: unknown agent: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PID\",\"agent\":\"assistant\",\"llm\":\"nope\"}]" "$B/api/tasks")
-[ "$code" = 422 ] || fail "tasks: unknown llm: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PID\",\"agent\":\"assistant\",\"llm\":\"ollama\",\"id\":\"short\"}]" "$B/api/tasks")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "{\"project\":\"$PRJ\"}" "$B/api/tasks")
+[ "$code" = 400 ] || fail "tasks: object instead of array: expected 400, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"actions\":[{\"title\":\"x\",\"state\":\"bogus\"}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: bad action state: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"actions\":[{\"title\":\"x\",\"zzz\":1}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: unknown action key: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"actions\":[{\"title\":\"\"}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: empty action title: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"actions\":[{\"title\":\"x\",\"children\":\"nope\"}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: children not an array: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"agent\":\"assistant\"}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: agent binding removed (unknown key): expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PRJ\",\"title\":\"x\",\"id\":\"short\"}]" "$B/api/tasks")
 [ "$code" = 422 ] || fail "tasks: malformed id: expected 422, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PID\",\"agent\":\"assistant\",\"llm\":\"ollama\",\"extra\":1}]" "$B/api/tasks")
-[ "$code" = 422 ] || fail "tasks: unknown key: expected 422, got $code"
-curl -s "$B/api/tasks" | grep -q '"first chat"' || fail "rejected PUTs must not change stored tasks"
+DEEP=$(mktemp)
+python3 - "$PRJ" >"$DEEP" <<'EOF'
+import json, sys
+inner = {"title": "deep"}
+for _ in range(70):  # far past the 64-level cap
+    inner = {"title": "x", "children": [inner]}
+print(json.dumps([{"project": sys.argv[1], "actions": [inner]}]))
+EOF
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$DEEP" "$B/api/tasks")
+rm -f "$DEEP"
+[ "$code" = 422 ] || fail "tasks: over-deep nesting: expected 422, got $code"
+curl -s "$B/api/tasks" | grep -q '"build"' || fail "rejected PUTs must not change stored tasks"
 # deleting the project leaves its tasks stored but flagged
 curl -s -X PUT --data '[]' "$B/api/projects" >/dev/null
 curl -s "$B/api/tasks" | python3 -c '
@@ -282,6 +315,82 @@ assert len(d) == 2 and all(c["project_ok"] is False for c in d), d
 ' || fail "tasks of a deleted project must carry project_ok:false"
 curl -s -X PUT --data '[]' "$B/api/tasks" | grep -q '^\[\]$' || fail "PUT [] did not clear the tasks"
 [ -z "$(ls -A "$CFG/tasks" 2>/dev/null)" ] || fail "removed tasks must delete their directories"
+
+echo "== 6f. typed context items (projects + tasks) and action types =="
+# one PUT creates the project and its context: explicit type/updated
+# kept, bare items defaulted (fact, updated now); the ids are
+# generated by position (P for projects); the project id is captured
+# from the response — a later PUT without it would generate a new one
+PIDX=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary "
+ [{\"dir\":\"$CFG/alpha\",\"context\":[
+   {\"type\":\"risk\",\"text\":\"server room floods\",\"updated\":123,\"id\":\"P9\"},
+   {\"text\":\"two lines\nof fact\"}]}]" "$B/api/projects" | python3 -c '
+import json, sys, time
+d = json.load(sys.stdin)
+c = d[0]["context"]
+assert c[0] == {"id":"P1","type":"risk","text":"server room floods",
+                "updated":123}, c    # echoed id ignored, position wins
+assert c[1]["id"] == "P2", c                         # sequential ids
+assert "type" not in c[1], c                       # fact default omitted
+assert c[1]["text"] == "two lines\nof fact", c     # newlines allowed
+assert abs(c[1]["updated"] - time.time()) < 60, c  # missing -> now
+print(d[0]["id"])') || fail "PUT /api/projects did not keep the context items"
+[ -n "$PIDX" ] || fail "projects: no id in the context PUT response"
+grep -q '"context"' "$CFG/projects.json" || fail "context items not persisted to projects.json"
+# task context + action types: defaults omitted, nested types kept
+CIDX=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary "
+ [{\"project\":\"$PIDX\",\"title\":\"ctx\",\"context\":[
+   {\"type\":\"rule\",\"text\":\"no deploys on fridays\"},
+   {\"text\":\"a plain fact\"}],
+   \"actions\":[
+     {\"title\":\"watch logs\",\"type\":\"observe\",\"state\":\"in_progress\"},
+     {\"title\":\"fix it\",\"children\":[
+       {\"title\":\"prove the fix\",\"type\":\"validate\"}]}]}]" "$B/api/tasks" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+c = d[0]["context"]
+assert c[0]["id"] == "T1" and c[0]["type"] == "rule", c  # T ids in tasks
+assert c[0]["text"] == "no deploys on fridays", c
+assert "type" not in c[1] and c[1]["id"] == "T2" and "updated" in c[1], c
+a = d[0]["actions"]
+assert a[0]["type"] == "observe" and a[0]["state"] == "in_progress", a
+assert "type" not in a[1] and "state" not in a[1], a          # act/pending defaults
+assert a[1]["children"][0]["type"] == "validate", a
+print(d[0]["id"])')
+grep -q '"no deploys on fridays"' "$CFG/tasks/$CIDX/task.json" || fail "task context not persisted"
+grep -q '"observe"' "$CFG/tasks/$CIDX/task.json" || fail "action type not persisted"
+# validation: every context field and the action type are strict
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"type\":\"bogus\",\"text\":\"x\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: bad context type: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: empty context text: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"x\",\"zzz\":1}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: unknown context key: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":\"nope\"}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: context not an array: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"x\",\"updated\":\"soon\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: bad context updated: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"x\",\"created\":1}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: retired context key created: expected 422, got $code"
+CTXMANY=$(mktemp)
+python3 - "$CFG/alpha" >"$CTXMANY" <<'EOF'
+import json, sys
+print(json.dumps([{"dir": sys.argv[1],
+                   "context": [{"text": "x"} for _ in range(70)]}]))
+EOF
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$CTXMANY" "$B/api/projects")
+rm -f "$CTXMANY"
+[ "$code" = 422 ] || fail "projects: too many context items: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"context\":[{\"type\":\"fact\",\"text\":\"x\",\"huh\":0}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: bad context item: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"x\",\"type\":\"bogus\"}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: bad action type: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"x\",\"type\":7}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: non-string action type: expected 422, got $code"
+curl -s "$B/api/projects" | grep -q '"server room floods"' || fail "rejected PUTs must not change stored context"
+curl -s "$B/api/tasks" | grep -q '"no deploys on fridays"' || fail "rejected PUTs must not change stored task context"
+curl -s -X PUT --data '[]' "$B/api/projects" >/dev/null
+curl -s -X PUT --data '[]' "$B/api/tasks" >/dev/null
 
 echo "== 7. SSE still streams =="
 curl -sN --max-time 3 "$B/api/time" | grep -m1 -q '^data: {"unix"' || fail "no SSE event within 3s"

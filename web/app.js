@@ -28,6 +28,56 @@ const ALL_FIELDS = [...FIELDS, ...DETAILS.map(([name]) => name)];
 const DETAIL_MAX = 4095; // bytes, mirrors PROJECT_TEXT_MAX-1 in src/projects.c
 const SAVE_DELAY = 500; // ms of quiet before a PUT
 
+/* ---------- typed context items (projects + tasks) ----------
+ *
+ * Mirrors src/context.c: an item is one of seven types, a text and
+ * the update time (refreshed on every edit, like the server fills
+ * it when missing). Each row also shows its generated id — P<n> in
+ * a project's list, T<n> in a task's — numbered by position, so it
+ * is derived, never stored. The list rides inside the owning
+ * project/task PUT — no endpoints of its own, exactly like the
+ * action tree. */
+const CONTEXT_TYPES = [
+  ["fact", "Fact"],
+  ["pattern", "Pattern"],
+  ["risk", "Risk"],
+  ["success_metric", "Success metric"],
+  ["failure_sign", "Failure sign"],
+  ["evaluation_method", "Evaluation method"],
+  ["rule", "Rule"],
+];
+const CTX_PLACEHOLDER = {
+  fact: "Something known to be true",
+  pattern: "A recurring behavior or relationship",
+  risk: "What could go wrong",
+  success_metric: "How success is measured",
+  failure_sign: "How failure shows up",
+  evaluation_method: "How to evaluate the outcome",
+  rule: "A constraint that must hold",
+};
+const CTX_TEXT_MAX = 4096; // mirrors CTX_TEXT_MAX-1 in src/context.c
+const CTX_MAX = 64;        // mirrors CONTEXT_MAX in src/context.c
+
+const ctxTextOk = (v) =>
+  bytes(v || "") <= CTX_TEXT_MAX - 1 && noControlsMulti(v || "");
+const nowSec = () => Math.floor(Date.now() / 1000);
+const newContextItem = () => ({ type: "fact", text: "", updated: nowSec() });
+
+/* the wire omits defaults ("fact", and the server always fills
+ * updated); the client state is always complete. The server's
+ * generated ids are dropped — rows derive them from position */
+function normContext(list) {
+  return (list || []).map((c) => ({
+    type: CONTEXT_TYPES.some(([v]) => v === c.type) ? c.type : "fact",
+    text: c.text || "",
+    updated: c.updated || nowSec(),
+  }));
+}
+
+function contextValid(list) {
+  return (list || []).every((c) => (c.text || "").trim() && ctxTextOk(c.text));
+}
+
 const railEl = document.getElementById("rail");
 const editorEl = document.getElementById("editor");
 const countEl = document.getElementById("project-count");
@@ -143,6 +193,89 @@ function detailField(name, label, hint) {
     el("span", { class: "field-error", id: `err-${name}` }));
 }
 
+/* ---------- context editor (shared by project + task) ---------- */
+
+/* live error display inside one item row (mirrors the server's
+ * context rules in src/context.c) */
+function showCtxErrors(c, row) {
+  if (!row) return;
+  const err = row.querySelector(".err-text");
+  const ta = row.querySelector('[data-cf="text"]');
+  const msg = (c.text || "").trim()
+    ? (ctxTextOk(c.text) ? "" : `too long (${CTX_TEXT_MAX - 1} bytes at most)`)
+    : "required";
+  if (err) err.textContent = msg;
+  if (ta) ta.classList.toggle("invalid", !!msg);
+}
+
+/* any edit — text or type — restamps the item as updated; the
+ * row's stamp refreshes in place so typing never needs a re-render
+ * (the server fills the same field when it arrives missing) */
+function touchCtxItem(c, row) {
+  c.updated = nowSec();
+  const ts = row && row.querySelector(".ts");
+  if (ts) ts.textContent = new Date(c.updated * 1000).toLocaleString();
+}
+
+function ctxItemRow(c, i, prefix) {
+  const type = CONTEXT_TYPES.some(([v]) => v === c.type) ? c.type : "fact";
+  const sel = el("select", {
+    class: "ctx-type", "data-ci": i, "data-cf": "type",
+    "aria-label": "Context item type",
+  });
+  for (const [v, label] of CONTEXT_TYPES) {
+    const o = el("option", { value: v, text: label });
+    if (v === type) o.selected = true;
+    sel.appendChild(o);
+  }
+  const ta = el("textarea", {
+    "data-ci": i, "data-cf": "text", rows: "2", spellcheck: "false",
+    placeholder: CTX_PLACEHOLDER[type],
+  });
+  ta.value = c.text || "";
+  return el("div", { class: "ctx-item", "data-ci": i },
+    el("div", { class: "ctx-row" },
+      el("span", {
+        class: "ctx-id mono", title: "Context item id",
+        text: `${prefix}${i + 1}`,
+      }),
+      sel,
+      el("span", {
+        class: "ts", title: "Updated",
+        text: c.updated ? new Date(c.updated * 1000).toLocaleString() : "",
+      }),
+      el("button", {
+        type: "button", class: "icon-btn", "data-action": "ctx-del",
+        "data-ci": i, title: "Remove context item",
+        "aria-label": "Remove context item", text: "✕",
+      })),
+    ta,
+    el("span", { class: "field-error err-text" }));
+}
+
+/* the typed context list of a project or task: an add button on
+ * top, one row per item (generated id, type select, update stamp,
+ * remove), the text below. Items are addressed by index — the
+ * owning list is PUT whole, like everything else. `prefix` is the
+ * id letter: "P" for projects, "T" for tasks. */
+function contextEditor(list = [], prefix = "P") {
+  const sec = el("section", { class: "ctx-editor", "aria-label": "Context" },
+    el("div", { class: "ctx-head" },
+      el("h3", { text: "Context" }),
+      el("button", {
+        type: "button", class: "btn btn-ghost ctx-add",
+        "data-action": "ctx-add", title: "Add a context item",
+        text: "+ item",
+      })));
+  if (!list.length)
+    sec.append(el("p", {
+      class: "ctx-none muted",
+      text: "No context items yet — facts, patterns, risks, rules…",
+    }));
+  list.forEach((c, i) => sec.append(ctxItemRow(c, i, prefix)));
+  return sec;
+}
+
 function openPicker(anchor) {
   closePicker();
   const total = EMOJI_GROUPS.reduce((a, [, items]) => a + items.length, 0);
@@ -244,6 +377,9 @@ function editorForm(creating) {
     details.append(detailField(name, label, hint));
   frag.append(details);
 
+  frag.append(contextEditor(
+    (creating ? draft : projects[selected]).context, "P"));
+
   frag.append(el("p", { id: "editor-status", class: "muted", role: "status" }));
 
   const actions = el("div", { class: "editor-actions" });
@@ -344,6 +480,13 @@ function editorValid() {
     showFieldError("dir", "directory is missing on disk");
     ok = false;
   }
+  /* context items gate the save like the fields above (their rows
+   * carry their own live error display) */
+  editorEl.querySelectorAll(".ctx-item").forEach((row) => {
+    const c = t.context && t.context[+row.dataset.ci];
+    if (c) showCtxErrors(c, row);
+  });
+  if (!contextValid(t.context)) ok = false;
   return ok;
 }
 
@@ -375,7 +518,8 @@ function render() {
 async function loadProjects() {
   try {
     const r = await fetch("api/projects");
-    if (r.ok) projects = await r.json();
+    if (r.ok)
+      projects = (await r.json()).map((p) => ({ ...p, context: p.context || [] }));
   } catch (_) {
     /* stay with the empty list; the editor still works, saves will fail loudly */
   }
@@ -504,6 +648,7 @@ function startDraft() {
     objectives: "",
     scope: "",
     stakeholders: "",
+    context: [],
   };
   resetTaskScope(); // drafting a project: no scope for columns 2-3
   renderTaskPane();
@@ -539,7 +684,7 @@ async function createProject() {
       return; // stay in create mode, nothing applied
     }
     const saved = await r.json();
-    projects = saved.map((p) => ({ ...p, exists: true }));
+    projects = saved.map((p) => ({ ...p, exists: true, context: p.context || [] }));
     selected = projects.length - 1;
     draft = null;
     rememberSelection();
@@ -583,6 +728,19 @@ railEl.addEventListener("click", (e) => {
 });
 
 editorEl.addEventListener("input", (e) => {
+  /* context item text: live state + live errors, autosave below */
+  const ci = e.target.dataset.ci;
+  if (ci != null && e.target.dataset.cf === "text") {
+    const t = draft || projects[selected];
+    const c = t && t.context && t.context[+ci];
+    if (!c) return;
+    c.text = e.target.value;
+    const row = e.target.closest(".ctx-item");
+    showCtxErrors(c, row);
+    touchCtxItem(c, row);
+    if (!draft) scheduleSave();
+    return;
+  }
   const name = e.target.dataset.f;
   if (!name) return;
   const t = draft || projects[selected];
@@ -600,6 +758,19 @@ editorEl.addEventListener("input", (e) => {
   if (!draft) scheduleSave();
 });
 
+editorEl.addEventListener("change", (e) => {
+  if (!e.target.classList.contains("ctx-type")) return;
+  const t = draft || projects[selected];
+  const c = t && t.context && t.context[+e.target.dataset.ci];
+  if (!c) return;
+  c.type = e.target.value;
+  const row = e.target.closest(".ctx-item");
+  const ta = row?.querySelector('[data-cf="text"]');
+  if (ta) ta.placeholder = CTX_PLACEHOLDER[c.type] || "";
+  touchCtxItem(c, row);
+  if (!draft) scheduleSave();
+});
+
 editorEl.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-action]");
   if (!btn) { disarmDelete(); return; }
@@ -609,6 +780,21 @@ editorEl.addEventListener("click", (e) => {
   else if (act === "create") createProject();
   else if (act === "delete") deleteSelected(btn);
   else if (act === "pick-emoji") openPicker(btn);
+  else if (act === "ctx-add" || act === "ctx-del") {
+    const t = draft || projects[selected];
+    if (!t) return;
+    if (act === "ctx-add") {
+      const list = t.context || (t.context = []);
+      if (list.length >= CTX_MAX) return;
+      list.push(newContextItem());
+      renderEditor();
+      editorEl.querySelector(".ctx-item:last-of-type [data-cf='text']")?.focus();
+    } else {
+      t.context?.splice(+btn.dataset.ci, 1);
+      renderEditor();
+      if (!draft) scheduleSave();
+    }
+  }
 });
 
 // close the picker when clicking elsewhere or pressing Escape
@@ -674,42 +860,28 @@ window.addEventListener("keydown", (e) => {
 
 /* ---------- tasks (column two) ----------
  *
- * A task is bound to one agent (user-defined or builtin) and
- * stored server-side under {config}/tasks/{ID}/ — the list is
- * rendered from memory and PUT whole, like projects. The bottom half
- * shows the details of the selected task: its id, the agent
- * binding, and the llm pick (an override — "the agent's" inherits the
- * agent's own llm; the builtins have none, so theirs must select one).
- * The selected task is the scope for column three. */
+ * A task belongs to one project and is stored server-side under
+ * {config}/tasks/{ID}/ — the list is rendered from memory and PUT
+ * whole, like projects. The bottom half shows the details of the
+ * selected task: its id and title. The selected task is the scope
+ * for column three. */
 
 const taskListEl = document.getElementById("task-list");
 const taskDetailsEl = document.getElementById("task-details");
 const taskCountEl = document.getElementById("task-count");
 
-let tasks = []; // [{id, title, agent, llm, created, agent_ok?, llm_ok?}]
+let tasks = []; // [{id, project, title, created, actions, project_ok?}]
 let taskSel = -1;       // index into tasks
-let taskDraft = null;   // {agent, title, llm} while creating
-let agentsMeta = [];    // agents incl. builtins, for the selects
-let llmsMeta = [];      // configured llms, for the selects
+let taskDraft = null;   // {title} while creating
 let taskSaveTimer = 0;
 let taskSaveSeq = 0;
+let taskDelArm = -1;    // index of the row whose delete click is armed
+let taskDelTimer = 0;
 
 const taskDisplayTitle = (c) => (c.title || "").trim() || "Untitled task";
 
-function findAgentMeta(name) {
-  return agentsMeta.find(
-    (a) => (a.name || "").toLowerCase() === (name || "").toLowerCase());
-}
-
-/* the task's llm: its override, else the bound agent's */
-function taskEffectiveLlm(c) {
-  if (c.llm) return c.llm;
-  const a = findAgentMeta(c.agent);
-  return a ? a.llm || "" : "";
-}
-
 function taskFlagged(c) {
-  return c.project_ok === false || c.agent_ok === false || c.llm_ok === false;
+  return c.project_ok === false;
 }
 
 /* the hierarchy: tasks belong to the selected project. Column two
@@ -734,6 +906,7 @@ function currentTask() {
 function resetTaskScope() {
   taskDraft = null;
   taskSel = -1;
+  disarmTaskDelete(); // these rows are gone
   localStorage.removeItem("flower.task");
 }
 
@@ -751,35 +924,14 @@ function showTaskError(name, msg) {
   if (input) input.classList.toggle("invalid", !!msg);
 }
 
-async function refreshTaskMeta() {
-  try {
-    const [ar, lr] = await Promise.all([fetch("api/agents"), fetch("api/llms")]);
-    if (ar.ok) agentsMeta = await ar.json();
-    if (lr.ok) llmsMeta = await lr.json();
-  } catch (_) { /* selects stay with what they had */ }
-}
-
 async function loadTasks() {
   try {
     const r = await fetch("api/tasks");
-    if (r.ok) tasks = await r.json();
+    if (r.ok) tasks = (await r.json()).map(taskFromWire);
   } catch (_) { /* stay with the empty list */ }
 }
 
 /* ---------- rendering ---------- */
-
-function selectField(label, name, options, value) {
-  const sel = el("select", { id: `f-${name}`, "data-f": name });
-  for (const [v, text] of options) {
-    const o = el("option", { value: v, text });
-    if (v === (value ?? "")) o.selected = true;
-    sel.appendChild(o);
-  }
-  return el("div", { class: "field" },
-    el("label", { for: `f-${name}`, text: label }),
-    sel,
-    el("span", { class: "field-error", id: `err-${name}` }));
-}
 
 function kvRow(label, value, opts = {}) {
   return el("div", { class: "task-kv" + (opts.warn ? " task-warn" : "") },
@@ -790,42 +942,35 @@ function kvRow(label, value, opts = {}) {
     }));
 }
 
-function agentOptions() {
-  const opts = [];
-  for (const b of agentsMeta.filter((a) => a.builtin))
-    opts.push([b.name, `${b.name} — builtin`]);
-  for (const a of agentsMeta.filter((a) => !a.builtin))
-    opts.push([a.name, a.name]);
-  if (!opts.length) opts.push(["", "— no agents configured —"]);
-  return opts;
-}
-
-function llmOptions(forBuiltin) {
-  const opts = [];
-  if (!forBuiltin) opts.push(["", "the agent's llm"]);
-  for (const l of llmsMeta) opts.push([l.name, l.name]);
-  if (!opts.length) opts.push(["", "— no llms configured —"]);
-  return opts;
-}
-
 function renderTaskList() {
   taskListEl.textContent = "";
   const pid = currentProjectId();
   const vis = visibleTasks();
   vis.forEach((c) => {
     const i = tasks.indexOf(c);
-    const a = findAgentMeta(c.agent);
-    const sub = `${c.agent}${a && a.builtin ? " · builtin" : ""}` +
-                ` · ${taskEffectiveLlm(c) || "no llm"}`;
-    taskListEl.append(el("button", {
-      type: "button",
+    const n = countActions(c.actions);
+    const armed = i === taskDelArm;
+    /* a div, not a button: the row carries a delete button, and
+     * buttons cannot nest */
+    taskListEl.append(el("div", {
       class: "task-row" + (i === taskSel ? " active" : "") +
              (taskFlagged(c) ? " missing" : ""),
       "data-idx": i,
+      role: "button", tabindex: "0",
+      "aria-label": taskDisplayTitle(c),
       title: taskDisplayTitle(c),
     },
-      el("span", { class: "name", text: taskDisplayTitle(c) }),
-      el("span", { class: "sub", text: sub })));
+      el("div", { class: "task-main" },
+        el("span", { class: "name", text: taskDisplayTitle(c) }),
+        el("span", { class: "sub",
+          text: n ? `${n} action${n === 1 ? "" : "s"}` : "no actions yet" })),
+      el("button", {
+        type: "button", class: "icon-btn task-del" + (armed ? " armed" : ""),
+        "data-action": "task-del", "data-idx": i,
+        title: armed ? "Click again to delete" : "Delete task",
+        "aria-label": `Delete task ${taskDisplayTitle(c)}`,
+        text: armed ? "sure?" : "✕",
+      })));
   });
   if (!vis.length)
     taskListEl.append(el("p", {
@@ -840,16 +985,13 @@ function renderTaskList() {
 }
 
 function renderTaskDraft() {
-  const a = taskDraft.agent ? findAgentMeta(taskDraft.agent) : null;
   const title = field("Title", "task-title", {
     placeholder: "optional, shown in the list",
   });
   title.querySelector("input").value = taskDraft.title;
   taskDetailsEl.append(
     el("h3", { class: "task-h3", text: "New task" }),
-    selectField("Agent", "task-agent", agentOptions(), taskDraft.agent),
     title,
-    selectField("LLM", "task-llm", llmOptions(a && !a.llm), taskDraft.llm),
     el("p", { id: "task-status", class: "muted", role: "status" }),
     el("div", { class: "task-actions" },
       el("button", {
@@ -883,78 +1025,77 @@ function renderTaskDetails() {
         text: !pid
           ? "Column two follows the project picked in column one."
           : vis.length
-          ? "Pick one from the list above — it becomes the scope for column three."
+          ? "Pick one from the list above — its actions open in column three."
           : "Create one with the New task button above.",
       })));
     return;
   }
 
-  const a = findAgentMeta(c.agent);
-  const eff = taskEffectiveLlm(c);
   const title = field("Title", "task-title", { placeholder: "shown in the list" });
   title.querySelector("input").value = c.title;
   taskDetailsEl.append(
     el("h3", { class: "task-h3", text: taskDisplayTitle(c) }),
     kvRow("ID", c.id, { mono: true }),
-    kvRow("Agent", c.agent + (a && a.builtin ? " — builtin" : ""),
-          { warn: c.agent_ok === false }),
+    kvRow("Project", c.project, { mono: true, warn: c.project_ok === false }),
     kvRow("Created", new Date(c.created * 1000).toLocaleString()),
-    title,
-    selectField("LLM", "task-llm", llmOptions(a && !a.llm), c.llm));
-  if (c.agent_ok === false)
-    setTaskStatus(`unknown agent “${c.agent}” — it was deleted or renamed`, "warn");
-  else if (c.llm_ok === false)
-    setTaskStatus(`the llm “${eff || "…"}” is not configured anymore`, "warn");
+    title);
+  taskDetailsEl.append(contextEditor(c.context, "T"));
+  if (c.project_ok === false)
+    setTaskStatus("unknown project — it was deleted", "warn");
   else {
     const s = el("p", { id: "task-status", class: "muted", role: "status" });
     taskDetailsEl.append(s);
   }
 }
 
-/* column three mirrors the task scope: named when a task is picked,
- * generic while creating or when nothing is selected */
-function updateColumn3() {
-  const p = document.getElementById("col3-text");
-  if (!p) return;
-  const c = taskDraft ? null : currentTask();
-  p.textContent = c
-    ? `The task “${taskDisplayTitle(c)}” opens here — the talk itself, ` +
-      "once flower grows into it."
-    : "This column keeps its place in the layout. flower grows into " +
-      "it later.";
-}
-
 function renderTaskPane() {
   renderTaskList();
   renderTaskDetails();
-  updateColumn3();
+  renderActions();
 }
 
 /* ---------- validation (mirrors src/tasks.c) ---------- */
 
 function taskDraftValid() {
   const errs = {};
-  if (!taskDraft.agent) errs["task-agent"] = "pick an agent";
-  else {
-    const a = findAgentMeta(taskDraft.agent);
-    if (!a) errs["task-agent"] = "unknown agent";
-    else if (!taskDraft.llm && !a.llm)
-      errs["task-llm"] = `agent “${a.name}” has no llm of its own — select one`;
-  }
   const titleErr = bytes(taskDraft.title || "") <= 95 && noControls(taskDraft.title || "")
     ? "" : "too long (95 bytes at most)";
   if (titleErr) errs["task-title"] = titleErr;
-  for (const name of ["task-agent", "task-title", "task-llm"])
+  for (const name of ["task-title"])
     showTaskError(name, errs[name] || "");
   return !Object.keys(errs).length;
 }
 
 /* ---------- server sync ---------- */
 
+/* the wire shape: the server omits defaults, the client state is
+ * always complete (normalized via taskFromWire) */
 const taskWire = (c) => ({
-  id: c.id, project: c.project, title: c.title, agent: c.agent,
-  llm: c.llm, created: c.created,
+  id: c.id, project: c.project, title: c.title, created: c.created,
+  actions: c.actions, context: c.context,
 });
+
+function taskFromWire(t) {
+  return { ...t, actions: normActions(t.actions), context: normContext(t.context) };
+}
+
+function normActions(list) {
+  return (list || []).map((a) => ({
+    title: a.title || "",
+    description: a.description || "",
+    state: a.state || "pending",
+    type: a.type || "act",
+    children: normActions(a.children),
+  }));
+}
+
+/* is the user typing into a field under `root`? A re-render would
+ * replace that field and silently swallow the next keystrokes */
+const editingIn = (root) => {
+  const ae = document.activeElement;
+  return !!ae && root.contains(ae) &&
+    ["INPUT", "TEXTAREA", "SELECT"].includes(ae.tagName);
+};
 
 function scheduleTaskSave() {
   clearTimeout(taskSaveTimer);
@@ -962,12 +1103,23 @@ function scheduleTaskSave() {
   taskSaveTimer = setTimeout(saveTasks, SAVE_DELAY);
 }
 
-async function putTasks(list, seq) {
-  const r = await fetch("api/tasks", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(list),
-  });
+/* PUT the whole task list. Resolves to the server's saved list, or
+ * null when nothing was saved — after saying why in the status line
+ * (server rejection with its field, or netMsg on a network error;
+ * a superseded save stays silent, a newer one is already talking). */
+async function putTasks(list, seq, netMsg) {
+  let r;
+  try {
+    r = await fetch("api/tasks", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(list),
+    });
+  } catch (_) {
+    if (seq === taskSaveSeq)
+      setTaskStatus(netMsg || "network error — changes stay on this screen", "warn");
+    return null;
+  }
   if (seq !== taskSaveSeq) return null; // a newer change is already saving
   if (!r.ok) {
     let msg = `save failed (${r.status})`;
@@ -978,29 +1130,54 @@ async function putTasks(list, seq) {
     setTaskStatus(msg, "warn");
     return null;
   }
-  return r.json();
+  try {
+    return await r.json();
+  } catch (_) {
+    setTaskStatus("bad response — changes stay on this screen", "warn");
+    return null;
+  }
+}
+
+/* every action and context item in every task must be valid before a
+ * PUT (mirrors the server: one broken item would reject the list) */
+function actionsValid(list) {
+  for (const a of list || []) {
+    if (!(a.title || "").trim() || !actionTitleOk(a.title) ||
+        !actionDescOk(a.description))
+      return false;
+    if (!actionsValid(a.children)) return false;
+  }
+  return true;
 }
 
 async function saveTasks() {
   clearTimeout(taskSaveTimer);
   if (taskDraft) return;
+  if (!tasks.every((t) => actionsValid(t.actions) && contextValid(t.context))) {
+    setTaskStatus("not saved — fix the highlighted action or context fields first", "warn");
+    return;
+  }
   const sent = tasks.map(taskWire);
   const seq = ++taskSaveSeq;
   setTaskStatus("saving…");
-  const saved = await putTasks(sent, seq).catch(() => null);
-  if (!saved) {
-    if (seq === taskSaveSeq) setTaskStatus("network error — changes stay on this screen", "warn");
-    return;
-  }
+  const saved = await putTasks(sent, seq);
+  if (!saved) return; // putTasks said why
   tasks = saved.map((sc) => {
     const s = sent.find((x) => x.id === sc.id);
     const cur = tasks.find((x) => x.id === sc.id) || sc;
     const merged = { ...cur };
-    for (const f of ["title", "llm"])
+    for (const f of ["title"])
       if (s && sc[f] !== s[f] && cur[f] === s[f]) merged[f] = sc[f];
+    merged.actions = normActions(sc.actions); // server-normalized tree
+    merged.context = normContext(sc.context); // server-normalized items
     return merged;
   });
-  renderTaskPane();
+  /* refresh without disturbing a field mid-edit: the editors keep
+   * their own DOM in sync while typing, and a rebuild would steal
+   * the focus and the caret right after every autosave */
+  renderTaskList(); // the counts — no editable fields inside
+  if (!editingIn(taskDetailsEl)) renderTaskDetails();
+  if (!editingIn(actionListEl)) renderActions();
   setTaskStatus("saved ✓", "ok");
 }
 
@@ -1008,7 +1185,9 @@ async function saveTasks() {
 
 function selectTask(i) {
   taskDraft = null;
+  editingPath = null;
   taskSel = i;
+  disarmTaskDelete(); // selecting is not deleting
   const c = tasks[i];
   if (c) localStorage.setItem("flower.task", c.id);
   else localStorage.removeItem("flower.task");
@@ -1027,27 +1206,22 @@ async function refreshTaskFlags() {
     for (const c of tasks) {
       const f = fresh.find((x) => x.id === c.id);
       const po = f ? f.project_ok !== false : true;
-      const ao = f ? f.agent_ok !== false : true;
-      const lo = f ? f.llm_ok !== false : true;
-      if (c.project_ok !== po || c.agent_ok !== ao || c.llm_ok !== lo) {
+      if (c.project_ok !== po) {
         c.project_ok = po;
-        c.agent_ok = ao;
-        c.llm_ok = lo;
         changed = true;
       }
     }
-    const typing = document.activeElement && taskDetailsEl.contains(document.activeElement);
+    const typing = editingIn(taskDetailsEl) || editingIn(actionListEl);
     if (changed && !typing) renderTaskPane();
   } catch (_) {}
 }
 
-async function startTaskDraft() {
+function startTaskDraft() {
   if (!currentProjectId()) return;
-  await refreshTaskMeta();
-  taskDraft = { agent: "", title: "", llm: "" };
+  taskDraft = { title: "" };
   renderTaskPane();
-  const agent = taskDetailsEl.querySelector('[data-f="task-agent"]');
-  if (agent) agent.focus();
+  const title = taskDetailsEl.querySelector('[data-f="task-title"]');
+  if (title) title.focus();
 }
 
 /* Creating goes through its own PUT: the server generates the id and
@@ -1058,35 +1232,113 @@ async function createTask() {
   const oldIds = new Set(tasks.map((c) => c.id));
   const next = [...tasks.map(taskWire), {
     project: pid,
-    agent: taskDraft.agent,
     title: taskDraft.title.trim(),
-    llm: taskDraft.llm,
+    actions: [],
+    context: [],
   }];
   const seq = ++taskSaveSeq;
   setTaskStatus("saving…");
-  const saved = await putTasks(next, seq).catch(() => null);
-  if (!saved) {
-    if (seq === taskSaveSeq) setTaskStatus("network error — the task was not created", "warn");
-    return;
-  }
-  tasks = saved;
+  const saved = await putTasks(next, seq, "network error — the task was not created");
+  if (!saved) return; // putTasks said why
+  tasks = saved.map(taskFromWire);
   const created = tasks.find((c) => !oldIds.has(c.id)) ||
                   tasks[0];
   taskDraft = null;
+  editingPath = null;
   taskSel = created ? tasks.indexOf(created) : -1;
   if (created) localStorage.setItem("flower.task", created.id);
   renderTaskPane();
   setTaskStatus("saved ✓", "ok");
 }
 
+/* Deleting asks twice, like the project delete: the first click arms
+ * the row's ✕ ("sure?", warning colors) for 2.5s, the second one
+ * goes through. */
+function disarmTaskDelete() {
+  clearTimeout(taskDelTimer);
+  taskDelArm = -1;
+  taskListEl.querySelectorAll(".task-del.armed").forEach((b) => {
+    b.classList.remove("armed");
+    b.textContent = "✕";
+    b.title = "Delete task";
+  });
+}
+
+function armTaskDelete(btn, i) {
+  disarmTaskDelete(); // one armed row at a time
+  taskDelArm = i;
+  taskDelTimer = setTimeout(disarmTaskDelete, 2500);
+  btn.classList.add("armed");
+  btn.textContent = "sure?";
+  btn.title = "Click again to delete";
+}
+
+/* Deleting goes through the same whole-list PUT: with the id gone
+ * from the list, the server drops the task's directory. */
+async function deleteTask(i) {
+  disarmTaskDelete();
+  const c = tasks[i];
+  if (!c) return;
+  const next = tasks.filter((_, k) => k !== i).map(taskWire);
+  /* one broken item elsewhere would reject the list, like saveTasks */
+  if (!next.every((t) => actionsValid(t.actions) && contextValid(t.context))) {
+    setTaskStatus("not deleted — fix the highlighted action or context fields first", "warn");
+    return;
+  }
+  const seq = ++taskSaveSeq;
+  setTaskStatus("deleting…");
+  const saved = await putTasks(next, seq, "network error — the task was not deleted");
+  if (!saved) return; // putTasks said why
+  tasks = saved.map(taskFromWire);
+  if (taskSel === i) {
+    taskSel = -1;           // the selected task is gone
+    editingPath = null;
+    localStorage.removeItem("flower.task");
+  } else if (taskSel > i) {
+    taskSel--;              // indexes shifted by one
+  }
+  renderTaskPane();
+  setTaskStatus("deleted ✓", "ok");
+}
+
 taskListEl.addEventListener("click", (e) => {
+  const del = e.target.closest("[data-action='task-del']");
+  if (del) {
+    const i = Number(del.dataset.idx);
+    if (i === taskDelArm) deleteTask(i);
+    else armTaskDelete(del, i);
+    return; // the ✕ never selects
+  }
   const row = e.target.closest(".task-row[data-idx]");
   if (row) selectTask(Number(row.dataset.idx));
+});
+
+/* the rows are divs (they hold a button), so Enter/Space select
+ * here instead of coming for free */
+taskListEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const row = e.target.closest(".task-row[data-idx]");
+  if (!row || e.target !== row) return;
+  e.preventDefault();
+  selectTask(Number(row.dataset.idx));
 });
 
 document.getElementById("new-task").addEventListener("click", startTaskDraft);
 
 taskDetailsEl.addEventListener("input", (e) => {
+  /* context item text: live state + live errors, autosave below */
+  const ci = e.target.dataset.ci;
+  if (ci != null && e.target.dataset.cf === "text") {
+    const c = currentTask();
+    const item = c && c.context && c.context[+ci];
+    if (!item) return;
+    item.text = e.target.value;
+    const row = e.target.closest(".ctx-item");
+    showCtxErrors(item, row);
+    touchCtxItem(item, row);
+    scheduleTaskSave();
+    return;
+  }
   const name = e.target.dataset.f;
   if (!name || name !== "task-title") return;
   if (taskDraft) {
@@ -1104,29 +1356,16 @@ taskDetailsEl.addEventListener("input", (e) => {
 });
 
 taskDetailsEl.addEventListener("change", (e) => {
-  const name = e.target.dataset.f;
-  if (!name) return;
-  if (taskDraft) {
-    if (name === "task-agent") {
-      taskDraft.agent = e.target.value;
-      taskDraft.llm = ""; // the llm list depends on the agent
-      renderTaskPane();
-      const sel = taskDetailsEl.querySelector('[data-f="task-agent"]');
-      if (sel) sel.focus();
-      taskDraftValid();
-    } else if (name === "task-llm") {
-      taskDraft.llm = e.target.value;
-      taskDraftValid();
-    }
-    return;
-  }
+  if (!e.target.classList.contains("ctx-type")) return;
   const c = currentTask();
-  if (!c) return;
-  if (name === "task-llm") {
-    c.llm = e.target.value;
-    renderTaskList();
-    scheduleTaskSave();
-  }
+  const item = c && c.context && c.context[+e.target.dataset.ci];
+  if (!item) return;
+  item.type = e.target.value;
+  const row = e.target.closest(".ctx-item");
+  const ta = row?.querySelector('[data-cf="text"]');
+  if (ta) ta.placeholder = CTX_PLACEHOLDER[item.type] || "";
+  touchCtxItem(item, row);
+  scheduleTaskSave();
 });
 
 taskDetailsEl.addEventListener("click", (e) => {
@@ -1137,14 +1376,297 @@ taskDetailsEl.addEventListener("click", (e) => {
   else if (act === "task-cancel") {
     taskDraft = null;
     renderTaskPane();
+  } else if (act === "ctx-add" || act === "ctx-del") {
+    const c = currentTask();
+    if (!c) return;
+    if (act === "ctx-add") {
+      const list = c.context || (c.context = []);
+      if (list.length >= CTX_MAX) return;
+      list.push(newContextItem());
+      renderTaskPane();
+      taskDetailsEl.querySelector(".ctx-item:last-of-type [data-cf='text']")
+        ?.focus();
+    } else {
+      c.context?.splice(+btn.dataset.ci, 1);
+      renderTaskPane();
+      scheduleTaskSave();
+    }
   }
+});
+
+/* ---------- actions (column three) ----------
+ *
+ * The selected task's action tree: one row per action (a state
+ * select, the title, add-sub-action and remove buttons), children
+ * indented under their parent. Clicking a title opens the inline
+ * editor (title + description). Actions are addressed by their path
+ * — the child indexes from the task's root list ("0.2.1"); typing
+ * mutates the in-memory tree and autosaves the whole task list,
+ * structural changes (add/remove/state) re-render the pane. */
+
+const ACTION_STATES = [
+  ["pending", "Pending"],
+  ["in_progress", "In progress"],
+  ["completed", "Completed"],
+  ["partial", "Partial"],
+  ["failed", "Failed"],
+];
+/* the refinement loop an action sits in (mirrors src/tasks.c;
+ * "act" is the default and omitted on the wire) */
+const ACTION_TYPES = [
+  ["observe", "Observe"],
+  ["analyze", "Analyze"],
+  ["find_root_cause", "Root cause"],
+  ["act", "Act"],
+  ["validate", "Validate"],
+  ["improve", "Improve"],
+];
+const ACTION_TITLE_MAX = 96;   // mirrors ACTION_TITLE_MAX in src/tasks.c
+const ACTION_DESC_MAX = 4096;  // mirrors ACTION_DESC_MAX in src/tasks.c
+
+const actionListEl = document.getElementById("action-list");
+const actionCountEl = document.getElementById("action-count");
+
+let editingPath = null; // array of indexes, or null
+
+const actionTitleOk = (v) => bytes(v || "") <= ACTION_TITLE_MAX - 1 && noControls(v || "");
+const actionDescOk = (v) =>
+  bytes(v || "") <= ACTION_DESC_MAX - 1 && noControlsMulti(v || "");
+
+const newAction = () =>
+  ({ title: "", description: "", state: "pending", type: "act", children: [] });
+
+function countActions(list) {
+  let n = 0;
+  for (const a of list || []) n += 1 + countActions(a.children);
+  return n;
+}
+
+/* the sibling list that holds the action at `path` */
+function actionParentList(path) {
+  const c = currentTask();
+  if (!c) return null;
+  let list = c.actions;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = list[path[i]];
+    if (!a) return null;
+    list = a.children;
+  }
+  return list;
+}
+
+function actionByPath(path) {
+  const list = actionParentList(path);
+  return list ? list[path[path.length - 1]] : undefined;
+}
+
+function pathKey(path) { return path.join("."); }
+
+function renderActions() {
+  actionListEl.textContent = "";
+  const c = taskDraft ? null : currentTask();
+  document.getElementById("new-action").hidden = !c;
+  if (!c) {
+    actionCountEl.textContent = "";
+    actionListEl.append(el("div", { class: "task-empty" },
+      el("p", {
+        class: "placeholder-title",
+        text: visibleTasks().length ? "No task selected" : "Nothing open",
+      }),
+      el("p", {
+        class: "placeholder-text",
+        text: visibleTasks().length
+          ? "Pick one in column two — its action tree opens here."
+          : "Create a task in column two first, then plan it out here.",
+      })));
+    return;
+  }
+  const n = countActions(c.actions);
+  actionCountEl.textContent = n ? `${n} action${n === 1 ? "" : "s"}` : "";
+  if (!n)
+    actionListEl.append(el("p", {
+      class: "task-none muted",
+      text: "No actions yet — add the first thing to be done.",
+    }));
+  renderActionList(actionListEl, c.actions, []);
+}
+
+function renderActionList(container, actions, path) {
+  actions.forEach((a, i) => container.append(actionRow(a, [...path, i])));
+}
+
+function actionRow(a, path) {
+  const key = pathKey(path);
+  const editing = editingPath && pathKey(editingPath) === key;
+  const state = a.state || "pending";
+  const type = a.type || "act";
+
+  const tsel = el("select", {
+    class: "action-type", "data-path": key, "aria-label": "Type",
+  });
+  for (const [v, label] of ACTION_TYPES) {
+    const o = el("option", { value: v, text: label });
+    if (v === type) o.selected = true;
+    tsel.appendChild(o);
+  }
+
+  const sel = el("select", {
+    class: "action-state", "data-path": key, "aria-label": "State",
+  });
+  for (const [v, label] of ACTION_STATES) {
+    const o = el("option", { value: v, text: label });
+    if (v === state) o.selected = true;
+    sel.appendChild(o);
+  }
+
+  const row = el("div", {
+    class: "action", "data-path": key, "data-state": state, "data-type": type,
+  },
+    el("div", { class: "action-row" },
+      tsel,
+      sel,
+      el("span", {
+        class: "action-title",
+        text: a.title.trim() || "",
+        title: "Click to edit",
+      }),
+      el("button", {
+        type: "button", class: "icon-btn", "data-action": "action-sub",
+        "data-path": key, title: "Add sub-action",
+        "aria-label": "Add sub-action", text: "+",
+      }),
+      el("button", {
+        type: "button", class: "icon-btn", "data-action": "action-del",
+        "data-path": key, title: "Remove action and its sub-actions",
+        "aria-label": "Remove action", text: "✕",
+      })));
+
+  if (editing) row.append(actionEditor(a));
+  if (a.children.length)
+    row.append(el("div", { class: "action-children" },
+      ...a.children.map((_, i) => actionRow(a.children[i], [...path, i]))));
+  return row;
+}
+
+function actionEditor(a) {
+  const wrap = el("div", { class: "action-editor" });
+  const tf = el("div", { class: "field" },
+    el("label", { text: "Title" }),
+    el("input", { "data-af": "title", spellcheck: "false" }),
+    el("span", { class: "field-error err-title" }));
+  const df = el("div", { class: "field" },
+    el("label", { text: "Description" }),
+    el("textarea", { "data-af": "description", rows: "3", spellcheck: "false" }),
+    el("span", { class: "field-error err-desc" }));
+  wrap.append(tf, df);
+  tf.querySelector("input").value = a.title;
+  df.querySelector("textarea").value = a.description;
+  return wrap;
+}
+
+/* live error display inside an open editor (mirrors the server's
+ * action rules) */
+function showActionErrors(a, editor) {
+  const t = editor.querySelector(".err-title");
+  const d = editor.querySelector(".err-desc");
+  const ti = editor.querySelector('[data-af="title"]');
+  const di = editor.querySelector('[data-af="description"]');
+  const terr = (a.title || "").trim() ? "" : "required";
+  const derr = actionDescOk(a.description) ? "" : `too long (${ACTION_DESC_MAX - 1} bytes at most)`;
+  t.textContent = terr;
+  d.textContent = derr;
+  ti.classList.toggle("invalid", !!terr);
+  di.classList.toggle("invalid", !!derr);
+}
+
+document.getElementById("new-action").addEventListener("click", () => {
+  const c = currentTask();
+  if (!c) return;
+  c.actions.push(newAction());
+  editingPath = [c.actions.length - 1];
+  renderActions();
+  renderTaskList(); // the row's action count changed
+  scheduleTaskSave();
+  actionListEl.querySelector(".action-editor input")?.focus();
+});
+
+actionListEl.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (btn) {
+    const path = btn.dataset.path.split(".").map(Number);
+    if (btn.dataset.action === "action-sub") {
+      const a = actionByPath(path);
+      if (!a) return;
+      a.children.push(newAction());
+      editingPath = [...path, a.children.length - 1];
+      renderActions();
+      renderTaskList(); // the row's action count changed
+      scheduleTaskSave();
+      actionListEl.querySelector(".action-editor input")?.focus();
+    } else if (btn.dataset.action === "action-del") {
+      const list = actionParentList(path);
+      if (!list) return;
+      const key = pathKey(path);
+      list.splice(path[path.length - 1], 1);
+      if (editingPath &&
+          (pathKey(editingPath) === key ||
+           pathKey(editingPath).startsWith(key + ".")))
+        editingPath = null;
+      renderActions();
+      renderTaskList(); // the row's action count changed
+      scheduleTaskSave();
+    }
+    return;
+  }
+  const title = e.target.closest(".action-title");
+  if (title) { // toggle the inline editor
+    const key = title.closest(".action").dataset.path;
+    editingPath = editingPath && pathKey(editingPath) === key
+      ? null : key.split(".").map(Number);
+    renderActions();
+    if (editingPath)
+      actionListEl.querySelector(".action-editor input")?.focus();
+  }
+});
+
+actionListEl.addEventListener("change", (e) => {
+  if (!e.target.classList.contains("action-state") &&
+      !e.target.classList.contains("action-type"))
+    return;
+  const path = e.target.dataset.path.split(".").map(Number);
+  const a = actionByPath(path);
+  if (!a) return;
+  if (e.target.classList.contains("action-state")) {
+    a.state = e.target.value;
+    renderActions(); // refresh row state styling
+    renderTaskList(); // nothing depends on state, but keep counts fresh
+  } else {
+    a.type = e.target.value;
+    const row = e.target.closest(".action");
+    if (row) row.dataset.type = a.type;
+  }
+  scheduleTaskSave();
+});
+
+actionListEl.addEventListener("input", (e) => {
+  const f = e.target.dataset.af;
+  if (!f) return;
+  const editor = e.target.closest(".action-editor");
+  const row = editor.closest(".action");
+  const a = actionByPath(row.dataset.path.split(".").map(Number));
+  if (!a) return;
+  a[f] = e.target.value;
+  if (f === "title") // keep the row label in sync without a re-render
+    row.querySelector(".action-title").textContent = a.title.trim();
+  showActionErrors(a, editor);
+  scheduleTaskSave();
 });
 
 /* ---------- boot ---------- */
 
 (async () => {
   await loadProjects();
-  await Promise.all([loadTasks(), refreshTaskMeta()]);
+  await loadTasks();
   const remembered = localStorage.getItem("flower.selected");
   const i = projects.findIndex((p) => p.dir === remembered);
   selected = i >= 0 ? i : projects.length ? 0 : -1;

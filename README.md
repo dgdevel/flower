@@ -10,10 +10,13 @@ directory with a `theme.json` backend and config UI, and the main
 three-column screen with a live projects column. The config page now
 also manages **llm endpoints** (`llms.json`) and **agents** (one json
 file per agent under `agents/`, plus the compiled-in **builtin
-agents**) — the llmkit-shaped settings tasks will run on.
-Column two keeps the **tasks**: a list with a
-create button on top, the selected task's details (id, agent
-binding, llm pick) below. See *Roadmap*.
+agents**) — the llmkit-shaped settings for the conversation runner a
+later part adds. Column two keeps the **tasks**: a list with a
+create button on top, the selected task's details (id, project,
+title) and its typed **context items** below. A task is a **list of
+actions** (nested without a depth limit, each with a title,
+description, state and refinement type) edited in column three;
+projects carry context items of the same shape. See *Roadmap*.
 
 ## Quick start
 
@@ -105,7 +108,12 @@ same lenient/strict contract, one file per concern:
     "description":  "A single-binary webapp in C11.",
     "objectives":   "Ship part 4: llm-driven tasks.",
     "scope":        "No TLS; POSIX only; evenings and weekends.",
-    "stakeholders": "me, the bees"
+    "stakeholders": "me, the bees",
+    "context": [
+      { "type": "risk", "text": "one dev, many evenings",
+        "updated": 1790529738 },
+      { "text": "single binary = one file to ship" }
+    ]
   }
 ]
 ```
@@ -122,6 +130,22 @@ are valid UTF-8 without control characters (≤ 31 / 96 bytes), at most
 valid UTF-8, no control characters but newlines), edited in column one
 under "Project details". They are optional, default to empty, and are
 the project context the llm side will draw on later.
+
+The **context items** are the structured half of that context, shared
+with tasks (`src/context.c`): each item is a `type` — `fact`,
+`pattern`, `risk`, `success_metric`, `failure_sign`,
+`evaluation_method` or `rule` (the `fact` default is omitted on the
+wire) — a free `text` (required, multi-line, ≤ 4095 bytes, valid
+UTF-8) and its update time (`updated`, unix seconds — the client
+restamps an item on every edit; the server fills it in when
+missing, and loads pre-update files that still say `created`).
+`GET` also gives every item a generated **id**: `P1`, `P2`, … in a
+project's list, `T1`, `T2`, … in a task's — numbered by position,
+regenerated on every read (a delete renumbers the rest) and never
+persisted; a PUT may echo ids back, the server ignores them. They
+are edited as a list under "Context" in both the project editor
+and the task details, autosaved with the owning PUT; at most 64
+items per project/task.
 
 Working directories must **exist on disk**: PUT validates each `dir`
 with `stat()` (422 `directory does not exist` / `not a directory`).
@@ -192,39 +216,64 @@ list: files of removed agents are deleted.
 `assistant`) and merged into `GET /api/agents`, sorted by name and
 flagged `"builtin": true` — never written to `agents/`, not editable
 in the config UI, and their names are reserved (PUT rejects a user
-agent taking one). A builtin carries no llm of its own (`"llm": ""`):
-a task bound to one selects its llm explicitly.
+agent taking one). Tasks no longer reference agents or llms (see
+below); the stores remain for the conversation runner later parts
+will add.
 
 `tasks/` — one directory per **task**, named by its
 server-generated 32-hex-char id, holding `task.json` with the
 details (column two lists the **selected project's** tasks with a
-create button on top and the selected task's details — id, agent
-binding, llm pick — below; the selected task is the scope for
-column three):
+create button on top and the selected task's details — id, project,
+title — below; the selected task is the scope for column three):
 
 ```json
 {
   "id":      "375b2ec7c276687f07218394e04a38c9",
   "project": "9f2c4a1b0d7e6358",
-  "title":   "first chat",
-  "agent":   "assistant",
-  "llm":     "ollama-local",
-  "created": 1790529738
+  "title":   "write the report",
+  "created": 1790529738,
+  "actions": [
+    {
+      "title": "gather sources",
+      "type": "observe",
+      "state": "completed",
+      "children": [{ "title": "ask the archive" }]
+    },
+    { "title": "draft", "state": "in_progress" }
+  ],
+  "context": [
+    { "id": "T1", "type": "success_metric", "text": "shipped by friday",
+      "updated": 1790529738 }
+  ]
 }
 ```
 
+A task is a list of **actions** to be done. Actions nest without a
+fixed depth limit (a recursion cap of 64 protects the parser); each
+carries a `title` (required), a `description` (optional,
+multi-line), a `state`: `pending` (the default, omitted on the
+wire), `in_progress`, `completed`, `partial` (completed partially)
+or `failed` (completed unsuccessfully) — and a `type` saying where
+it sits in the refinement loop: `observe`, `analyze`,
+`find_root_cause`, `act` (the default, omitted on the wire),
+`validate` or `improve`. Column three edits the selected task's
+tree: the top half lists the actions — a type and a state select,
+an inline title/description editor, add-sub-action and remove per
+row — with children indented; the lower half stays reserved. The
+task's own typed context items (same shape as a project's, edited
+in the task details) complete the picture. The whole task list is
+PUT after every edit, so the tree autosaves like the rest of the UI.
+
 The main screen is a hierarchy: a task belongs to one `project`
-(by id, checked on PUT) and is bound to one `agent` (user-defined
-or builtin, also checked). Switching project — or drafting a new
+(by id; the format is checked on PUT — existence is not, since the
+whole list is PUT after every edit and a deleted project's tasks
+must stay savable). Switching project — or drafting a new
 one — resets the task list, the task selection and column three;
-drafting a task empties column three. `llm` is an optional
-override — empty means "the agent's llm", and a task whose agent
-has none (the builtins) must select one. Same replaceable-list
+drafting a task empties column three. Same replaceable-list
 contract as projects: PUT the whole array, the server writes one
 `tasks/{ID}/` per entry and deletes the directories of removed
-ones; GET adds live `"project_ok"`/`"agent_ok"`/`"llm_ok"` flags
-for dangling references (the project deleted, an agent renamed
-away, an llm deleted), which the UI flags like a missing project
+ones; GET adds a live `"project_ok"` flag for dangling references
+(the project deleted), which the UI flags like a missing project
 directory — tasks of a deleted project stay stored but are listed
 under no project. The list is kept newest-first; later parts add
 the conversation (the message log) inside the same `{ID}`
@@ -250,10 +299,14 @@ src/agents.{c,h}      llms.json + agents/ backends: named llm endpoints,
                       options, system prompt, mcp servers) and the
                       compiled-in builtin agents
 src/tasks.{c,h} tasks/ backend: one directory per
-                      task (agent binding, llm override, title)
+                      task (project reference, title, nested
+                      action tree, context items)
+src/context.{c,h}    typed context items shared by projects and
+                      tasks (fact/pattern/risk/… — parse/emit
+                      rules live once for both stores)
 src/assets_gen.{c,h}  GENERATED — do not edit; regenerated by `make`
 web/index.html        main app: three-column deck (projects,
-                      tasks + reserved column three)
+                      tasks, actions)
 web/config.html       config page: theme, llm endpoints, agents
 web/config.js         theme editor: instant preview, validate, save, reset
 web/agents.js         llm endpoints + agents editors (list/editor pairs,
@@ -261,7 +314,7 @@ web/agents.js         llm endpoints + agents editors (list/editor pairs,
 web/components.html   themed component gallery (palette, buttons, badges, rows…)
 web/theme.js          shared: fetch /api/theme, apply as CSS custom properties
 web/app.js            main app: projects rail/editor, tasks
-                      column, swipeable column deck
+                      column, action-tree column, swipeable column deck
 web/emoji.js          GENERATED by tools/emoji.py — the full Unicode emoji
                       list for the picker (v18.0, 3,963 emojis)
 web/style.css         styles driven entirely by theme variables
@@ -298,14 +351,16 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | 422 invalid entry/unknown llm/duplicate or    |
 |                   |              | builtin-reserved name                          |
 | `/api/tasks` | GET/HEAD  | task array (newest first) + live      |
-|                   |              | `project_ok`/`agent_ok`/`llm_ok` flags per     |
-|                   |              | entry                                          |
+|                   |              | `project_ok` flag per entry                    |
 | `/api/tasks` | PUT       | body: the whole array (see tasks/);   |
-|                   |              | validates project/agent/llm references,        |
-|                   |              | writes one `{ID}/task.json` per entry, deletes |
-|                   |              | removed directories; 400 bad JSON; 422 invalid |
-|                   |              | entry/unknown project/agent/llm/agent without |
-|                   |              | an llm and none picked                         |
+|                   |              | validates project reference format,   |
+|                   |              | the action trees (states, types) and  |
+|                   |              | the context items (dangling project   |
+|                   |              | refs stay savable — GET flags them),  |
+|                   |              | writes one `{ID}/task.json` per       |
+|                   |              | entry, deletes removed directories;   |
+|                   |              | 400 bad JSON; 422 invalid entry/bad   |
+|                   |              | action/over-deep nesting               |
 | anything else     | GET/HEAD     | 404; other methods → 405 (with `Allow`)         |
 
 Request bodies: `Content-Length` only (≤ 256 KB); `Transfer-Encoding:
@@ -380,19 +435,26 @@ served automatically with the right MIME type. Dotfiles are skipped.
       it lists the selected project's tasks (list + create on top,
       selected task's details below); switching project or drafting
       one resets columns two and three, drafting a task empties
-      column three (still a placeholder for the task itself)
+      column three
 - [ ] part 4: llm interaction via llmkit
       - [x] llm endpoints (llms.json) + agents (agents/, one json file
             per agent: llm reference, inference options, system prompt,
             mcp servers) with a config UI for both
-      - [x] builtin agents (compiled in, read-only; tasks bound
-            to one pick their llm themselves)
-      - [x] task store: {config}/tasks/{ID}/ with the
-            details (project and agent bindings, llm override,
-            title), replaceable-list API, project ids as stable
-            identities
-      - [ ] drive `llmkit runner` conversations from a task (a task's
-            agent + llm assembled into runner input)
+      - [x] builtin agents (compiled in, read-only, selectable
+            like user agents)
+      - [x] task store: {config}/tasks/{ID}/ with the details
+            (project reference, title, nested action tree,
+            context items), replaceable-list API, project ids as
+            stable identities
+      - [x] action trees: column three edits the selected task's
+            actions (add/edit/remove, sub-actions, five states, six
+            types); the agent/llm task binding was removed — how a
+            task reaches a model is decided when the runner lands
+      - [x] typed context items on projects and tasks (fact,
+            pattern, risk, success_metric, failure_sign,
+            evaluation_method, rule — text + creation time), with
+            editors in column one and column two
+      - [ ] drive `llmkit runner` conversations from a task
       - [ ] custom-made mcp servers offered by flower itself
 - [ ] idle connection timeouts
 - [ ] Windows build (winsock + select/IOCP)

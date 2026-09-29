@@ -285,19 +285,34 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
         memcpy((char *)out + DETAIL_FIELDS[k].off, sv, n + 1);
     }
 
+    /* the typed context items: last, so earlier failures never leak
+     * them (context_from_json frees what it built on strict failure) */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "context");
+    if (j) {
+        char cprefix[48];
+        snprintf(cprefix, sizeof cprefix, "projects[%zu].context", index);
+        if (context_from_json(j, &out->context, strict,
+                              err_field, err_field_n,
+                              err_msg, err_msg_n, cprefix) != 0 && strict)
+            return -1;
+    }
+
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         cJSON_ArrayForEach(j, obj) {
             int known = j->string && (strcmp(j->string, "id") == 0 ||
                 strcmp(j->string, "dir") == 0 ||
                 strcmp(j->string, "title") == 0 ||
                 strcmp(j->string, "color") == 0 ||
-                strcmp(j->string, "emoji") == 0);
+                strcmp(j->string, "emoji") == 0 ||
+                strcmp(j->string, "context") == 0);
             for (size_t k = 0; !known && k < DETAIL_N; k++)
                 if (strcmp(j->string, DETAIL_FIELDS[k].key) == 0) known = 1;
             if (!known) {
                 snprintf(err_field, err_field_n, "projects[%zu].%s", index,
                          j->string ? j->string : "");
                 snprintf(err_msg, err_msg_n, "unknown setting");
+                context_free(out->context); /* parsed just above */
+                out->context = NULL;
                 return -1;
             }
         }
@@ -370,7 +385,10 @@ int projects_load(projects_t *p)
         if (parse_entry(child, p->count, &one, p, 0, &gen,
                         NULL, 0, NULL, 0) != 0)
             continue;
-        if (dir_used(p, p->count, one.dir)) continue;
+        if (dir_used(p, p->count, one.dir)) {
+            context_free(one.context);
+            continue;
+        }
         if (id_used(p, p->count, one.id)) { /* duplicate in the file */
             do gen_hex_id(one.id, PROJECT_ID_LEN);
             while (id_used(p, p->count, one.id));
@@ -391,6 +409,13 @@ int projects_find_id(const projects_t *p, const char *id)
     for (size_t i = 0; i < p->count; i++)
         if (strcmp(p->items[i].id, id) == 0) return (int)i;
     return -1;
+}
+
+void projects_clear(projects_t *p)
+{
+    for (size_t i = 0; i < p->count; i++)
+        context_free(p->items[i].context);
+    p->count = 0;
 }
 
 int projects_save(const projects_t *p)
@@ -417,6 +442,16 @@ int projects_save(const projects_t *p)
                 cJSON_Delete(j);
                 j = NULL;
                 break;
+            }
+            if (p->items[i].context) {
+                cJSON *ctx = context_to_cjson(p->items[i].context, 0);
+                if (ctx) cJSON_AddItemToObject(o, "context", ctx);
+                else {
+                    cJSON_Delete(o);
+                    cJSON_Delete(j);
+                    j = NULL;
+                    break;
+                }
             }
             cJSON_AddItemToArray(j, o);
         }
@@ -477,6 +512,7 @@ projects_parse_result_t projects_from_json(const char *buf, size_t len,
         if (!cJSON_IsObject(child)) {
             snprintf(err_field, err_field_n, "projects[%zu]", i);
             snprintf(err_msg, err_msg_n, "must be an object");
+            projects_clear(out);
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
         }
@@ -484,18 +520,23 @@ projects_parse_result_t projects_from_json(const char *buf, size_t len,
         if (parse_entry(child, i, &one, out, 1, NULL,
                         err_field, err_field_n,
                         err_msg, err_msg_n) != 0) {
+            projects_clear(out);
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
         }
         if (dir_used(out, out->count, one.dir)) {
             snprintf(err_field, err_field_n, "projects[%zu].dir", i);
             snprintf(err_msg, err_msg_n, "duplicate directory");
+            context_free(one.context);
+            projects_clear(out);
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
         }
         if (id_used(out, out->count, one.id)) {
             snprintf(err_field, err_field_n, "projects[%zu].id", i);
             snprintf(err_msg, err_msg_n, "duplicate id");
+            context_free(one.context);
+            projects_clear(out);
             cJSON_Delete(j);
             return PROJECTS_E_FIELD;
         }
@@ -528,9 +569,22 @@ char *projects_to_json(const projects_t *p, int with_exists)
             !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
             !cJSON_AddStringToObject(o, "color", p->items[i].color) ||
             !cJSON_AddStringToObject(o, "emoji", p->items[i].emoji) ||
-            add_details(o, &p->items[i]) != 0 ||
-            (with_exists &&
-             !cJSON_AddBoolToObject(o, "exists", dir_on_disk(p->items[i].dir)))) {
+            add_details(o, &p->items[i]) != 0) {
+            cJSON_Delete(o);
+            cJSON_Delete(j);
+            return NULL;
+        }
+        if (p->items[i].context) {
+            cJSON *ctx = context_to_cjson(p->items[i].context, 'P');
+            if (!ctx) {
+                cJSON_Delete(o);
+                cJSON_Delete(j);
+                return NULL;
+            }
+            cJSON_AddItemToObject(o, "context", ctx);
+        }
+        if (with_exists &&
+            !cJSON_AddBoolToObject(o, "exists", dir_on_disk(p->items[i].dir))) {
             cJSON_Delete(o);
             cJSON_Delete(j);
             return NULL;

@@ -12,10 +12,13 @@
  * PUT may omit it — e.g. for a new project — and the server generates
  * one). Title defaults to the directory's basename, color/emoji to a
  * palette. Four free-text detail fields (description, objectives,
- * scope, stakeholders) carry the project's context: optional,
- * multi-line, size-capped. They will feed the llm side later (part 4).
+ * scope, stakeholders) plus a list of typed **context items**
+ * (src/context.c: fact, pattern, risk, … — each a text and a creation
+ * time) carry the project's context: optional, size-capped. They will
+ * feed the llm side later (part 4).
  */
 
+#include "context.h"
 #include <stddef.h>
 
 #define PROJECTS_MAX      64  /* list length cap (with the detail fields
@@ -37,6 +40,7 @@ typedef struct {
     char objectives[PROJECT_TEXT_MAX];
     char scope[PROJECT_TEXT_MAX];
     char stakeholders[PROJECT_TEXT_MAX];
+    ctx_item_t *context;        /* typed context items (owned) */
 } project_t;
 
 typedef struct {
@@ -56,6 +60,9 @@ int projects_load(projects_t *p);
 
 /* Persist as projects.json (atomic write). 0 on success. */
 int projects_save(const projects_t *p);
+
+/* Free every project's context items and empty the list. */
+void projects_clear(projects_t *p);
 
 /* Lookup by id: index, or -1. */
 int projects_find_id(const projects_t *p, const char *id);

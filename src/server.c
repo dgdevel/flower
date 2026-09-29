@@ -308,12 +308,14 @@ static void handle_projects_put(server_t *s, conn_t *c, http_request_t *req,
         return;
     }
     if (projects_save(&np) != 0) {
+        projects_clear(&np);
         *status = 500;
         respond_json(s, c, 500,
                      "{\"error\":\"cannot write projects.json in config dir\"}",
                      req->keep_alive);
         return;
     }
+    projects_clear(&s->projects); /* the replaced contexts are heap now */
     s->projects = np;
     *status = 200;
     char *j = projects_to_json(&np, 0);
@@ -413,7 +415,7 @@ static void handle_tasks_put(server_t *s, conn_t *c,
     tasks_t nc;
     char efield[96], emsg[160];
     tasks_parse_result_t pr = tasks_from_json(
-        body, body_len, &s->llms, &s->agents, &s->projects, &nc,
+        body, body_len, &nc,
         efield, sizeof efield, emsg, sizeof emsg);
     if (pr != TASKS_OK) {
         *status = (pr == TASKS_E_JSON) ? 400 : 422;
@@ -429,15 +431,17 @@ static void handle_tasks_put(server_t *s, conn_t *c,
         return;
     }
     if (tasks_save(&nc) != 0) {
+        tasks_clear(&nc);
         *status = 500;
         respond_json(s, c, 500,
                      "{\"error\":\"cannot write tasks/ in config dir\"}",
                      req->keep_alive);
         return;
     }
+    tasks_clear(&s->tasks);
     s->tasks = nc;
     *status = 200;
-    char *j = tasks_to_json(&nc, 0, NULL, NULL, NULL); /* echo: validated */
+    char *j = tasks_to_json(&nc, 0, NULL); /* echo: validated */
     if (j) {
         respond_json(s, c, 200, j, req->keep_alive);
         free(j);
@@ -517,8 +521,7 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                              req->keep_alive);
             }
         } else if (strcmp(path, "/api/tasks") == 0) {
-            char *j = tasks_to_json(&s->tasks, 1,
-                                    &s->llms, &s->agents, &s->projects);
+            char *j = tasks_to_json(&s->tasks, 1, &s->projects);
             if (j) {
                 respond(s, c, 200, "application/json", j, strlen(j),
                         req->keep_alive, head, NULL);
@@ -860,6 +863,7 @@ int server_run(const char *bind_addr, uint16_t port)
     free(s.by_fd);
     llms_free(&s.llms);
     agents_free(&s.agents);
+    tasks_clear(&s.tasks);
     close(epfd);
     close(lfd);
     return 0;

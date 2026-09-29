@@ -15,7 +15,7 @@ GEN_C   := src/assets_gen.c
 GEN_H   := src/assets_gen.h
 
 ASSET_SRCS := $(shell find web -type f ! -name '.*' 2>/dev/null | LC_ALL=C sort)
-SRCS := src/main.c src/server.c src/http.c src/theme.c src/projects.c src/agents.c src/tasks.c $(GEN_C)
+SRCS := src/main.c src/server.c src/http.c src/theme.c src/projects.c src/agents.c src/tasks.c src/context.c $(GEN_C)
 OBJS := $(SRCS:.c=.o)
 
 all: $(BIN)

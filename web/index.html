@@ -51,19 +51,27 @@
       <div class="task-details" id="task-details" aria-label="Task details"></div>
     </section>
 
-    <section class="pane" aria-label="Column three" data-pane="2">
+    <section class="pane actions-pane" aria-label="Actions" data-pane="2">
       <div class="pane-head">
-        <h2>Column three</h2>
-        <span class="pane-hint">reserved</span>
+        <h2>Actions</h2>
+        <span class="pane-hint" id="action-count"></span>
       </div>
       <div class="pane-warn">
         <p class="warn-title">Project unavailable</p>
         <p class="warn-text"><!-- filled by app.js --></p>
       </div>
+      <div class="actions-top">
+        <div class="task-topbar">
+          <button type="button" class="btn btn-accent" id="new-action"
+                  data-action="action-new">Add action</button>
+        </div>
+        <div class="action-list" id="action-list" aria-label="Actions"></div>
+      </div>
+      <div class="task-split" aria-hidden="true"></div>
       <div class="placeholder-body">
         <p class="placeholder-title">Nothing here yet</p>
         <p class="placeholder-text" id="col3-text">
-          This column keeps its place in the layout. flower grows into
+          The lower half keeps its place in the layout. flower grows into
           it later.</p>
       </div>
     </section>

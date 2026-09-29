@@ -1,10 +1,13 @@
 /* tasks — task store backend, mirroring the
  * projects.c/agents.c pattern: lenient load, strict save, atomic
- * tmp+rename writes, one directory per task. */
+ * tmp+rename writes, one directory per task. A task carries its
+ * project reference, a title and a tree of actions (title,
+ * description, state — pending, in progress, completed, completed
+ * partially, completed unsuccessfully) nesting without a fixed
+ * depth limit. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "tasks.h"
-#include "agents.h"
 #include "projects.h"
 #include "theme.h" /* theme_dir(): resolved config directory */
 
@@ -72,8 +75,8 @@ static int valid_project_id(const char *s)
     return 1;
 }
 
-/* valid UTF-8 with no control characters (single-line titles) */
-static int valid_text(const char *s, size_t n)
+/* valid UTF-8 with no control characters; multiline also allows \n, \t */
+static int valid_text(const char *s, size_t n, int multiline)
 {
     size_t i = 0;
     while (i < n) {
@@ -81,7 +84,10 @@ static int valid_text(const char *s, size_t n)
         unsigned cp;
         int need;
         if (c < 0x80) {
-            if (c < 0x20 || c == 0x7f) return 0;
+            if (c < 0x20 || c == 0x7f) {
+                if (multiline && (c == '\n' || c == '\t')) { i++; continue; }
+                return 0;
+            }
             i++;
             continue;
         } else if ((c & 0xe0) == 0xc0) {
@@ -108,28 +114,6 @@ static int valid_text(const char *s, size_t n)
     return 1;
 }
 
-/* the bound agent: user-defined or builtin, NULL when dangling */
-static const agent_t *find_agent(const agents_t *agents, const char *name)
-{
-    int i = agents_find(agents, name);
-    if (i >= 0) return agents->items[i];
-    i = agents_builtin_find(name);
-    return i >= 0 ? agents_builtin((size_t)i) : NULL;
-}
-
-/* the task's effective llm: its own override, else the bound
- * agent's; "" when neither has one */
-static void effective_llm(const task_t *c, const agents_t *agents,
-                          char *out, size_t out_n)
-{
-    if (c->llm[0]) {
-        snprintf(out, out_n, "%s", c->llm);
-        return;
-    }
-    const agent_t *a = agents ? find_agent(agents, c->agent) : NULL;
-    snprintf(out, out_n, "%s", a ? a->llm : "");
-}
-
 static int id_used(const tasks_t *c, size_t upto, const char *id)
 {
     for (size_t i = 0; i < upto; i++)
@@ -150,19 +134,325 @@ static int task_cmp(const void *pa, const void *pb)
     return strcmp(a->id, b->id);
 }
 
+/* ---------- actions ---------- */
+
+static const char *const ACTION_STATES[] = {
+    "pending", "in_progress", "completed", "partial", "failed",
+};
+#define STATE_COUNT (sizeof ACTION_STATES / sizeof ACTION_STATES[0])
+
+static const char *const ACTION_TYPE_NAMES[] = {
+    "act", "observe", "analyze", "find_root_cause", "validate", "improve",
+};
+#define TYPE_COUNT (sizeof ACTION_TYPE_NAMES / sizeof ACTION_TYPE_NAMES[0])
+
+static int state_from_name(const char *s)
+{
+    for (size_t i = 0; i < STATE_COUNT; i++)
+        if (strcmp(ACTION_STATES[i], s) == 0) return (int)i;
+    return -1;
+}
+
+static const char *state_name(int s)
+{
+    return (s >= 0 && (size_t)s < STATE_COUNT) ? ACTION_STATES[s]
+                                               : ACTION_STATES[ACTION_PENDING];
+}
+
+static int type_from_name(const char *s)
+{
+    for (size_t i = 0; i < TYPE_COUNT; i++)
+        if (strcmp(ACTION_TYPE_NAMES[i], s) == 0) return (int)i;
+    return -1;
+}
+
+static const char *type_name(int t)
+{
+    return (t >= 0 && (size_t)t < TYPE_COUNT)
+               ? ACTION_TYPE_NAMES[t]
+               : ACTION_TYPE_NAMES[ACTION_ACT];
+}
+
+static void actions_free(action_t *a)
+{
+    while (a) {
+        action_t *next = a->next_sibling;
+        actions_free(a->first_child);
+        free(a);
+        a = next;
+    }
+}
+
+static int parse_action_list(const cJSON *arr, action_t **head, int depth,
+                             int strict, char *ef, size_t efn,
+                             char *em, size_t emn, const char *prefix);
+
+/* ---------- json error paths ----------
+ *
+ * These build paths like "tasks[0].actions[1].children[2].title"
+ * without printf: memcpy cannot trip -Wformat-truncation, and deep
+ * nesting clamps (shortens) the reported path instead of warning. */
+static void path_set(char *dst, size_t n, const char *src)
+{
+    size_t l = strnlen(src, n - 1);
+    memcpy(dst, src, l);
+    dst[l] = '\0';
+}
+
+static void path_add(char *dst, size_t n, const char *suffix)
+{
+    size_t l = strnlen(dst, n - 1);
+    size_t m = strnlen(suffix, n - 1 - l);
+    memcpy(dst + l, suffix, m);
+    dst[l + m] = '\0';
+}
+
+static void path_add_index(char *dst, size_t n, size_t i)
+{
+    char idx[24];
+    snprintf(idx, sizeof idx, "[%zu]", i);
+    path_add(dst, n, idx);
+}
+
+/*
+ * Parse one action object into *out. Strict mode (PUT) rejects any
+ * problem into err_field/err_msg; lenient mode (load) keeps the
+ * good fields and defaults. `prefix` is the JSON path of this
+ * action ("tasks[0].actions[1]"); `depth` counts nested action
+ * lists, capped at ACTION_DEPTH_MAX. On strict failure every
+ * sub-action built so far is freed. Returns 0 on success.
+ */
+static int parse_action(const cJSON *obj, action_t *out, int depth,
+                        int strict, char *ef, size_t efn,
+                        char *em, size_t emn, const char *prefix)
+{
+    static const char *const keys[] = {
+        "title", "description", "state", "type", "children",
+    };
+    char field[256], child_prefix[1024];
+    const cJSON *j;
+    memset(out, 0, sizeof *out);
+
+    j = cJSON_GetObjectItemCaseSensitive(obj, "title");
+    if (!cJSON_IsString(j) || !j->valuestring || !j->valuestring[0] ||
+        strlen(j->valuestring) >= sizeof out->title ||
+        !valid_text(j->valuestring, strlen(j->valuestring), 0)) {
+        path_set(field, sizeof field, prefix);
+        path_add(field, sizeof field, ".title");
+        snprintf(ef, efn, "%s", field);
+        snprintf(em, emn, "required, text, max %d bytes, no control characters",
+                 ACTION_TITLE_MAX - 1);
+        return -1; /* strict and lenient: an action without a title is dropped */
+    }
+    snprintf(out->title, sizeof out->title, "%s", j->valuestring);
+
+    j = cJSON_GetObjectItemCaseSensitive(obj, "description");
+    if (j && (!cJSON_IsString(j) ||
+              strlen(cJSON_IsString(j) ? j->valuestring : "") >=
+                  sizeof out->description ||
+              !valid_text(j->valuestring, strlen(j->valuestring), 1))) {
+        if (strict) {
+            path_set(field, sizeof field, prefix);
+            path_add(field, sizeof field, ".description");
+            snprintf(ef, efn, "%s", field);
+            snprintf(em, emn,
+                     "text, max %d bytes, no control characters "
+                     "except newlines", ACTION_DESC_MAX - 1);
+            return -1;
+        }
+    } else if (j && j->valuestring) {
+        snprintf(out->description, sizeof out->description, "%s",
+                 j->valuestring);
+    }
+
+    j = cJSON_GetObjectItemCaseSensitive(obj, "state");
+    if (j && (!cJSON_IsString(j) || state_from_name(j->valuestring) < 0)) {
+        if (strict) {
+            path_set(field, sizeof field, prefix);
+            path_add(field, sizeof field, ".state");
+            snprintf(ef, efn, "%s", field);
+            snprintf(em, emn,
+                     "pending, in_progress, completed, partial or failed");
+            return -1;
+        }
+    } else if (j && cJSON_IsString(j)) {
+        out->state = state_from_name(j->valuestring);
+    }
+
+    j = cJSON_GetObjectItemCaseSensitive(obj, "type");
+    if (j && (!cJSON_IsString(j) || type_from_name(j->valuestring) < 0)) {
+        if (strict) {
+            path_set(field, sizeof field, prefix);
+            path_add(field, sizeof field, ".type");
+            snprintf(ef, efn, "%s", field);
+            snprintf(em, emn,
+                     "observe, analyze, find_root_cause, act, validate "
+                     "or improve");
+            return -1;
+        }
+    } else if (j && cJSON_IsString(j)) {
+        out->type = type_from_name(j->valuestring);
+    }
+
+    j = cJSON_GetObjectItemCaseSensitive(obj, "children");
+    if (j) {
+        path_set(child_prefix, sizeof child_prefix, prefix);
+        path_add(child_prefix, sizeof child_prefix, ".children");
+        if (!cJSON_IsArray(j)) {
+            if (strict) {
+                snprintf(ef, efn, "%s", child_prefix);
+                snprintf(em, emn, "must be an array of actions");
+                return -1;
+            }
+        } else if (depth + 1 >= ACTION_DEPTH_MAX) {
+            if (strict) {
+                snprintf(ef, efn, "%s", child_prefix);
+                snprintf(em, emn, "too deeply nested (max %d levels)",
+                         ACTION_DEPTH_MAX);
+                return -1;
+            }
+        } else if (parse_action_list(j, &out->first_child, depth + 1, strict,
+                                     ef, efn, em, emn,
+                                     child_prefix) != 0 && strict) {
+            return -1; /* out->first_child freed by parse_action_list */
+        }
+    }
+
+    if (strict) { /* unknown keys are typos -> reject (like theme.c) */
+        cJSON_ArrayForEach(j, obj) {
+            int known = 0;
+            for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++)
+                if (j->string && strcmp(j->string, keys[k]) == 0) known = 1;
+            if (!known) {
+                path_set(field, sizeof field, prefix);
+                path_add(field, sizeof field, ".");
+                path_add(field, sizeof field, j->string ? j->string : "");
+                snprintf(ef, efn, "%s", field);
+                snprintf(em, emn, "unknown setting");
+                actions_free(out->first_child);
+                out->first_child = NULL;
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * Parse an array of actions into a sibling list at *head. Strict
+ * mode rejects the whole list on the first problem (freeing what
+ * was built); lenient mode keeps the parseable actions. Returns 0
+ * on success.
+ */
+static int parse_action_list(const cJSON *arr, action_t **head, int depth,
+                             int strict, char *ef, size_t efn,
+                             char *em, size_t emn, const char *prefix)
+{
+    *head = NULL;
+    action_t **tail = head;
+    size_t i = 0;
+    const cJSON *child = NULL;
+    cJSON_ArrayForEach(child, arr) {
+        if (!cJSON_IsObject(child)) {
+            if (ef && efn) {
+                path_set(ef, efn, prefix);
+                path_add_index(ef, efn, i);
+            }
+            snprintf(em, emn, "must be an object");
+            if (strict) { actions_free(*head); return -1; }
+            i++;
+            continue;
+        }
+        action_t *one = calloc(1, sizeof *one);
+        if (!one) {
+            snprintf(em, emn, "out of memory");
+            if (strict) { actions_free(*head); return -1; }
+            i++;
+            continue;
+        }
+        char item_prefix[1024];
+        path_set(item_prefix, sizeof item_prefix, prefix);
+        path_add_index(item_prefix, sizeof item_prefix, i);
+        if (parse_action(child, one, depth, strict, ef, efn, em, emn,
+                         item_prefix) != 0) {
+            free(one);
+            if (strict) { actions_free(*head); return -1; }
+            i++;
+            continue; /* lenient: skip the broken action */
+        }
+        *tail = one;
+        tail = &one->next_sibling;
+        i++;
+    }
+    return 0;
+}
+
+/* the action list as a json array (NULL for an empty list); each
+ * action emits its title plus only the non-default fields */
+static cJSON *actions_to_cjson(const action_t *a)
+{
+    if (!a) return NULL;
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) return NULL;
+    for (const action_t *p = a; p; p = p->next_sibling) {
+        cJSON *o = cJSON_CreateObject();
+        if (!o || !cJSON_AddStringToObject(o, "title", p->title)) {
+            cJSON_Delete(o);
+            cJSON_Delete(arr);
+            return NULL;
+        }
+        if (p->description[0] &&
+            !cJSON_AddStringToObject(o, "description", p->description)) {
+            cJSON_Delete(o);
+            cJSON_Delete(arr);
+            return NULL;
+        }
+        if (p->state != ACTION_PENDING &&
+            !cJSON_AddStringToObject(o, "state", state_name(p->state))) {
+            cJSON_Delete(o);
+            cJSON_Delete(arr);
+            return NULL;
+        }
+        if (p->type != ACTION_ACT &&
+            !cJSON_AddStringToObject(o, "type", type_name(p->type))) {
+            cJSON_Delete(o);
+            cJSON_Delete(arr);
+            return NULL;
+        }
+        if (p->first_child) {
+            cJSON *kids = actions_to_cjson(p->first_child);
+            if (!kids) {
+                cJSON_Delete(o);
+                cJSON_Delete(arr);
+                return NULL;
+            }
+            cJSON_AddItemToObject(o, "children", kids);
+        }
+        cJSON_AddItemToArray(arr, o);
+    }
+    return arr;
+}
+
+void tasks_clear(tasks_t *c)
+{
+    for (size_t i = 0; i < c->count; i++) {
+        actions_free(c->items[i].actions);
+        context_free(c->items[i].context);
+    }
+    c->count = 0;
+}
+
 /* ---------- entry parsing (shared by load & PUT) ---------- */
 
 /*
  * Parse one task object into *out. Strict mode (PUT) rejects
  * any problem into err_field/err_msg; lenient mode (load) repairs
- * what it can and skips nothing short of an unusable agent or
- * project reference. `seen` is the list being built (ids are
- * generated to avoid the ids already in it). Returns 0 on success.
+ * what it can and skips nothing short of an unusable project
+ * reference. `seen` is the list being built (ids are generated to
+ * avoid the ids already in it). Returns 0 on success.
  */
 static int parse_task(const cJSON *obj, size_t index, task_t *out,
                       const tasks_t *seen,
-                      const llms_t *llms, const agents_t *agents,
-                      const projects_t *projects,
                       int strict,
                       char *err_field, size_t err_field_n,
                       char *err_msg, size_t err_msg_n)
@@ -187,9 +477,12 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
         while (seen && id_used(seen, seen->count, out->id));
     }
 
-    /* the owning project: required, its id; the reference is checked
-     * against the project list when known (strict) and flagged by
-     * GET otherwise, like a dangling agent reference */
+    /* the owning project: required, a well-formed project id. Its
+     * existence is deliberately not checked — the whole list is
+     * PUT after every edit, so rejecting a task whose project was
+     * deleted would block all further saves; instead the task is
+     * kept and GET flags the dangling reference live (project_ok),
+     * like a vanished project directory */
     j = cJSON_GetObjectItemCaseSensitive(obj, "project");
     if (!cJSON_IsString(j) || !j->valuestring ||
         strlen(j->valuestring) >= sizeof out->project ||
@@ -203,68 +496,11 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
         return -1; /* lenient: unplaceable without a project */
     }
     snprintf(out->project, sizeof out->project, "%s", j->valuestring);
-    if (projects && strict && projects_find_id(projects, out->project) < 0) {
-        snprintf(err_field, err_field_n, "%s.project", prefix);
-        snprintf(err_msg, err_msg_n, "unknown project");
-        return -1;
-    }
-
-    /* the agent binding: required, must exist (user or builtin) */
-    j = cJSON_GetObjectItemCaseSensitive(obj, "agent");
-    if (!cJSON_IsString(j) || !j->valuestring || !j->valuestring[0] ||
-        strlen(j->valuestring) >= sizeof out->agent ||
-        !valid_text(j->valuestring, strlen(j->valuestring))) {
-        if (strict) {
-            snprintf(err_field, err_field_n, "%s.agent", prefix);
-            snprintf(err_msg, err_msg_n,
-                     "required, the name of an agent (user or builtin)");
-            return -1;
-        }
-        return -1; /* lenient: no usable binding -> unlistable */
-    }
-    snprintf(out->agent, sizeof out->agent, "%s", j->valuestring);
-    if (agents && strict && !find_agent(agents, out->agent)) {
-        snprintf(err_field, err_field_n, "%s.agent", prefix);
-        snprintf(err_msg, err_msg_n, "unknown agent");
-        return -1;
-    }
-
-    /* the llm override: "" (or absent) = the agent's own llm */
-    j = cJSON_GetObjectItemCaseSensitive(obj, "llm");
-    if (cJSON_IsString(j) && j->valuestring &&
-        strlen(j->valuestring) < sizeof out->llm &&
-        valid_text(j->valuestring, strlen(j->valuestring))) {
-        snprintf(out->llm, sizeof out->llm, "%s", j->valuestring);
-    } else if (j && strict) {
-        snprintf(err_field, err_field_n, "%s.llm", prefix);
-        snprintf(err_msg, err_msg_n,
-                 "must be the name of an llm, or empty for the agent's");
-        return -1;
-    }
-    if (llms && out->llm[0] && strict && llms_find(llms, out->llm) < 0) {
-        snprintf(err_field, err_field_n, "%s.llm", prefix);
-        snprintf(err_msg, err_msg_n, "unknown llm");
-        return -1;
-    }
-
-    /* a task must resolve to some llm: the builtin agents
-     * carry none of their own, so theirs select one explicitly */
-    if (strict) {
-        char eff[CFG_NAME_MAX];
-        effective_llm(out, agents, eff, sizeof eff);
-        if (!eff[0]) {
-            snprintf(err_field, err_field_n, "%s.llm", prefix);
-            snprintf(err_msg, err_msg_n,
-                     "select an llm — agent \"%s\" has none of its own",
-                     out->agent);
-            return -1;
-        }
-    }
 
     j = cJSON_GetObjectItemCaseSensitive(obj, "title");
     if (cJSON_IsString(j) && j->valuestring &&
         strlen(j->valuestring) < sizeof out->title &&
-        valid_text(j->valuestring, strlen(j->valuestring))) {
+        valid_text(j->valuestring, strlen(j->valuestring), 0)) {
         snprintf(out->title, sizeof out->title, "%s", j->valuestring);
     } else if (j && strict) {
         snprintf(err_field, err_field_n, "%s.title", prefix);
@@ -281,15 +517,13 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
         snprintf(err_field, err_field_n, "%s.created", prefix);
         snprintf(err_msg, err_msg_n, "must be a unix timestamp in seconds");
         return -1;
-    } else if (!j) {
-        out->created = (long long)time(NULL);
     } else {
-        out->created = (long long)time(NULL); /* lenient repair */
+        out->created = (long long)time(NULL); /* missing, or lenient repair */
     }
 
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         static const char *const keys[] = {
-            "id", "project", "title", "agent", "llm", "created",
+            "id", "project", "title", "created", "actions", "context",
         };
         cJSON_ArrayForEach(j, obj) {
             int known = 0;
@@ -301,6 +535,38 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
                 snprintf(err_msg, err_msg_n, "unknown setting");
                 return -1;
             }
+        }
+    }
+
+    /* the action tree: last, so earlier failures never leak it */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "actions");
+    if (j) {
+        char aprefix[64];
+        snprintf(aprefix, sizeof aprefix, "%s.actions", prefix);
+        if (!cJSON_IsArray(j)) {
+            snprintf(err_field, err_field_n, "%s", aprefix);
+            snprintf(err_msg, err_msg_n, "must be an array of actions");
+            if (strict) return -1;
+        } else if (parse_action_list(j, &out->actions, 0, strict,
+                                     err_field, err_field_n,
+                                     err_msg, err_msg_n,
+                                     aprefix) != 0 && strict) {
+            return -1; /* the built list is freed by parse_action_list */
+        }
+    }
+
+    /* the context items: after the tree; on strict failure the tree
+     * built above is freed here, context_from_json frees its own */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "context");
+    if (j) {
+        char cprefix[64];
+        snprintf(cprefix, sizeof cprefix, "%s.context", prefix);
+        if (context_from_json(j, &out->context, strict,
+                              err_field, err_field_n,
+                              err_msg, err_msg_n, cprefix) != 0 && strict) {
+            actions_free(out->actions);
+            out->actions = NULL;
+            return -1;
         }
     }
     return 0;
@@ -362,9 +628,9 @@ int tasks_load(tasks_t *c)
         free(buf);
         if (!j || !cJSON_IsObject(j)) { cJSON_Delete(j); continue; }
         task_t one;
-        /* lenient: no llms/agents context here — dangling references
+        /* lenient: no projects context here — dangling references
          * are kept and flagged by GET, like a vanished project dir */
-        if (parse_task(j, c->count, &one, c, NULL, NULL, NULL, 0,
+        if (parse_task(j, c->count, &one, c, 0,
                        NULL, 0, NULL, 0) != 0) {
             cJSON_Delete(j);
             continue;
@@ -372,7 +638,11 @@ int tasks_load(tasks_t *c)
         /* the directory is the identity, whatever the file claims */
         snprintf(one.id, sizeof one.id, "%s", name);
         cJSON_Delete(j);
-        if (id_used(c, c->count, one.id)) continue;
+        if (id_used(c, c->count, one.id)) {
+            actions_free(one.actions);
+            context_free(one.context);
+            continue;
+        }
         c->items[c->count++] = one;
     }
     qsort(c->items, c->count, sizeof c->items[0], task_cmp);
@@ -420,9 +690,17 @@ int tasks_save(const tasks_t *c)
         if (ok) ok = cJSON_AddStringToObject(o, "id", tk->id);
         if (ok) ok = cJSON_AddStringToObject(o, "project", tk->project);
         if (ok) ok = cJSON_AddStringToObject(o, "title", tk->title);
-        if (ok) ok = cJSON_AddStringToObject(o, "agent", tk->agent);
-        if (ok) ok = cJSON_AddStringToObject(o, "llm", tk->llm);
         if (ok) ok = cJSON_AddNumberToObject(o, "created", (double)tk->created);
+        if (ok && tk->actions) {
+            cJSON *acts = actions_to_cjson(tk->actions);
+            if (acts) cJSON_AddItemToObject(o, "actions", acts);
+            else ok = NULL;
+        }
+        if (ok && tk->context) {
+            cJSON *ctx = context_to_cjson(tk->context, 0);
+            if (ctx) cJSON_AddItemToObject(o, "context", ctx);
+            else ok = NULL;
+        }
         char *out = ok ? cJSON_Print(o) : NULL; /* pretty-printed */
         cJSON_Delete(o);
 
@@ -460,9 +738,6 @@ int tasks_save(const tasks_t *c)
 /* ---------- JSON in (strict) / out ---------- */
 
 tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
-                                     const llms_t *llms,
-                                     const agents_t *agents,
-                                     const projects_t *projects,
                                      tasks_t *out,
                                      char *err_field,
                                      size_t err_field_n,
@@ -506,14 +781,18 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
             return TASKS_E_FIELD;
         }
         task_t one;
-        if (parse_task(child, i, &one, out, llms, agents, projects, 1,
+        if (parse_task(child, i, &one, out, 1,
                        err_field, err_field_n, err_msg, err_msg_n) != 0) {
+            tasks_clear(out);
             cJSON_Delete(j);
             return TASKS_E_FIELD;
         }
         if (id_used(out, out->count, one.id)) {
             snprintf(err_field, err_field_n, "tasks[%zu].id", i);
             snprintf(err_msg, err_msg_n, "duplicate id");
+            actions_free(one.actions);
+            context_free(one.context);
+            tasks_clear(out);
             cJSON_Delete(j);
             return TASKS_E_FIELD;
         }
@@ -527,7 +806,6 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
 }
 
 char *tasks_to_json(const tasks_t *c, int with_flags,
-                    const llms_t *llms, const agents_t *agents,
                     const projects_t *projects)
 {
     cJSON *j = cJSON_CreateArray();
@@ -539,22 +817,22 @@ char *tasks_to_json(const tasks_t *c, int with_flags,
             cJSON_AddStringToObject(o, "id", tk->id) &&
             cJSON_AddStringToObject(o, "project", tk->project) &&
             cJSON_AddStringToObject(o, "title", tk->title) &&
-            cJSON_AddStringToObject(o, "agent", tk->agent) &&
-            cJSON_AddStringToObject(o, "llm", tk->llm) &&
             cJSON_AddNumberToObject(o, "created", (double)tk->created);
-        if (ok && with_flags) {
-            char eff[CFG_NAME_MAX];
-            effective_llm(tk, agents, eff, sizeof eff);
+        if (ok && tk->actions) {
+            cJSON *acts = actions_to_cjson(tk->actions);
+            if (acts) cJSON_AddItemToObject(o, "actions", acts);
+            else ok = 0;
+        }
+        if (ok && tk->context) {
+            cJSON *ctx = context_to_cjson(tk->context, 'T');
+            if (ctx) cJSON_AddItemToObject(o, "context", ctx);
+            else ok = 0;
+        }
+        if (ok && with_flags)
             ok = cJSON_AddBoolToObject(o, "project_ok",
                                        projects &&
                                        projects_find_id(projects,
-                                                        tk->project) >= 0) &&
-                 cJSON_AddBoolToObject(o, "agent_ok",
-                                       agents && find_agent(agents, tk->agent)) &&
-                 cJSON_AddBoolToObject(
-                     o, "llm_ok",
-                     eff[0] && llms && llms_find(llms, eff) >= 0);
-        }
+                                                        tk->project) >= 0) != NULL;
         if (!ok) {
             cJSON_Delete(o);
             cJSON_Delete(j);
