@@ -1,0 +1,6 @@
+Read a slice of a local file as plain text. The path is resolved on
+the machine flower runs on — absolute paths are the reliable form;
+the project directory the conversation is about is given in your
+instructions. Use it after list_files (or when you already know the
+path) to inspect configuration, source, notes, logs. Binary files
+are refused; directories belong to list_files.

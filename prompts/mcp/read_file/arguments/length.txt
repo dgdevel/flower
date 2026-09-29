@@ -1,0 +1,3 @@
+How many bytes to read: 65536 by default, larger values are
+clamped to 65536. Page through long files with repeated calls
+bumping offset.

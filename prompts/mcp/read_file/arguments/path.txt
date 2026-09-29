@@ -1,0 +1,2 @@
+Absolute path of the file to read. Relative paths resolve against
+the server's working directory — prefer absolute.

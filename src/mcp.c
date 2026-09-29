@@ -7,6 +7,7 @@
 
 #include "mcp.h"
 
+#include "fs.h"
 #include "prompts.h"
 #include "web.h"
 
@@ -41,13 +42,34 @@ static char *fn_web_fetch(const cJSON *args, char *err, size_t err_n)
 
 typedef struct {
     const char *name;
-    const char *args[4];        /* argument names, NULL-terminated */
+    const char *type;         /* json-schema type: "string"/"number" */
+    int required;
+} tool_arg_t;
+
+typedef struct {
+    const char *name;
+    tool_arg_t args[6];       /* NULL-name terminated */
     char *(*fn)(const cJSON *args, char *err, size_t err_n);
 } tool_def_t;
 
 static const tool_def_t TOOLS[] = {
-    { "web_search", { "query", NULL }, fn_web_search },
-    { "web_fetch",  { "url", NULL },   fn_web_fetch },
+    { "web_search",
+      { { "query", "string", 1 }, { NULL } },
+      fn_web_search },
+    { "web_fetch",
+      { { "url", "string", 1 }, { NULL } },
+      fn_web_fetch },
+    { "read_file",
+      { { "path",   "string", 1 },
+        { "offset", "number", 0 },
+        { "length", "number", 0 },
+        { NULL } },
+      fs_tool_read_file },
+    { "list_files",
+      { { "path", "string", 1 },
+        { "glob", "string", 1 },
+        { NULL } },
+      fs_tool_list_files },
 };
 #define TOOL_COUNT (sizeof TOOLS / sizeof TOOLS[0])
 
@@ -141,14 +163,17 @@ static cJSON *handle_tools_list(void)
         const tool_def_t *t = &TOOLS[i];
         cJSON *props = cJSON_CreateObject();
         cJSON *required = cJSON_CreateArray();
-        for (size_t a = 0; t->args[a]; a++) {
+        for (size_t a = 0; t->args[a].name; a++) {
             cJSON *p = cJSON_CreateObject();
-            cJSON_AddStringToObject(p, "type", "string");
-            char *d = arg_description(t, t->args[a]);
-            cJSON_AddStringToObject(p, "description", d ? d : t->args[a]);
+            cJSON_AddStringToObject(p, "type", t->args[a].type);
+            char *d = arg_description(t, t->args[a].name);
+            cJSON_AddStringToObject(p, "description",
+                                     d ? d : t->args[a].name);
             free(d);
-            cJSON_AddItemToObject(props, t->args[a], p);
-            cJSON_AddItemToArray(required, cJSON_CreateString(t->args[a]));
+            cJSON_AddItemToObject(props, t->args[a].name, p);
+            if (t->args[a].required)
+                cJSON_AddItemToArray(required,
+                                     cJSON_CreateString(t->args[a].name));
         }
         cJSON *schema = cJSON_CreateObject();
         cJSON_AddStringToObject(schema, "type", "object");

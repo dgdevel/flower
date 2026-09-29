@@ -1,0 +1,7 @@
+The glob pattern:
+*        any file or directory in the path
+*.*      any entry with an extension
+*.ext    any entry with ext as its extension
+**/*.ext any entry with ext as its extension, in any subdirectory
+**/*.*   any entry with an extension, in any subdirectory
+**/*     any entry in any subdirectory

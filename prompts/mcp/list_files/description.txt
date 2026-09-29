@@ -1,0 +1,7 @@
+List one directory on the machine flower runs on, filtered by a
+glob. Only the immediate directory, unless the glob starts with
+**/ — then every subdirectory is walked too (directories carry a
+trailing "/" in the output, entries are sorted, symlinked
+directories are never entered). Absolute paths are the reliable
+form; the project directory the conversation is about is given in
+your instructions.

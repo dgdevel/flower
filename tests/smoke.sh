@@ -193,13 +193,17 @@ echo "== 6d. agents API =="
 curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert [a["name"] for a in d] == ["assistant", "online_researcher"], d  # builtins
+assert [a["name"] for a in d] == \
+    ["assistant", "filesystem_researcher", "online_researcher"], d  # builtins
 assert d[0]["builtin"] is True and d[0]["llm"] == "", d
 assert "llm_ok" not in d[0], d    # builtins pick their llm per task
-assert d[1]["builtin"] is True, d
-assert d[1]["tools"][0]["name"] == "flower", d           # flower own mcp server
-assert d[1]["tools"][0]["url"] == "/mcp", d              # resolved when a task runs
-assert "researcher" in d[1]["system_prompt"].lower(), d  # prompt compiled in
+for i in (1, 2):
+    assert d[i]["builtin"] is True, d
+    assert d[i]["tools"][0]["name"] == "flower", d   # flower own mcp server
+    assert d[i]["tools"][0]["url"] == "/mcp", d      # resolved when a task runs
+assert "researcher" in d[1]["system_prompt"].lower(), d  # prompts compiled in
+assert "filesystem" in d[1]["system_prompt"].lower(), d
+assert "web" in d[2]["system_prompt"].lower(), d
 ' || fail "GET /api/agents should start with the builtin agents"
 curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
@@ -216,7 +220,8 @@ assert "llm_ok" not in d[0] or d[0]["llm_ok"], d         # PUT echo may omit, ne
 curl -s "$B/api/agents" | python3 -c '
 import json, sys
 d = {a["name"]: a.get("llm_ok") for a in json.load(sys.stdin)}
-assert d == {"assistant": None, "online_researcher": None,
+assert d == {"assistant": None, "filesystem_researcher": None,
+             "online_researcher": None,
              "gardener": True, "thinker": True}, d
 ' || fail "GET /api/agents should report llm_ok flags (builtins carry none)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"Assistant","llm":"ollama"}]' "$B/api/agents")
@@ -417,10 +422,15 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 tools = {t["name"]: t for t in d["result"]["tools"]}
-assert set(tools) >= {"web_search", "web_fetch"}, d
+assert set(tools) >= {"web_search", "web_fetch", "read_file", "list_files"}, d
 assert tools["web_fetch"]["inputSchema"]["required"] == ["url"], d
 assert "description" in tools["web_fetch"]["inputSchema"]["properties"]["url"], d
 assert "duckduckgo" in tools["web_search"]["description"].lower(), d  # from prompts/
+rf = tools["read_file"]["inputSchema"]
+assert rf["required"] == ["path"], d
+assert rf["properties"]["offset"]["type"] == "number", d   # optional numbers
+assert tools["list_files"]["inputSchema"]["required"] == ["path", "glob"], d
+assert "**/*" in tools["list_files"]["inputSchema"]["properties"]["glob"]["description"], d
 ' || fail "mcp: tools/list with prompt-file descriptions"
 rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"file://$CFG/fixture.html\"}}}" | python3 -c '
 import json, sys
@@ -438,6 +448,29 @@ d = json.load(sys.stdin)
 assert d["result"]["isError"] is True, d           # tool failure is readable content
 assert "query" in d["result"]["content"][0]["text"], d
 ' || fail "mcp: tools/call with a missing argument"
+mkdir -p "$CFG/fstree/sub/deep"
+printf "line one\nline two\n" > "$CFG/fstree/notes.txt"
+printf "int main(){}\n"       > "$CFG/fstree/sub/main.c"
+printf "deep\n"               > "$CFG/fstree/sub/deep/edge.c"
+printf "x;\n"                 > "$CFG/fstree/util.js"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"list_files\",\"arguments\":{\"path\":\"$CFG/fstree\",\"glob\":\"**/*.c\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "sub/main.c" in t and "sub/deep/edge.c" in t, d
+assert "util.js" not in t, d
+' || fail "mcp: list_files recursive glob"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\",\"offset\":14,\"length\":4}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["content"][0]["text"] == "two\n", repr(d["result"]["content"][0]["text"])
+' || fail "mcp: read_file offset+length"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\",\"offset\":999}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d
+assert "past the end" in d["result"]["content"][0]["text"], d
+' || fail "mcp: read_file offset past eof"
 rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)

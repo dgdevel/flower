@@ -964,6 +964,20 @@ static agent_t BUILTIN_AGENTS[] = {
         },
         .tool_count = 1,
     },
+    {
+        .name = "filesystem_researcher",
+        .llm = "",
+        .system_prompt = "",
+        .tools = {
+            {
+                .type = "http",
+                .name = "flower",
+                .url = "/mcp",
+                .required = 1,
+            },
+        },
+        .tool_count = 1,
+    },
 };
 #define BUILTIN_N (sizeof BUILTIN_AGENTS / sizeof BUILTIN_AGENTS[0])
 

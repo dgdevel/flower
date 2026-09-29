@@ -4,6 +4,9 @@
  * extraction and prompt templating, all against tests/fixtures/.
  * Run by `make check` before the smoke tests.
  */
+#define _DEFAULT_SOURCE /* mkdtemp */
+
+#include "fs.h"
 #include "html.h"
 #include "prompts.h"
 #include "web.h"
@@ -11,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int failures = 0;
 
@@ -201,12 +206,141 @@ static void test_prompts(void)
     free(out);
 }
 
+/* ---------- filesystem tools ---------- */
+
+static void mkfile(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); exit(2); }
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
+}
+
+static void test_fs(void)
+{
+    char root[] = "/tmp/flower-fstest-XXXXXX";
+    if (!mkdtemp(root)) { perror("mkdtemp"); exit(2); }
+    char p[512];
+    snprintf(p, sizeof p, "%s/notes.txt", root); mkfile(p, "one\ntwo\nthree\n");
+    snprintf(p, sizeof p, "%s/Makefile", root); mkfile(p, "all:\n");
+    snprintf(p, sizeof p, "%s/photo.png", root); mkfile(p, "\x89PNG");
+    snprintf(p, sizeof p, "%s/binary.bin", root);
+    {
+        FILE *f = fopen(p, "wb");
+        if (f) { fwrite("a\0b", 1, 4, f); fclose(f); }  /* real NUL byte */
+    }
+    snprintf(p, sizeof p, "%s/src", root); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/src/main.c", root); mkfile(p, "int main(){}\n");
+    snprintf(p, sizeof p, "%s/src/util.js", root); mkfile(p, "x;\n");
+    snprintf(p, sizeof p, "%s/src/deep", root); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/src/deep/edge.c", root); mkfile(p, "deep\n");
+
+    char err[256];
+    char *r;
+
+    /* the six glob forms from the spec */
+    r = fs_glob(root, "*", err, sizeof err);
+    check_contains(r, "Makefile\n", "fs: * lists files");
+    check_contains(r, "notes.txt\n", "fs: * lists extensioned files");
+    check_contains(r, "photo.png\n", "fs: * lists by extension");
+    check_contains(r, "src/\n", "fs: * lists directories");
+    check(r && !strstr(r, "main.c"), "fs: * stays in one directory");
+    free(r);
+
+    r = fs_glob(root, "*.*", err, sizeof err);
+    check_contains(r, "notes.txt\n", "fs: *.* matches an extension");
+    check_contains(r, "photo.png\n", "fs: *.* matches any extension");
+    check(r && !strstr(r, "Makefile") && !strstr(r, "src/"),
+          "fs: *.* requires a dot");
+    free(r);
+
+    r = fs_glob(root, "*.png", err, sizeof err);
+    check_contains(r, "photo.png\n", "fs: *.png matches one extension");
+    check(r && !strstr(r, "notes.txt"), "fs: *.png filters others out");
+    free(r);
+
+    r = fs_glob(root, "**/*.c", err, sizeof err);
+    check_contains(r, "src/main.c\n", "fs: **/*.c finds nested c files");
+    check_contains(r, "src/deep/edge.c\n", "fs: **/*.c walks deep");
+    check(r && !strstr(r, "util.js") && !strstr(r, "Makefile"),
+          "fs: **/*.c filters other extensions");
+    free(r);
+
+    r = fs_glob(root, "**/*.*", err, sizeof err);
+    check_contains(r, "src/util.js\n", "fs: **/*.* matches nested ext files");
+    check_contains(r, "photo.png\n", "fs: **/*.* includes the top level");
+    check(r && !strstr(r, "Makefile") && !strstr(r, "src/deep/\n"),
+          "fs: **/*.* skips extensionless entries");
+    free(r);
+
+    r = fs_glob(root, "**/*", err, sizeof err);
+    check_contains(r, "src/deep/edge.c\n", "fs: **/* lists everything nested");
+    check_contains(r, "src/\n", "fs: **/* lists directories too");
+    free(r);
+
+    /* errors */
+    r = fs_glob("/nonexistent-dir-xyz", "*", err, sizeof err);
+    check(!r && err[0], "fs: bad path errors");
+    snprintf(p, sizeof p, "%s/notes.txt", root);
+    r = fs_glob(p, "*", err, sizeof err);
+    check(!r && strstr(err, "not a directory"), "fs: file path errors");
+    r = fs_glob(root, "", err, sizeof err);
+    check(!r && err[0], "fs: empty glob errors");
+
+    /* read_file */
+    r = fs_read_path(p, 0, 64, err, sizeof err);
+    check(r && strcmp(r, "one\ntwo\nthree\n") == 0, "fs: read whole file");
+    free(r);
+    r = fs_read_path(p, 4, 4, err, sizeof err);
+    check(r && strcmp(r, "two\n") == 0, "fs: read with offset+length");
+    free(r);
+    r = fs_read_path(p, 4, 1000000, err, sizeof err);
+    check(r && strcmp(r, "two\nthree\n") == 0, "fs: length clamped to rest");
+    free(r);
+    r = fs_read_path(p, 100, 4, err, sizeof err);
+    check(!r && strstr(err, "past the end"), "fs: offset past eof errors");
+    snprintf(p, sizeof p, "%s/binary.bin", root);
+    r = fs_read_path(p, 0, 8, err, sizeof err);
+    check(!r && strstr(err, "binary"), "fs: NUL byte detected as binary");
+    snprintf(p, sizeof p, "%s/src", root);
+    r = fs_read_path(p, 0, 8, err, sizeof err);
+    check(!r && strstr(err, "directory"), "fs: directory read refused");
+    r = fs_read_path("/nonexistent-file-xyz", 0, 8, err, sizeof err);
+    check(!r && err[0], "fs: missing file errors");
+
+    /* utf-8 slices stay whole */
+    snprintf(p, sizeof p, "%s/utf8.txt", root);
+    mkfile(p, "a\xc3\xa9" "bcdef ghij \xe2\x82\xac""end");
+    r = fs_read_path(p, 0, 4, err, sizeof err); /* cuts inside é */
+    check(r && (unsigned char)r[strlen(r) - 1] != 0xa9,
+          "fs: partial utf-8 trimmed at the end");
+    free(r);
+    r = fs_read_path(p, 1, 4, err, sizeof err); /* starts inside é */
+    check(r && (unsigned char)r[0] != 0xa9,
+          "fs: partial utf-8 skipped at the start");
+    free(r);
+
+    /* cleanup */
+    snprintf(p, sizeof p, "%s/src/deep/edge.c", root); remove(p);
+    snprintf(p, sizeof p, "%s/src/deep", root); rmdir(p);
+    snprintf(p, sizeof p, "%s/src/main.c", root); remove(p);
+    snprintf(p, sizeof p, "%s/src/util.js", root); remove(p);
+    snprintf(p, sizeof p, "%s/utf8.txt", root); remove(p);
+    snprintf(p, sizeof p, "%s/src", root); rmdir(p);
+    snprintf(p, sizeof p, "%s/notes.txt", root); remove(p);
+    snprintf(p, sizeof p, "%s/Makefile", root); remove(p);
+    snprintf(p, sizeof p, "%s/photo.png", root); remove(p);
+    snprintf(p, sizeof p, "%s/binary.bin", root); remove(p);
+    rmdir(root);
+}
+
 int main(void)
 {
     test_ddg();
     test_markdown();
     test_malformed();
     test_prompts();
+    test_fs();
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
         return 1;
