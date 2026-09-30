@@ -1,0 +1,3 @@
+A POSIX extended regular expression (the grep -E flavor: |, +, ?,
+(), [], ^, $ — no \d or \w), matched case-sensitively against
+each line of every selected file.

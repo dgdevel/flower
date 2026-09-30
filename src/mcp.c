@@ -57,6 +57,11 @@ static const mcp_arg_t ARGS_LIST_FILES[] = {
     { "glob", "string", 1 },
     { NULL }
 };
+static const mcp_arg_t ARGS_GREP[] = {
+    { "glob",    "string", 1 },
+    { "pattern", "string", 1 },
+    { NULL }
+};
 
 /* the research surface behind POST /mcp. The scan surface (MCP_SCAN)
  * is defined next to its tools, in src/scan.c. */
@@ -65,6 +70,7 @@ static const mcp_tool_t RESEARCH_TOOLS[] = {
     { "web_fetch",  ARGS_WEB_FETCH,  fn_web_fetch },
     { "read_file",  ARGS_READ_FILE,  fs_tool_read_file },
     { "list_files", ARGS_LIST_FILES, fs_tool_list_files },
+    { "grep",       ARGS_GREP,       fs_tool_grep },
 };
 const mcp_table_t MCP_RESEARCH = {
     RESEARCH_TOOLS, sizeof RESEARCH_TOOLS / sizeof RESEARCH_TOOLS[0]

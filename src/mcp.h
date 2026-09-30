@@ -11,7 +11,7 @@
  * Two surfaces, two tool tables:
  *
  *   MCP_RESEARCH  POST /mcp — the research tools (web_search,
- *                 web_fetch, read_file, list_files). What the
+ *                 web_fetch, read_file, list_files, grep). What the
  *                 researcher agents and any external client get.
  *   MCP_SCAN      POST /scan/mcp — the project scan's write-back
  *                 tools (set_project_details, add_context_item,

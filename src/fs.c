@@ -1,13 +1,16 @@
 /*
  * fs — local-filesystem tools for /mcp. See fs.h for the contract.
  */
+#define _POSIX_C_SOURCE 200809L /* getline */
 #define _DEFAULT_SOURCE /* DT_DIR & friends */
 
 #include "fs.h"
+#include "util.h"
 
 #include <dirent.h>
 #include <errno.h>
 #include <fnmatch.h>
+#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -274,6 +277,252 @@ char *fs_glob(const char *dir, const char *pattern,
     return text;
 }
 
+/* ---------- grep ---------- */
+
+#define GREP_MAX_MATCHES 200               /* matches before stopping */
+#define GREP_MAX_LINE    240               /* bytes shown of one line */
+#define GREP_FILE_MAX    (8 * 1024 * 1024) /* larger files are skipped */
+#define GREP_OUT_MAX     (64 * 1024)       /* reply bytes, then stop  */
+
+/* s appended whole, or cut to at most max bytes on a utf-8 boundary
+ * and marked with an ellipsis. 0 ok, -1 out of memory. */
+static int sb_puts_cut(sbuf_t *b, const char *s, size_t max)
+{
+    size_t n = strlen(s);
+    if (n <= max) return sb_putn(b, s, n);
+    size_t cut = max;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xc0) == 0x80) cut--;
+    if (sb_putn(b, s, cut) != 0) return -1;
+    return sb_puts(b, "\xE2\x80\xA6"); /* … */
+}
+
+/* split a filepath glob into the directory to search and the leaf
+ * pattern in the list_files language ("*.c", or the recursive **
+ * form). A glob without a metacharacter is one file — or a
+ * directory, which means every file under it. 0 ok, -1 with err
+ * otherwise. */
+static int split_glob(const char *glob, char *dir, size_t dir_n,
+                      char *leaf, size_t leaf_n, char *err, size_t err_n)
+{
+    const char *meta = strpbrk(glob, "*?[");
+    const char *dp, *lp; /* directory bytes, leaf string */
+    size_t dn;
+
+    if (meta) {
+        /* the directory: everything up to the last '/' that
+         * precedes the first metacharacter */
+        const char *slash = NULL;
+        for (const char *q = meta; q > glob; q--)
+            if (q[-1] == '/') { slash = q - 1; break; }
+        if (!slash)             { dp = "."; dn = 1; lp = glob; }
+        else if (slash == glob) { dp = "/"; dn = 1; lp = slash + 1; }
+        else { dp = glob; dn = (size_t)(slash - glob); lp = slash + 1; }
+
+        /* the leaf: one component, with or without the recursive
+         ** prefix */
+        int recursive = strncmp(lp, "**/", 3) == 0 || strcmp(lp, "**") == 0;
+        if (recursive) {
+            lp += lp[2] == '/' ? 3 : 2;
+            if (!*lp) lp = "*";
+        }
+        if (strchr(lp, '/')) {
+            snprintf(err, err_n, "the glob may only pattern its last "
+                                 "path component (like dir/**/*.c)");
+            return -1;
+        }
+        if (dn >= dir_n || strlen(lp) + (size_t)recursive * 3 >= leaf_n)
+            goto too_long;
+        memcpy(dir, dp, dn);
+        dir[dn] = '\0';
+        if (recursive) sprintf(leaf, "**/%s", lp);
+        else           sprintf(leaf, "%s", lp);
+        return 0;
+    }
+
+    /* no metacharacter: a directory means every file under it */
+    struct stat st;
+    if (stat(glob, &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (strlen(glob) >= dir_n || 5 >= leaf_n) goto too_long;
+        strcpy(dir, glob);
+        strcpy(leaf, "**/*");
+        return 0;
+    }
+    /* one file: split at its last '/' */
+    const char *slash = strrchr(glob, '/');
+    if (!slash)             { dp = "."; dn = 1; lp = glob; }
+    else if (slash == glob) { dp = "/"; dn = 1; lp = slash + 1; }
+    else { dp = glob; dn = (size_t)(slash - glob); lp = slash + 1; }
+    if (dn >= dir_n || strlen(lp) >= leaf_n) goto too_long;
+    memcpy(dir, dp, dn);
+    dir[dn] = '\0';
+    strcpy(leaf, lp);
+    return 0;
+
+too_long:
+    snprintf(err, err_n, "glob is too long");
+    return -1;
+}
+
+char *fs_grep(const char *glob, const char *pattern,
+              char *err, size_t err_n)
+{
+    if (!glob || !*glob) {
+        snprintf(err, err_n, "missing required string argument 'glob'");
+        return NULL;
+    }
+    if (!pattern || !*pattern) {
+        snprintf(err, err_n, "missing required string argument 'pattern'");
+        return NULL;
+    }
+
+    regex_t re;
+    int rc = regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB);
+    if (rc != 0) {
+        char why[128];
+        regerror(rc, &re, why, sizeof why);
+        snprintf(err, err_n, "invalid pattern: %s", why);
+        return NULL;
+    }
+
+    char dir[4096], leaf[512];
+    if (split_glob(glob, dir, sizeof dir, leaf, sizeof leaf,
+                   err, err_n) != 0) {
+        regfree(&re);
+        return NULL;
+    }
+
+    struct stat st;
+    if (stat(dir, &st) != 0) {
+        snprintf(err, err_n, "cannot stat %s: %s", dir, strerror(errno));
+        regfree(&re);
+        return NULL;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        snprintf(err, err_n, "%s is not a directory", dir);
+        regfree(&re);
+        return NULL;
+    }
+
+    /* the same enumeration list_files does */
+    const char *leafpat = leaf;
+    int recursive = 0;
+    if (strncmp(leaf, "**/", 3) == 0) {
+        recursive = 1;
+        leafpat = leaf + 3;
+        if (!*leafpat) leafpat = "*";
+    }
+    lines_t files = { 0 };
+    if (recursive)
+        walk_level(dir, leafpat, &files, 0);
+    else
+        list_level(dir, leafpat, &files);
+    int list_capped = files.truncated;
+    qsort(files.v, files.n, sizeof files.v[0], cmp_str);
+
+    sbuf_t out = { 0 };
+    size_t matched = 0, with_hits = 0, matches = 0, skipped = 0;
+    int capped = 0, oom = 0;
+    char *line = NULL;
+    size_t line_cap = 0;
+    ssize_t n;
+
+    for (size_t i = 0; i < files.n && !capped && !oom; i++) {
+        size_t plen = strlen(files.v[i]);
+        if (plen && files.v[i][plen - 1] == '/') continue; /* directory */
+        matched++;
+
+        if (stat(files.v[i], &st) != 0 || !S_ISREG(st.st_mode) ||
+            st.st_size > (off_t)GREP_FILE_MAX) {
+            skipped++;
+            continue;
+        }
+        FILE *f = fopen(files.v[i], "rb");
+        if (!f) {
+            skipped++;
+            continue;
+        }
+
+        int hits_here = 0;
+        size_t lineno = 0;
+        while ((n = getline(&line, &line_cap, f)) > 0) {
+            lineno++;
+            if (memchr(line, '\0', (size_t)n)) { /* not text */
+                skipped++;
+                break;
+            }
+            while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+                n--;
+            line[n] = '\0';
+            if (regexec(&re, line, 0, NULL, 0) != 0) continue;
+
+            matches++;
+            if (++hits_here == 1) with_hits++;
+            char num[32];
+            snprintf(num, sizeof num, ":%zu:", lineno);
+            if (sb_puts(&out, files.v[i]) != 0 ||
+                sb_puts(&out, num) != 0 ||
+                sb_puts_cut(&out, line, GREP_MAX_LINE) != 0 ||
+                sb_putc(&out, '\n') != 0) {
+                oom = 1;
+                break;
+            }
+            if (matches >= GREP_MAX_MATCHES || out.len > GREP_OUT_MAX) {
+                capped = 1;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    free(line);
+    lines_free(&files);
+    regfree(&re);
+
+    if (oom) {
+        free(out.data);
+        snprintf(err, err_n, "out of memory");
+        return NULL;
+    }
+    if (!matched) {
+        free(out.data);
+        char *r = malloc(strlen(glob) + 32);
+        if (!r) {
+            snprintf(err, err_n, "out of memory");
+            return NULL;
+        }
+        sprintf(r, "no files match %s\n", glob);
+        return r;
+    }
+
+    /* the caps first, then the tally */
+    char num[160];
+    if (capped) {
+        snprintf(num, sizeof num, "[stopped after %zu matches]\n", matches);
+        if (sb_puts(&out, num) != 0) oom = 1;
+    }
+    if (!oom && list_capped) {
+        snprintf(num, sizeof num, "[stopped after %d files]\n", LIST_MAX);
+        if (sb_puts(&out, num) != 0) oom = 1;
+    }
+    if (!oom) {
+        snprintf(num, sizeof num, "[%zu match%s in %zu of %zu file%s",
+                 matches, matches == 1 ? "" : "es",
+                 with_hits, matched, matched == 1 ? "" : "s");
+        if (sb_puts(&out, num) != 0) oom = 1;
+    }
+    if (!oom && skipped) {
+        snprintf(num, sizeof num,
+                 ", %zu skipped: binary, unreadable or over 8 MB", skipped);
+        if (sb_puts(&out, num) != 0) oom = 1;
+    }
+    if (!oom && sb_puts(&out, "]\n") != 0) oom = 1;
+    if (oom) {
+        free(out.data);
+        snprintf(err, err_n, "out of memory");
+        return NULL;
+    }
+    return out.data;
+}
+
 /* ---------- mcp dispatchers ---------- */
 
 static int arg_number(const cJSON *args, const char *name, long long *out)
@@ -329,4 +578,19 @@ char *fs_tool_list_files(const cJSON *args, char *err, size_t err_n)
         return NULL;
     }
     return fs_glob(p->valuestring, g->valuestring, err, err_n);
+}
+
+char *fs_tool_grep(const cJSON *args, char *err, size_t err_n)
+{
+    const cJSON *g = cJSON_GetObjectItemCaseSensitive(args, "glob");
+    if (!cJSON_IsString(g) || !g->valuestring[0]) {
+        snprintf(err, err_n, "missing required string argument 'glob'");
+        return NULL;
+    }
+    const cJSON *pj = cJSON_GetObjectItemCaseSensitive(args, "pattern");
+    if (!cJSON_IsString(pj) || !pj->valuestring[0]) {
+        snprintf(err, err_n, "missing required string argument 'pattern'");
+        return NULL;
+    }
+    return fs_grep(g->valuestring, pj->valuestring, err, err_n);
 }

@@ -287,7 +287,76 @@ static void test_fs(void)
     r = fs_glob(root, "", err, sizeof err);
     check(!r && err[0], "fs: empty glob errors");
 
+    /* grep */
+    snprintf(p, sizeof p, "%s/**/*.c", root);
+    r = fs_grep(p, "main", err, sizeof err);
+    check_contains(r, "src/main.c:1:int main(){}",
+                   "fs: grep matches file content");
+    check(r && !strstr(r, "util.js") && !strstr(r, "edge.c"),
+          "fs: grep stays inside the glob");
+    check_contains(r, "[1 match in 1 of 2 files]", "fs: grep tally");
+    free(r);
+
+    r = fs_grep(root, "^deep$", err, sizeof err); /* bare dir walks */
+    check_contains(r, "src/deep/edge.c:1:deep",
+                   "fs: grep bare directory walks subdirectories");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/notes.txt", root);
+    r = fs_grep(p, "two", err, sizeof err);
+    check_contains(r, "notes.txt:2:two", "fs: grep a single file");
+    check_contains(r, "[1 match in 1 of 1 file]", "fs: grep single tally");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/*.c", root);
+    r = fs_grep(p, "x", err, sizeof err);
+    check(r && strncmp(r, "no files match", 14) == 0,
+          "fs: grep reports a glob that selects nothing");
+    free(r);
+
+    r = fs_grep(root, "b", err, sizeof err); /* only binary.bin has one */
+    check_contains(r, "[0 matches in 0 of 7 files, 1 skipped",
+                   "fs: grep skips binary files");
+    free(r);
+
+    r = fs_grep("/nonexistent-dir-xyz/*", "x", err, sizeof err);
+    check(!r && err[0], "fs: grep bad path errors");
+    r = fs_grep(p, "(open", err, sizeof err);
+    check(!r && strstr(err, "invalid pattern"), "fs: grep bad regex errors");
+    snprintf(p, sizeof p, "%s/*/*.c", root);
+    r = fs_grep(p, "x", err, sizeof err);
+    check(!r && strstr(err, "last path component"),
+          "fs: grep rejects a multi-component glob");
+
+    /* the caps: 300 hits stop at 200, an overlong line is cut */
+    snprintf(p, sizeof p, "%s/cap.txt", root);
+    {
+        FILE *f = fopen(p, "w");
+        if (!f) { perror(p); exit(2); }
+        for (int i = 0; i < 300; i++) fputs("hit\n", f);
+        fclose(f);
+    }
+    r = fs_grep(root, "hit", err, sizeof err);
+    check_contains(r, "cap.txt:1:hit", "fs: grep matches before the cap");
+    check_contains(r, "[stopped after 200 matches]", "fs: grep match cap");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/long.txt", root);
+    {
+        FILE *f = fopen(p, "w");
+        if (!f) { perror(p); exit(2); }
+        fputs("needle", f);
+        for (int i = 0; i < 500; i++) putc('x', f);
+        fputs("\n", f);
+        fclose(f);
+    }
+    r = fs_grep(root, "needle", err, sizeof err);
+    check_contains(r, "long.txt:1:needle", "fs: grep long line matched");
+    check_contains(r, "\xE2\x80\xA6", "fs: grep long line cut with …");
+    free(r);
+
     /* read_file */
+    snprintf(p, sizeof p, "%s/notes.txt", root);
     r = fs_read_path(p, 0, 64, err, sizeof err);
     check(r && strcmp(r, "one\ntwo\nthree\n") == 0, "fs: read whole file");
     free(r);
@@ -331,6 +400,8 @@ static void test_fs(void)
     snprintf(p, sizeof p, "%s/Makefile", root); remove(p);
     snprintf(p, sizeof p, "%s/photo.png", root); remove(p);
     snprintf(p, sizeof p, "%s/binary.bin", root); remove(p);
+    snprintf(p, sizeof p, "%s/cap.txt", root); remove(p);
+    snprintf(p, sizeof p, "%s/long.txt", root); remove(p);
     rmdir(root);
 }
 

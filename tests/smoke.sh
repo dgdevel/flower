@@ -438,7 +438,7 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 tools = {t["name"]: t for t in d["result"]["tools"]}
-assert set(tools) >= {"web_search", "web_fetch", "read_file", "list_files"}, d
+assert set(tools) >= {"web_search", "web_fetch", "read_file", "list_files", "grep"}, d
 assert tools["web_fetch"]["inputSchema"]["required"] == ["url"], d
 assert "description" in tools["web_fetch"]["inputSchema"]["properties"]["url"], d
 assert "duckduckgo" in tools["web_search"]["description"].lower(), d  # from prompts/
@@ -447,6 +447,9 @@ assert rf["required"] == ["path"], d
 assert rf["properties"]["offset"]["type"] == "number", d   # optional numbers
 assert tools["list_files"]["inputSchema"]["required"] == ["path", "glob"], d
 assert "**/*" in tools["list_files"]["inputSchema"]["properties"]["glob"]["description"], d
+assert tools["grep"]["inputSchema"]["required"] == ["glob", "pattern"], d
+assert "grep -E" in tools["grep"]["description"], d
+assert "**" in tools["grep"]["inputSchema"]["properties"]["glob"]["description"], d
 ' || fail "mcp: tools/list with prompt-file descriptions"
 rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"file://$CFG/fixture.html\"}}}" | python3 -c '
 import json, sys
@@ -487,6 +490,29 @@ d = json.load(sys.stdin)
 assert d["result"]["isError"] is True, d
 assert "past the end" in d["result"]["content"][0]["text"], d
 ' || fail "mcp: read_file offset past eof"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"grep\",\"arguments\":{\"glob\":\"$CFG/fstree/**/*.c\",\"pattern\":\"main|deep\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "sub/main.c:1:int main(){}" in t, d
+assert "sub/deep/edge.c:1:deep" in t, d
+assert "util.js" not in t, d
+assert "[2 matches in 2 of 2 files]" in t, d
+assert d["result"]["isError"] is False, d
+' || fail "mcp: grep regex over a recursive glob"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"grep\",\"arguments\":{\"glob\":\"$CFG/fstree/notes.txt\",\"pattern\":\"^line two$\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "notes.txt:2:line two" in t, d
+assert "[1 match in 1 of 1 file]" in t, d
+' || fail "mcp: grep a single file with anchors"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"grep\",\"arguments\":{\"glob\":\"$CFG/fstree/**/*\",\"pattern\":\"(unclosed[\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d
+assert "invalid pattern" in d["result"]["content"][0]["text"], d
+' || fail "mcp: grep bad regex is readable content"
 rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
