@@ -46,8 +46,7 @@ int valid_utf8_text(const char *s, size_t n, int multiline)
 }
 
 void gen_hex_id(char *buf, size_t n)
-{
-    static const char hex[] = "0123456789abcdef";
+{    static const char hex[] = "0123456789abcdef";
     unsigned char raw[16];
     size_t nb = (n + 1) / 2;
     int ok = nb <= sizeof raw;
@@ -134,4 +133,24 @@ void path_add_index(char *dst, size_t n, size_t i)
     char idx[24];
     snprintf(idx, sizeof idx, "[%zu]", i);
     path_add(dst, n, idx);
+}
+
+void utf8_trunc(char *dst, size_t n, const char *src, size_t max)
+{
+    size_t len = strnlen(src, max + 1);
+    if (len <= max && len < n) {
+        memcpy(dst, src, len);
+        dst[len] = '\0';
+        return;
+    }
+    if (len > n - 1) len = n - 1;
+    while (len > 0 && ((unsigned char)src[len] & 0xc0) == 0x80) len--;
+    if (len + 3 < n) { /* room for the ellipsis mark */
+        memcpy(dst, src, len);
+        memcpy(dst + len, "\xE2\x80\xA6", 3); /* … */
+        dst[len + 3] = '\0';
+    } else {
+        memcpy(dst, src, len);
+        dst[len] = '\0';
+    }
 }

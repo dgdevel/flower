@@ -13,6 +13,7 @@
 #include "theme.h"
 #include "projects.h"
 #include "agents.h"
+#include "conv.h"
 #include "tasks.h"
 #include "mcp.h"
 #include "scan.h"
@@ -47,6 +48,8 @@ typedef struct {
     char *in;  size_t in_len, in_cap;
     char *out; size_t out_len, out_cap, out_off;
     bool is_sse;                 /* connection is an SSE stream now */
+    bool sse_conv;               /* …and watches the conversations */
+    long long sse_v;             /* last conversations version sent */
     bool no_more_read;           /* peer half-closed its side */
     bool close_after_flush;      /* finish writing, then close */
     bool dead;                   /* destroyed at the end of the event batch */
@@ -241,6 +244,27 @@ static void sse_start(server_t *s, conn_t *c)
     conn_write(s, c, retry, sizeof retry - 1);
     c->is_sse = true;
     if (!c->dead) sse_send_time(s, c); /* first event right away */
+}
+
+/* GET /api/conversations/stream: like the clock stream, but named
+ * "conv" events carry the conversation-store version — a client
+ * refetches whatever it is showing when it moves. The unnamed clock
+ * ticks keep flowing (pings for proxies; the page ignores them). */
+static void sse_conv_event(server_t *s, conn_t *c)
+{
+    char ev[96];
+    int n = snprintf(ev, sizeof ev, "event: conv\ndata: {\"v\":%lld}\n\n",
+                     conv_version());
+    if (n > 0 && (size_t)n < sizeof ev) conn_write(s, c, ev, (size_t)n);
+}
+
+static void sse_start_conv(server_t *s, conn_t *c)
+{
+    sse_start(s, c);
+    if (c->dead) return;
+    c->sse_conv = true;
+    c->sse_v = conv_version();
+    sse_conv_event(s, c); /* the current version right away */
 }
 
 /* ---------- request handling ---------- */
@@ -464,17 +488,19 @@ static char *llms_json(server_t *s)     { return llms_to_json(&s->llms); }
 static char *agents_json(server_t *s)   { return agents_to_json(&s->agents, &s->llms, 1); }
 static char *tasks_json(server_t *s)    { return tasks_to_json(&s->tasks, 1, &s->projects); }
 static char *scan_json(server_t *s)     { (void)s; return scan_status_json(); }
+static char *convs_json(server_t *s)    { (void)s; return conv_list_json(); }
 
 static const struct {
     const char *path;
     char *(*json)(server_t *);
 } API_GET[] = {
-    { "/api/theme",    theme_json },
-    { "/api/projects", projects_json },
-    { "/api/llms",     llms_json },
-    { "/api/agents",   agents_json },
-    { "/api/tasks",    tasks_json },
-    { "/api/scan",     scan_json },
+    { "/api/theme",         theme_json },
+    { "/api/projects",      projects_json },
+    { "/api/llms",          llms_json },
+    { "/api/agents",        agents_json },
+    { "/api/tasks",         tasks_json },
+    { "/api/scan",          scan_json },
+    { "/api/conversations", convs_json },
 };
 
 /* reply to GET /api/<store> (true) or say the path is none of them */
@@ -526,6 +552,30 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
             }
         } else if (api_get(s, c, req, path, head, &status)) {
             /* one of the stores, replied above */
+        } else if (strcmp(path, "/api/conversations/stream") == 0) {
+            if (head) {
+                status = 405;
+                respond(s, c, 405, "text/plain; charset=utf-8",
+                        "method not allowed\n", 19, false, false,
+                        "Allow: GET\r\n");
+            } else {
+                logmsg("%s %s 200 (sse) [%s]", req->method, path, c->peer);
+                sse_start_conv(s, c);
+                return;
+            }
+        } else if (strncmp(path, "/api/conversations/",
+                           sizeof "/api/conversations/" - 1) == 0) {
+            const char *id = path + sizeof "/api/conversations/" - 1;
+            char *j = conv_valid_id(id) ? conv_get_json(id) : NULL;
+            if (!j) {
+                status = 404;
+                respond(s, c, 404, "text/plain; charset=utf-8",
+                        "not found\n", 10, req->keep_alive, false, NULL);
+            } else {
+                respond(s, c, 200, "application/json", j, strlen(j),
+                        req->keep_alive, head, NULL);
+                free(j);
+            }
         } else if (strcmp(path, "/mcp") == 0 ||
                    strcmp(path, "/scan/mcp") == 0) {
             status = 405;
@@ -863,6 +913,7 @@ int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
     llms_load(&s.llms);
     agents_load(&s.agents);
     tasks_load(&s.tasks);
+    conv_boot(); /* conversations left running by a crash: stopped */
 
     /* the scan agent: the stores to write into, the epoll set for
      * the runner's stdout, the llmkit binary and this server's own
@@ -927,7 +978,14 @@ int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
         if (now >= next_tick) {
             for (int fd = 0; fd < s.fd_cap; fd++) {
                 conn_t *c = s.by_fd[fd];
-                if (c && !c->dead && c->is_sse) sse_send_time(&s, c);
+                if (!c || c->dead || !c->is_sse) continue;
+                sse_send_time(&s, c);
+                /* conversation watchers: a moved version means a new
+                 * record or state anywhere in the store */
+                if (c->sse_conv && !c->dead && conv_version() != c->sse_v) {
+                    c->sse_v = conv_version();
+                    sse_conv_event(&s, c);
+                }
             }
             next_tick = now / 1000 * 1000 + 1000;
         }

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flower — conversations</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./">flower</a>
+    <nav>
+      <a href="conversations.html" aria-current="page">Conversations</a>
+      <a href="config.html">Config</a>
+      <a href="components.html">Components</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <h1>Conversations</h1>
+    <p class="muted">
+      Every llm conversation flower runs is recorded and stays readable
+      here — running ones update live. A sub-agent spawned mid-conversation
+      (a researcher invoked by the project scan) gets its own entry,
+      linked both ways with the conversation that spawned it.
+    </p>
+
+    <div class="conv-list" id="conv-list" aria-label="Conversations"></div>
+    <p class="muted" id="conv-count"></p>
+
+    <section class="conv-detail" id="conv-detail" aria-label="Conversation">
+    </section>
+  </main>
+
+  <script src="theme.js"></script>
+  <script src="conversations.js"></script>
+</body>
+</html>

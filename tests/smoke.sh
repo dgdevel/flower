@@ -16,7 +16,13 @@ fail() { echo "FAIL: $*" >&2; sed 's/^/  server: /' "$LOG" >&2; exit 1; }
 [ -x "$BIN" ] || fail "binary not found: $BIN"
 case "$BIN" in */*) ;; *) [ -x "./$BIN" ] && BIN="./$BIN" ;; esac
 
-"$BIN" -p "$PORT" -c "$CFG" >"$LOG" 2>&1 &
+# a scripted llmkit stand-in: the scan-conversation tests below run it
+mkdir -p "$CFG/bin"
+cp tests/fakellmkit.py "$CFG/bin/llmkit"
+chmod +x "$CFG/bin/llmkit"
+LLMKIT="$CFG/bin/llmkit"
+
+"$BIN" -p "$PORT" -c "$CFG" -l "$LLMKIT" >"$LOG" 2>&1 &
 PID=$!
 
 B=http://127.0.0.1:$PORT
@@ -27,7 +33,7 @@ done
 curl -s -o /dev/null "$B/" || fail "server did not come up on $B"
 
 echo "== 1. embedded assets are byte-identical, no stray bytes =="
-for f in index.html config.html components.html style.css theme.js config.js llms.js app.js emoji.js; do
+for f in index.html config.html components.html conversations.html style.css theme.js config.js llms.js app.js conversations.js emoji.js; do
     curl -s "$B/$f" | cmp -s - "web/$f" || fail "$f: served bytes differ from web/$f"
 done
 for p in / /config.html /style.css /app.js /api/theme; do
@@ -552,5 +558,107 @@ except socket.timeout:
 assert eof and b"200 OK" in data and b"\x00" not in data, "Connection: close not honored"
 EOF
 [ $? -eq 0 ] || fail "Connection: close handling regressed"
+
+echo "== 9. conversations: a scan is recorded, live and durable =="
+mkdir -p "$CFG/scanproj"
+printf 'flower test fixture\n' > "$CFG/scanproj/README.md"
+curl -s -X PUT --data "[{\"dir\":\"$CFG/scanproj\",\"title\":\"scan target\"}]" "$B/api/projects" >/dev/null
+curl -s -X PUT --data '[{"name":"ollama","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"m"}]' "$B/api/llms" >/dev/null
+PROJ=$(curl -s "$B/api/projects" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\"}" "$B/api/scan")
+[ "$code" = 200 ] || fail "scan: fake runner did not start: expected 200, got $code"
+for _ in $(seq 1 60); do
+    curl -s "$B/api/scan" | grep -q '"done":true' && break
+    sleep 0.25
+done
+curl -s "$B/api/scan" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["done"] is True and d["ok"] is True, d
+assert d["writes"] == 1, d
+assert len(d["conversation"]) == 32, d
+' || fail "scan: the fake runner did not complete"
+CONV=$(curl -s "$B/api/scan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["conversation"])')
+curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert len(d) == 2, d                       # the scan and its sub-agent
+main = [c for c in d if c["agent"] == "project_scanner"][0]
+sub = [c for c in d if c["agent"] == "filesystem_researcher"][0]
+assert main["state"] == "completed", d
+assert sub["state"] == "completed", d
+assert sub["parent"] == main["id"], d       # linked both ways
+assert main["project"] == "'"$PROJ"'", d
+assert "scan target" in main["title"], d
+assert "build files" in sub["title"], d
+' || fail "conversations: list should show the scan and its sub-agent"
+curl -s "$B/api/conversations/$CONV" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+kinds = [r["k"] for r in d["records"]]
+assert kinds[0] == "user" and "thinking" in kinds and "response" in kinds, d
+calls = [r for r in d["records"] if r["k"] == "tool_call"]
+assert any(r["tool"] == "filesystem_researcher.invoke" and
+           "build files" in r["text"] for r in calls), d
+assert any(r["tool"] == "flower.set_project_details" for r in calls), d
+results = [r for r in d["records"] if r["k"] == "tool_result"]
+assert any("saved 1 field" in r.get("text", "") for r in results), d
+' || fail "conversations: the scan transcript should be complete"
+SUB=$(curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+print([c for c in json.load(sys.stdin)
+       if c["agent"] == "filesystem_researcher"][0]["id"])')
+curl -s "$B/api/conversations/$SUB" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+kinds = [r["k"] for r in d["records"]]
+assert kinds == ["user", "tool_call", "tool_result", "response"], d
+assert d["records"][1]["tool"] == "read_file", d
+assert "README.md" in d["records"][1]["text"], d
+assert "flower test fixture" in d["records"][2]["text"], d
+assert "Found:" in d["records"][3]["text"], d
+' || fail "conversations: the sub-agent transcript should be captured"
+curl -s "$B/api/projects" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d[0]["description"] == "A single-binary webapp in C11.", d
+' || fail "scan: the write-back did not land in projects.json"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/conversations/deadbeefdeadbeefdeadbeefdeadbeef")
+[ "$code" = 404 ] || fail "conversations: unknown id: expected 404, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/conversations/nope")
+[ "$code" = 404 ] || fail "conversations: bad id: expected 404, got $code"
+curl -sN --max-time 3 "$B/api/conversations/stream" | grep -m1 -q '^event: conv' \
+    || fail "no conv SSE event within 3s"
+
+echo "== 9b. a restart closes interrupted conversations =="
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\"}" "$B/api/scan")
+[ "$code" = 200 ] || fail "scan: second start: expected 200, got $code"
+sleep 1  # mid-run (the fake takes ~3s; the sub-agent may or may not
+          # have opened yet — both outcomes must sweep cleanly)
+kill "$PID" 2>/dev/null
+wait "$PID" 2>/dev/null
+"$BIN" -p "$PORT" -c "$CFG" -l "$LLMKIT" >>"$LOG" 2>&1 &
+PID=$!
+for _ in $(seq 1 50); do
+    curl -s -o /dev/null "$B/" 2>/dev/null && break
+    sleep 0.1
+done
+curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert 3 <= len(d) <= 4, d                  # two scans + one or two subs
+assert all(c["state"] != "running" for c in d), d   # no zombies
+mains = [c for c in d if c["agent"] == "project_scanner"]
+assert len(mains) == 2 and mains[0]["state"] == "stopped", d  # newest
+' || fail "conversations: a restart should close the interrupted one"
+curl -s "$B/api/conversations/$(curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+print([c for c in json.load(sys.stdin)
+       if c["agent"] == "project_scanner"][0]["id"])')" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["records"] and d["records"][-1]["k"] == "error", d
+assert "interrupted" in d["records"][-1]["text"], d
+' || fail "conversations: the interrupted one should say so"
 
 echo "ALL SMOKE TESTS PASSED"

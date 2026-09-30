@@ -1,13 +1,15 @@
 /*
  * scan — the project scan agent. See scan.h for the process graph;
  * the pieces here are the two write-back mcp tools (MCP_SCAN), the
- * researcher seed files, the runner child and its stdout feed.
+ * researcher seed files, the runner child, its stdout feed and the
+ * conversation capture around all of it.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "scan.h"
 
 #include "context.h"
+#include "conv.h"
 #include "prompts.h"
 #include "theme.h"
 #include "util.h"
@@ -36,14 +38,55 @@ extern long syscall(long number, ...);
 #define SCAN_MAX_ROUNDS      48
 #define SCAN_TOOL_TIMEOUT    600
 
-#define SCAN_LOG_MAX         240 /* entries kept (oldest half drops) */
-#define SCAN_LOG_TEXT        400 /* bytes of text per entry */
-
+/* the researchers: the agents the scanner orchestrates, the research
+ * tools each one uses on flower's /mcp surface (their sets are
+ * disjoint — that is what attributes an incoming /mcp call to the
+ * right sub-conversation), and the sub-conversation currently open
+ * for its invoke */
 typedef struct {
-    char kind[12];  /* start|thinking|response|tool|tool_result|error */
-    char tool[80];  /* tool requests: the full tool name */
-    char text[SCAN_LOG_TEXT + 8];
-} scan_log_t;
+    const char *agent;
+    const char *tools[8]; /* NULL-terminated */
+    char sub[CONV_ID_LEN + 1];
+} researcher_t;
+
+static researcher_t RESEARCHERS[] = {
+    { "filesystem_researcher",
+      { "read_file", "list_files", "grep", NULL }, { 0 } },
+    { "online_researcher",
+      { "web_search", "web_fetch", NULL }, { 0 } },
+};
+
+/* the runner's tool calls, in flight until their response record
+ * arrives (a FIFO: llmkit answers calls in order) */
+typedef struct {
+    char tool[CONV_TOOL_MAX];
+    char sub[CONV_ID_LEN + 1]; /* the invoke's conversation, if any */
+} pend_t;
+
+#define PEND_MAX 16
+static pend_t PEND[PEND_MAX];
+static size_t pend_head, pend_n;
+
+static void pend_push(const char *tool, const char *sub)
+{
+    if (pend_n == PEND_MAX) { /* overflow: forget the oldest */
+        pend_head = (pend_head + 1) % PEND_MAX;
+        pend_n--;
+    }
+    pend_t *p = &PEND[(pend_head + pend_n) % PEND_MAX];
+    snprintf(p->tool, sizeof p->tool, "%s", tool ? tool : "");
+    snprintf(p->sub, sizeof p->sub, "%s", sub ? sub : "");
+    pend_n++;
+}
+
+static int pend_pop(pend_t *out)
+{
+    if (!pend_n) return 0;
+    *out = PEND[pend_head];
+    pend_head = (pend_head + 1) % PEND_MAX;
+    pend_n--;
+    return 1;
+}
 
 static struct {
     /* wiring (scan_attach) */
@@ -65,10 +108,10 @@ static struct {
     long long started, ended;
     int writes; /* successful write-back tool calls */
 
-    scan_log_t log[SCAN_LOG_MAX];
-    size_t log_n, log_dropped;
+    char conv[CONV_ID_LEN + 1]; /* the scan's main conversation */
 
-    /* streamed text blocks arrive as partials: accumulate, log once */
+    /* streamed text blocks arrive as partials: accumulate, record
+     * once */
     sbuf_t resp_acc, think_acc;
 
     /* child plumbing */
@@ -245,42 +288,105 @@ static const mcp_tool_t SCAN_TOOLS[] = {
     { "set_project_details", ARGS_SET_DETAILS, fn_set_project_details },
     { "add_context_item",    ARGS_ADD_CONTEXT,  fn_add_context_item },
 };
-const mcp_table_t MCP_SCAN = {
-    SCAN_TOOLS, sizeof SCAN_TOOLS / sizeof SCAN_TOOLS[0]
+mcp_table_t MCP_SCAN = {
+    SCAN_TOOLS, sizeof SCAN_TOOLS / sizeof SCAN_TOOLS[0], NULL
 };
 
-/* ---------- log ---------- */
+/* ---------- conversation capture ---------- */
 
-/* copy at most SCAN_LOG_TEXT bytes, cut on a utf-8 boundary, mark
- * the cut with an ellipsis */
-static void trunc_text(char *dst, const char *src)
+/* a short, readable rendering of a tool call's arguments */
+static void args_brief(const cJSON *args, char *dst, size_t n)
 {
-    size_t n = strlen(src);
-    if (n <= SCAN_LOG_TEXT) {
-        memcpy(dst, src, n);
-        dst[n] = '\0';
+    const cJSON *input = cJSON_GetObjectItemCaseSensitive(args, "input");
+    if (cJSON_IsString(input) && input->valuestring) {
+        utf8_trunc(dst, n, input->valuestring, 400);
         return;
     }
-    size_t cut = SCAN_LOG_TEXT;
-    while (cut > 0 && ((unsigned char)src[cut] & 0xc0) == 0x80) cut--;
-    memcpy(dst, src, cut);
-    memcpy(dst + cut, "\xE2\x80\xA6", 3); /* … */
-    dst[cut + 3] = '\0';
+    char *j = cJSON_PrintUnformatted(args);
+    if (!j) {
+        dst[0] = '\0';
+        return;
+    }
+    utf8_trunc(dst, n, j, 400);
+    free(j);
 }
 
-static void log_add(const char *kind, const char *tool, const char *text)
+static researcher_t *researcher_for_tool(const char *tool)
 {
-    if (S.log_n == SCAN_LOG_MAX) { /* keep the newest half */
-        size_t drop = SCAN_LOG_MAX / 2;
-        memmove(S.log, S.log + drop,
-                (SCAN_LOG_MAX - drop) * sizeof S.log[0]);
-        S.log_n -= drop;
-        S.log_dropped += drop;
+    if (!tool) return NULL;
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
+        for (size_t k = 0; RESEARCHERS[i].tools[k]; k++)
+            if (strcmp(RESEARCHERS[i].tools[k], tool) == 0)
+                return &RESEARCHERS[i];
+    return NULL;
+}
+
+/* "<agent>.invoke" — the runner's name for one researcher round */
+static researcher_t *researcher_for_invoke(const char *tool)
+{
+    if (!tool) return NULL;
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++) {
+        const char *agent = RESEARCHERS[i].agent;
+        size_t alen = strlen(agent);
+        if (strncmp(tool, agent, alen) == 0 &&
+            strcmp(tool + alen, ".invoke") == 0)
+            return &RESEARCHERS[i];
     }
-    scan_log_t *e = &S.log[S.log_n++];
-    snprintf(e->kind, sizeof e->kind, "%s", kind);
-    snprintf(e->tool, sizeof e->tool, "%s", tool ? tool : "");
-    trunc_text(e->text, text ? text : "");
+    return NULL;
+}
+
+static researcher_t *researcher_for_sub(const char *sub)
+{
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
+        if (RESEARCHERS[i].sub[0] && strcmp(RESEARCHERS[i].sub, sub) == 0)
+            return &RESEARCHERS[i];
+    return NULL;
+}
+
+/* the invoke's prompt becomes the sub-conversation's title (first
+ * line) and its opening user record */
+static void open_sub(researcher_t *r, const char *input)
+{
+    input = input ? input : "";
+    char line[256], title[CONV_TITLE_MAX];
+    size_t i = 0;
+    while (input[i] && input[i] != '\n' && i < sizeof line - 1) {
+        line[i] = input[i];
+        i++;
+    }
+    line[i] = '\0';
+    utf8_trunc(title, sizeof title, line, 96);
+    if (!title[0]) snprintf(title, sizeof title, "%s round", r->agent);
+
+    char id[CONV_ID_LEN + 1];
+    if (conv_create(r->agent, S.llm, S.project, S.conv, title, id) != 0)
+        return; /* the call still lands in the main conversation */
+    snprintf(r->sub, sizeof r->sub, "%s", id);
+    conv_add(id, "user", NULL, input, 0);
+}
+
+static void close_sub(const char *sub, int state, const char *answer)
+{
+    conv_add(sub, "response", NULL, answer ? answer : "", 0);
+    conv_finish(sub, (conv_state_t)state);
+    researcher_t *r = researcher_for_sub(sub);
+    if (r) r->sub[0] = '\0';
+}
+
+/* the researchers' own tool calls, arriving on flower's /mcp surface
+ * while their invoke runs: folded into the open sub-conversation.
+ * Calls while nothing is open are somebody else's (an external mcp
+ * client) and are not recorded. */
+static void log_research_tool(const char *tool, const cJSON *args,
+                              const char *result, int is_error)
+{
+    if (!S.running) return;
+    researcher_t *r = researcher_for_tool(tool);
+    if (!r || !r->sub[0]) return;
+    char brief[448];
+    args_brief(args, brief, sizeof brief);
+    conv_add(r->sub, "tool_call", tool, brief, 0);
+    conv_add(r->sub, "tool_result", tool, result ? result : "", is_error);
 }
 
 /* ---------- record plumbing (cJSON -> one jsonl line) ---------- */
@@ -448,17 +554,15 @@ static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
 static int add_researcher_servers(cJSON *servers, const llm_t *llm,
                                   const project_t *proj, char *err, size_t err_n)
 {
-    static const char *const NAMES[] = {
-        "filesystem_researcher", "online_researcher",
-    };
-    for (size_t i = 0; i < sizeof NAMES / sizeof NAMES[0]; i++) {
-        const agent_t *ag = agents_builtin_get(NAMES[i]);
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++) {
+        const char *name = RESEARCHERS[i].agent;
+        const agent_t *ag = agents_builtin_get(name);
         if (!ag) {
-            snprintf(err, err_n, "builtin agent %s is missing", NAMES[i]);
+            snprintf(err, err_n, "builtin agent %s is missing", name);
             return -1;
         }
         char file[64], seed[4352];
-        snprintf(file, sizeof file, "%s.jsonl", NAMES[i]);
+        snprintf(file, sizeof file, "%s.jsonl", name);
         seed_path(file, seed, sizeof seed);
         if (write_researcher_seed(ag, llm, proj, file, err, err_n) != 0)
             return -1;
@@ -472,7 +576,7 @@ static int add_researcher_servers(cJSON *servers, const llm_t *llm,
         cJSON *srv = cJSON_CreateObject();
         if (!srv ||
             !cJSON_AddStringToObject(srv, "type", "stdio") ||
-            !cJSON_AddStringToObject(srv, "name", NAMES[i]) ||
+            !cJSON_AddStringToObject(srv, "name", name) ||
             !cJSON_AddStringToObject(srv, "command_line", cmd) ||
             !cJSON_AddBoolToObject(srv, "required", 1)) {
             cJSON_Delete(srv);
@@ -646,24 +750,7 @@ static int spawn_runner(const char *input, char *err, size_t err_n)
     return 0;
 }
 
-/* ---------- stdout: fold records into the log ---------- */
-
-/* a short, readable rendering of a tool call's arguments */
-static void brief_args(const cJSON *args, char *dst)
-{
-    const cJSON *input = cJSON_GetObjectItemCaseSensitive(args, "input");
-    if (cJSON_IsString(input) && input->valuestring) {
-        trunc_text(dst, input->valuestring);
-        return;
-    }
-    char *j = cJSON_PrintUnformatted(args);
-    if (!j) {
-        dst[0] = '\0';
-        return;
-    }
-    trunc_text(dst, j);
-    free(j);
-}
+/* ---------- stdout: fold records into the conversations ---------- */
 
 static void handle_line(char *line)
 {
@@ -676,43 +763,63 @@ static void handle_line(char *line)
     const char *t = cJSON_IsString(type) ? type->valuestring : "";
     const char *x = cJSON_IsString(text) && text->valuestring
                         ? text->valuestring : "";
-    /* partial defaults to true on the wire; only a closed block logs */
+    /* partial defaults to true on the wire; only a closed block is
+     * recorded */
     const cJSON *partial = cJSON_GetObjectItemCaseSensitive(rec, "partial");
     int fin = cJSON_IsBool(partial) && !cJSON_IsTrue(partial);
 
     if (strcmp(t, "response") == 0) {
         sb_puts(&S.resp_acc, x);
         if (fin) {
-            log_add("response", NULL, S.resp_acc.data ? S.resp_acc.data : "");
+            conv_add(S.conv, "response", NULL,
+                     S.resp_acc.data ? S.resp_acc.data : "", 0);
             S.resp_acc.len = 0;
             if (S.resp_acc.data) S.resp_acc.data[0] = '\0';
         }
     } else if (strcmp(t, "thinking") == 0) {
         sb_puts(&S.think_acc, x);
         if (fin) {
-            log_add("thinking", NULL,
-                    S.think_acc.data ? S.think_acc.data : "");
+            conv_add(S.conv, "thinking", NULL,
+                     S.think_acc.data ? S.think_acc.data : "", 0);
             S.think_acc.len = 0;
             if (S.think_acc.data) S.think_acc.data[0] = '\0';
         }
     } else if (strcmp(t, "tool_request") == 0) {
         const cJSON *tool = cJSON_GetObjectItemCaseSensitive(rec, "tool");
         const cJSON *args = cJSON_GetObjectItemCaseSensitive(rec, "arguments");
-        char brief[SCAN_LOG_TEXT + 8];
-        brief_args(args, brief);
-        log_add("tool", cJSON_IsString(tool) ? tool->valuestring : "", brief);
+        const char *tn = cJSON_IsString(tool) && tool->valuestring
+                             ? tool->valuestring : "";
+        char brief[448];
+        args_brief(args, brief, sizeof brief);
+        /* a researcher invoke opens the researcher's own
+         * sub-conversation, linked to this scan's */
+        researcher_t *r = researcher_for_invoke(tn);
+        if (r) {
+            const cJSON *input =
+                cJSON_GetObjectItemCaseSensitive(args, "input");
+            open_sub(r, cJSON_IsString(input) && input->valuestring
+                         ? input->valuestring : "");
+        }
+        conv_add(S.conv, "tool_call", tn, brief, 0);
+        pend_push(tn, r ? r->sub : "");
     } else if (strcmp(t, "tool_response") == 0) {
-        log_add("tool_result", NULL, x);
+        /* answers arrive in call order: the FIFO entry says whether
+         * the call was an invoke whose conversation closes here */
+        pend_t p;
+        if (pend_pop(&p)) {
+            if (p.sub[0]) close_sub(p.sub, CONV_COMPLETED, x);
+            conv_add(S.conv, "tool_result", p.tool[0] ? p.tool : NULL, x, 0);
+        } else {
+            conv_add(S.conv, "tool_result", NULL, x, 0);
+        }
     } else if (strcmp(t, "error") == 0) {
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(rec, "code");
         char msg[sizeof S.last_error];
         snprintf(msg, sizeof msg, "%s: %s",
                  cJSON_IsString(code) && code->valuestring
                      ? code->valuestring : "error", x);
-        log_add("error", NULL, msg);
+        conv_add(S.conv, "error", NULL, msg, 1);
         snprintf(S.last_error, sizeof S.last_error, "%s", msg);
-    } else if (strcmp(t, "start") == 0) {
-        log_add("start", NULL, "");
     }
     cJSON_Delete(rec);
 }
@@ -754,8 +861,10 @@ static void scan_finish(void)
     }
     process_lines(); /* whatever the last chunk held */
     /* trailing partials mean the turn was cut short — show them */
-    if (S.resp_acc.len) log_add("response", NULL, S.resp_acc.data);
-    if (S.think_acc.len) log_add("thinking", NULL, S.think_acc.data);
+    if (S.resp_acc.len)
+        conv_add(S.conv, "response", NULL, S.resp_acc.data, 0);
+    if (S.think_acc.len)
+        conv_add(S.conv, "thinking", NULL, S.think_acc.data, 0);
     free(S.resp_acc.data); free(S.think_acc.data);
     S.resp_acc = (sbuf_t){ 0 };
     S.think_acc = (sbuf_t){ 0 };
@@ -787,6 +896,23 @@ static void scan_finish(void)
             snprintf(S.error, sizeof S.error,
                      "llmkit runner exited with code %d", code);
     }
+
+    /* close the conversations: still-open sub-conversations first
+     * (children before the parent), then the scan's own */
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
+        if (RESEARCHERS[i].sub[0]) {
+            conv_add(RESEARCHERS[i].sub, "error", NULL,
+                     "the scan ended before this conversation finished", 1);
+            conv_finish(RESEARCHERS[i].sub, CONV_STOPPED);
+            RESEARCHERS[i].sub[0] = '\0';
+        }
+    if (S.conv[0]) {
+        if (S.error[0]) conv_add(S.conv, "error", NULL, S.error, 1);
+        conv_finish(S.conv, S.stop_requested ? CONV_STOPPED
+                      : S.ok ? CONV_COMPLETED : CONV_FAILED);
+    }
+    pend_head = pend_n = 0;
+
     free(S.out.data);
     S.out.data = NULL;
     S.out.len = S.out.cap = 0;
@@ -829,6 +955,10 @@ void scan_attach(int epfd, projects_t *projects, llms_t *llms,
              base_url && base_url[0] ? base_url : "http://127.0.0.1:8080");
     S.pid = -1;
     S.out_fd = -1;
+    S.conv[0] = '\0';
+    /* the researchers' inner tool calls (POST /mcp) are folded into
+     * the open sub-conversation while a scan runs */
+    MCP_RESEARCH.log = log_research_tool;
 }
 
 scan_start_result_t scan_start(const char *project_id, const char *llm_name,
@@ -863,6 +993,21 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
         return SCAN_START_REJECT;
     }
 
+    /* the conversation this scan is recorded in — created before the
+     * child so even a failed spawn leaves a readable trace */
+    char title[CONV_TITLE_MAX];
+    snprintf(title, sizeof title, "Project scan — %s",
+             p->title[0] ? p->title : p->dir);
+    if (conv_create("project_scanner", llm_name ? llm_name : "", project_id,
+                    "", title, S.conv) != 0) {
+        snprintf(err, err_n, "cannot create the conversation record");
+        return SCAN_START_SPAWN;
+    }
+    char *user = render_prompt("agents/project_scanner/user_prompt.txt",
+                               p, "Scan the project now.");
+    conv_add(S.conv, "user", NULL, user, 0);
+    free(user);
+
     /* fresh state for this run (the previous result is forgotten) */
     S.done = 0;
     S.ok = 0;
@@ -872,14 +1017,20 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
     S.started = (long long)time(NULL);
     S.ended = 0;
     S.writes = 0;
-    S.log_n = S.log_dropped = 0;
     S.stop_requested = 0;
+    pend_head = pend_n = 0;
 
     char *input = build_runner_input(scanner, llm, p, err, err_n);
-    if (!input) return SCAN_START_SPAWN;
+    if (!input) {
+        conv_add(S.conv, "error", NULL, err, 1);
+        conv_finish(S.conv, CONV_FAILED);
+        return SCAN_START_SPAWN;
+    }
     int rc = spawn_runner(input, err, err_n);
     free(input);
     if (rc != 0) {
+        conv_add(S.conv, "error", NULL, err, 1);
+        conv_finish(S.conv, CONV_FAILED);
         unlink_seeds();
         return SCAN_START_SPAWN;
     }
@@ -911,26 +1062,13 @@ char *scan_status_json(void)
     cJSON_AddBoolToObject(o, "done", S.done);
     cJSON_AddStringToObject(o, "project", S.project);
     cJSON_AddStringToObject(o, "llm", S.llm);
+    if (S.conv[0])
+        cJSON_AddStringToObject(o, "conversation", S.conv);
     if (S.started) cJSON_AddNumberToObject(o, "started", (double)S.started);
     if (S.ended) cJSON_AddNumberToObject(o, "ended", (double)S.ended);
     if (S.done) cJSON_AddBoolToObject(o, "ok", S.ok);
     if (S.done && S.error[0]) cJSON_AddStringToObject(o, "error", S.error);
     cJSON_AddNumberToObject(o, "writes", S.writes);
-
-    cJSON *log = cJSON_CreateArray();
-    if (log) {
-        for (size_t i = 0; i < S.log_n; i++) {
-            cJSON *e = cJSON_CreateObject();
-            if (!e) break;
-            cJSON_AddStringToObject(e, "k", S.log[i].kind);
-            if (S.log[i].tool[0])
-                cJSON_AddStringToObject(e, "tool", S.log[i].tool);
-            if (S.log[i].text[0])
-                cJSON_AddStringToObject(e, "text", S.log[i].text);
-            cJSON_AddItemToArray(log, e);
-        }
-        cJSON_AddItemToObject(o, "log", log);
-    }
     char *json = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
     return json;

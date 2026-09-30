@@ -280,10 +280,13 @@ function contextEditor(list = [], prefix = "P") {
  *
  * A button in the project details runs the server-side scan agent:
  * POST api/scan {project, llm} starts it — the llm is picked from
- * the configured endpoints and remembered in localStorage — and
- * GET api/scan is polled while it runs. The agent writes the
- * project's detail fields and context items through its own tools,
- * so the editor refreshes from the server as the writes land. */
+ * the configured endpoints and remembered in localStorage. The scan
+ * runs in the background: this section only says so and links to the
+ * conversation that is being recorded (conversations.html — the
+ * transcript, its sub-agents and the Stop button live there). The
+ * agent writes the project's detail fields and context items through
+ * its own tools, so the editor refreshes from the server as the
+ * writes land. */
 
 let llms = [];           // [{name, …}] — names for the scan pick
 let scanState = null;    // the last GET api/scan answer
@@ -327,30 +330,12 @@ function scanLlmSelect() {
   return sel;
 }
 
-const SCAN_MARKS = {
-  start: "·", thinking: "…", response: "=",
-  tool: "→", tool_result: "←", error: "⚠",
-};
-
-function scanLogRow(e) {
-  return el("div", { class: "scan-entry k-" + (e.k || "start") },
-    el("span", { class: "scan-mark", text: SCAN_MARKS[e.k] || "·" }),
-    e.tool ? el("span", { class: "scan-tool mono", text: e.tool }) : null,
-    e.text ? el("span", { class: "scan-text", text: e.text }) : null);
-}
-
 /* the scan block, refreshed in place by updateScanUI() while the
  * agent runs (no re-render: it would steal focus from the fields) */
 function scanSection() {
   const sec = el("div", { class: "scan-editor", id: "scan-section" },
     el("div", { class: "ctx-head" },
-      el("h3", { text: "Project scan" }),
-      el("button", {
-        type: "button", class: "btn btn-ghost scan-stop",
-        id: "scan-stop", "data-action": "scan-stop", hidden: "",
-        title: "Ask the scan to stop (click again to force)",
-        text: "Stop",
-      })),
+      el("h3", { text: "Project scan" })),
     el("div", { class: "scan-row" },
       scanLlmSelect(),
       el("button", {
@@ -359,7 +344,10 @@ function scanSection() {
         text: "Scan project",
       })),
     el("p", { id: "scan-status", class: "muted", role: "status" }),
-    el("div", { id: "scan-log", class: "scan-log", hidden: "" }));
+    el("a", {
+      id: "scan-open", class: "btn btn-ghost scan-open", hidden: "",
+      title: "Open the recorded conversation",
+    }));
   return sec;
 }
 
@@ -367,13 +355,15 @@ function updateScanUI() {
   const sec = scanEl();
   if (!sec) return;
   const status = document.getElementById("scan-status");
-  const logBox = document.getElementById("scan-log");
   const start = document.getElementById("scan-start");
-  const stop = document.getElementById("scan-stop");
+  const open = document.getElementById("scan-open");
   const sel = document.getElementById("scan-llm");
   const st = scanState;
   const running = !!st && !!st.running;
   const p = projects[selected];
+  /* the scan (or its result) belongs here only while it is this
+   * project's — the conversation page keeps every project's history */
+  const mine = !!st && !!p && st.project === p.id;
 
   if (start) {
     const can = !running && !draft && llms.length > 0 &&
@@ -384,17 +374,15 @@ function updateScanUI() {
       ? "Run the scan agent on this project's directory"
       : llms.length ? "" : "add an llm endpoint on the Config page first";
   }
-  if (stop) stop.hidden = !running;
   if (sel) sel.toggleAttribute("disabled", running);
 
   if (status) {
     if (running) {
-      const whose = st.project && p && st.project === p.id
-        ? "" : " — another project";
       status.className = "muted";
-      status.textContent = `Scanning with ${st.llm}${whose}…` +
-        (st.writes ? ` ${st.writes} write${st.writes === 1 ? "" : "s"} so far` : "");
-    } else if (st && st.done) {
+      status.textContent = mine
+        ? "Scanning in the background — the conversation is being recorded."
+        : "A scan of another project is running in the background.";
+    } else if (st && st.done && mine) {
       if (st.ok) {
         status.className = "cfg-ok";
         status.textContent = `Scan complete ✓ — ${st.writes} ` +
@@ -408,11 +396,14 @@ function updateScanUI() {
       status.className = "muted";
     }
   }
-  if (logBox) {
-    const entries = (st && st.log) || [];
-    logBox.hidden = entries.length === 0;
-    logBox.textContent = "";
-    for (const e of entries.slice(-40)) logBox.append(scanLogRow(e));
+  if (open) {
+    const target = mine && (running || (st && st.done)) && st.conversation;
+    open.hidden = !target;
+    if (target) {
+      open.setAttribute("href", "conversations.html#" + st.conversation);
+      open.textContent = running
+        ? "Watch the conversation →" : "View the conversation →";
+    }
   }
 }
 
@@ -474,11 +465,6 @@ async function startScan() {
       status.className = "cfg-warn";
     }
   }
-}
-
-async function stopScan() {
-  try { await fetch("api/scan/stop", { method: "POST" }); } catch (_) {}
-  pollScan(); /* pick up the stop (or send the force kill next click) */
 }
 
 /* context-item wiring shared by the project editor and the task
@@ -1028,7 +1014,6 @@ editorEl.addEventListener("click", (e) => {
   else if (act === "delete") deleteSelected(btn);
   else if (act === "pick-emoji") openPicker(btn);
   else if (act === "scan-start") startScan();
-  else if (act === "scan-stop") stopScan();
 });
 
 // close the picker when clicking elsewhere or pressing Escape

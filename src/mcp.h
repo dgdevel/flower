@@ -40,6 +40,13 @@ typedef struct {
  * the model as isError content, not an rpc error. */
 typedef char *(*mcp_tool_fn)(const cJSON *args, char *err, size_t err_n);
 
+/* optional per-surface logger: called once a tools/call finished
+ * (result is the tool's text, is_error flags a failed call). The
+ * conversation recorder behind the project scan uses it to fold
+ * every tool use into the conversation's transcript. */
+typedef void (*mcp_log_fn)(const char *tool, const cJSON *args,
+                           const char *result, int is_error);
+
 typedef struct {
     const char *name;
     const mcp_arg_t *args; /* NULL-name terminated */
@@ -49,12 +56,13 @@ typedef struct {
 typedef struct {
     const mcp_tool_t *tools;
     size_t count;
+    mcp_log_fn log; /* optional, may be NULL */
 } mcp_table_t;
 
 /* the research tool set behind POST /mcp (defined in mcp.c) */
-extern const mcp_table_t MCP_RESEARCH;
+extern mcp_table_t MCP_RESEARCH;
 /* the scan write-back tool set behind POST /scan/mcp (scan.c) */
-extern const mcp_table_t MCP_SCAN;
+extern mcp_table_t MCP_SCAN;
 
 /*
  * Handle one POST /mcp-style body (a single json-rpc message; llmkit

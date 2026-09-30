@@ -72,8 +72,8 @@ static const mcp_tool_t RESEARCH_TOOLS[] = {
     { "list_files", ARGS_LIST_FILES, fs_tool_list_files },
     { "grep",       ARGS_GREP,       fs_tool_grep },
 };
-const mcp_table_t MCP_RESEARCH = {
-    RESEARCH_TOOLS, sizeof RESEARCH_TOOLS / sizeof RESEARCH_TOOLS[0]
+mcp_table_t MCP_RESEARCH = {
+    RESEARCH_TOOLS, sizeof RESEARCH_TOOLS / sizeof RESEARCH_TOOLS[0], NULL
 };
 
 /* ---------- prompt-file lookups with compiled-in fallbacks ---------- */
@@ -212,6 +212,11 @@ static cJSON *handle_tools_call(const mcp_table_t *t, const cJSON *params,
 
     char err[512] = "";
     char *out = one->fn(arguments, err, sizeof err);
+
+    /* the surface's recorder (if any) folds the call into the
+     * conversation transcript this tool call belongs to */
+    if (t->log)
+        t->log(name->valuestring, arguments, out ? out : err, out == NULL);
 
     /* one text block either way; a tool failure is content the model
      * can read, flagged isError — the run keeps going (llmkit maps

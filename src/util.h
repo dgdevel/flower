@@ -17,6 +17,10 @@ int valid_utf8_text(const char *s, size_t n, int multiline);
  * secrecy, is the goal. /dev/urandom with a time+pid fallback. */
 void gen_hex_id(char *buf, size_t n);
 
+/* copy at most `max` bytes of src into dst (an n-byte buffer), cut
+ * on a utf-8 boundary and mark the cut with an ellipsis (…). */
+void utf8_trunc(char *dst, size_t n, const char *src, size_t max);
+
 /* whole file as a NUL-terminated string, or NULL when missing,
  * unreadable or larger than cap bytes */
 char *read_whole_file(const char *path, long cap);

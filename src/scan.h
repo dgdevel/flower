@@ -13,17 +13,27 @@
  *   flower ── stdin: llm + tools + system + user + flush
  *        └─ llmkit runner (project_scanner)
  *             ├─ filesystem_researcher.invoke   (stdio, agent-as-tool)
- *             │    └─ flower /mcp: read_file, list_files, …
+ *             │    └─ flower /mcp: read_file, list_files, grep, …
  *             ├─ online_researcher.invoke       (stdio, agent-as-tool)
  *             │    └─ flower /mcp: web_search, web_fetch, …
  *             └─ flower /scan/mcp: set_project_details,
  *                add_context_item → the scanned project + save
  *
- * The runner's stdout records are read non-blocking through the
- * server's epoll loop and kept as a small activity log; GET
- * /api/scan reports progress and result (the client polls). One scan
- * at a time; its write-back tools apply to the scan's project and
- * fail when no scan is running.
+ * The whole exchange is recorded as conversations (src/conv.c): the
+ * scan gets the main one, every researcher invoke its own
+ * sub-conversation linked to it. The runner's stdout records feed
+ * the main transcript (text blocks, tool calls and results); the
+ * researchers' inner tool calls arrive on flower's own /mcp surface
+ * while their invoke runs and are folded into the open
+ * sub-conversation (the researchers own disjoint tool sets, so the
+ * calls attribute unambiguously). Everything is durable and readable
+ * under {config}/conversations/ — GET /api/conversations, live via
+ * the /api/conversations/stream SSE channel.
+ *
+ * The runner's stdout is read non-blocking through the server's
+ * epoll loop; GET /api/scan reports progress and result (the client
+ * polls). One scan at a time; its write-back tools apply to the
+ * scan's project and fail when no scan is running.
  */
 
 #include "agents.h"
@@ -69,12 +79,13 @@ int scan_running(void);
  * loop routes its events to scan_on_readable(). */
 int scan_fd(void);
 
-/* Read whatever the runner wrote, fold it into the activity log; at
+/* Read whatever the runner wrote, fold it into the conversations; at
  * EOF (the runner exited) reap it and finish the scan. */
 void scan_on_readable(void);
 
 /* GET /api/scan: {running, done, ok, error, project, llm, started,
- * ended, writes, log[]} as a malloc'd compact json string. */
+ * ended, writes, conversation} as a malloc'd compact json string —
+ * the transcript itself lives in the conversation store. */
 char *scan_status_json(void);
 
 /* Kill and reap the child at server exit. */

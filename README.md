@@ -24,7 +24,13 @@ tweakable, template-capable **prompt files** under `prompts/`, and
 **`online_researcher`** (web) and **`filesystem_researcher`**
 (local files — `read_file`, `list_files` with a small glob
 language, `grep` over file contents) are built on the tools and
-ship compiled in. See *Roadmap*.
+ship compiled in. The **project scan agent** drives the whole
+stack: a scan of a project's directory runs the `project_scanner`
+agent as an `llmkit runner` child that orchestrates the two
+researchers and writes its findings back into the project — and
+every conversation it touches is recorded durably under
+`conversations/` and readable on the **Conversations** page, live
+while it runs. See *Roadmap*.
 
 ## Quick start
 
@@ -35,9 +41,10 @@ make run            # build + serve on http://0.0.0.0:8080/
 make check          # end-to-end smoke tests (tests/smoke.sh)
 ```
 
-Pages: `/` (main app — three columns, projects manager), `/config.html`
-(theme editor + llm endpoints), `/components.html` (themed
-component gallery).
+Pages: `/` (main app — three columns, projects manager),
+`/conversations.html` (every llm conversation, past and present),
+`/config.html` (theme editor + llm endpoints), `/components.html`
+(themed component gallery).
 
 Requires: Linux, a C11 compiler (`cc`), GNU make ≥ 4.3 (grouped targets),
 and **cJSON** (system package `libcjson`, discovered via pkg-config)
@@ -363,6 +370,70 @@ under no project. The list is kept newest-first; later parts add
 the conversation (the message log) inside the same `{ID}`
 directory.
 
+## The project scan and its conversations
+
+The **project scan agent** (part 4d) is the first consumer of the
+llmkit process. A **scan** of a project — started from the project
+editor ("Scan project", with the llm endpoint to use) — runs the
+compiled-in `project_scanner` agent as an `llmkit runner` child
+process (`-l BIN` / `$FLOWER_LLMKIT`, default `llmkit` from `PATH`).
+The runner orchestrates the two researcher agents, exposed to it as
+single `invoke` tools via `llmkit agent-as-tool` stdio servers grown
+from seed files under `{config}/scan/`, and writes its findings back
+through flower's second mcp surface, `POST /scan/mcp`
+(`set_project_details`, `add_context_item` — they apply to the
+scanned project and save immediately; the editor picks the writes up
+as they land). One scan runs at a time; `POST /api/scan/stop` asks
+it to stop (a second call forces it). The editor does not host the
+chat anymore — it only says that a scan is running in the
+background and links to the conversation.
+
+**Conversations** (`{config}/conversations/`) make every llm
+exchange flower runs durable and readable. One directory per
+conversation, named by a 32-hex-char id:
+
+```
+conversations/{ID}/meta.json      identity & state: id, agent, llm,
+                                  project, parent (sub-agents), title,
+                                  started, ended, state
+conversations/{ID}/records.jsonl  the transcript, one record per line,
+                                  appended as the conversation happens:
+                                  {"t":1790000000,"k":"user","text":"…"}
+                                  {"t":1790000001,"k":"tool_call","tool":"grep","text":"…"}
+                                  {"t":1790000002,"k":"tool_result","tool":"grep","text":"…"}
+```
+
+Record kinds: `user` (a prompt handed to the model), `thinking` and
+`response` (model text blocks), `tool_call` / `tool_result` (a tool
+use and its outcome — `err` flags a failed result; text is capped at
+8 KiB per record, cut on a utf-8 boundary), `error`. States:
+`running`, `completed`, `failed`, `stopped` — a conversation still
+marked running when flower boots is closed as `stopped` with an
+`interrupted` error record, so the list never shows zombies. The
+store is server-owned (no PUT API): the scan appends records, meta
+state changes rewrite `meta.json` atomically. Loading is lenient
+like every store.
+
+The scan's conversation graph: the scan itself is the **main**
+conversation (`Project scan — <title>`); every researcher invoke
+opens a **sub-conversation** carrying the scan's id in `parent` —
+its prompt as the opening `user` record, the researcher's own tool
+calls (arriving on flower's `/mcp` while the invoke runs; the
+researchers own disjoint tool sets, so calls attribute unambiguously)
+as `tool_call`/`tool_result` records, and the invoke's answer as its
+closing `response`. The runner's stdout records feed the main
+transcript (thinking/response blocks — partials folded — and the
+scanner's own tool calls).
+
+The **Conversations page** (`/conversations.html`, top-bar link on
+every page) lists them all — past and present, subs indented under
+their parents, running ones badged; clicking one opens the
+transcript, which follows the live store through the
+`/api/conversations/stream` SSE channel (a named `conv` event per
+store version; the page refetches what it shows). The detail view
+links parent ↔ sub-conversations both ways and hosts the Stop
+button while a scan runs.
+
 ## Repository layout
 
 ```
@@ -394,6 +465,13 @@ src/tasks.{c,h} tasks/ backend: one directory per
 src/context.{c,h}    typed context items shared by projects and
                       tasks (fact/pattern/risk/… — parse/emit
                       rules live once for both stores)
+src/conv.{c,h}       conversations/ backend: one directory per
+                      conversation (meta.json + append-only
+                      records.jsonl), the store behind the
+                      Conversations page
+src/scan.{c,h}       the project scan agent: researcher seeds, the
+                      llmkit runner child, the write-back tools
+                      (POST /scan/mcp) and the conversation capture
 src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
 src/html.{c,h}        tolerant html tokenizer/DOM, readability-lite and the
                       markdown emitter (src/web.c's reading engine)
@@ -404,10 +482,16 @@ src/fs.{c,h}          local-filesystem tools: read_file (offset/length
                       grep (a regex over the files a filepath glob
                       selects)
 src/mcp.{c,h}         flower's own mcp server: json-rpc dispatch for POST /mcp
+                      and /scan/mcp (per-surface tool tables, optional
+                      conversation logging)
 src/assets_gen.{c,h}  GENERATED — do not edit; regenerated by `make`
 src/prompts_gen.{c,h} GENERATED — do not edit; regenerated by `make`
 web/index.html        main app: three-column deck (projects,
                       tasks, actions)
+web/conversations.html  the Conversations page: every conversation,
+                      live transcripts, sub-agent links
+web/conversations.js   its script: list + detail following the SSE
+                      version channel
 web/config.html       config page: theme, llm endpoints
 web/config.js         theme editor: instant preview, validate, save, reset
 web/llms.js           llm endpoints editor (list/editor pair,
@@ -422,8 +506,12 @@ web/style.css         styles driven entirely by theme variables
 tests/smoke.sh        end-to-end smoke tests (make check)
 tests/selftest.c      offline parser checks: ddg extraction, readability/
                       markdown, prompt templating (fixtures in tests/fixtures)
+tests/fakellmkit.py   a scripted llmkit runner stand-in: plays a scan
+                      conversation (researcher round + write-back) so
+                      the conversation pipeline is testable end to end
 tests/e2e/            playwright browser tests (firefox; config in
-                      playwright.config.ts, server on :8120 with .e2e-config)
+                      playwright.config.ts, server on :8120 with .e2e-config
+                      and tests/fakellmkit.py as its llmkit)
 ```
 
 ## HTTP surface
@@ -467,16 +555,46 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | entry, deletes removed directories;   |
 |                   |              | 400 bad JSON; 422 invalid entry/bad   |
 |                   |              | action/over-deep nesting               |
+| `/api/scan`       | GET/HEAD     | scan status: running, done, ok, error,|
+|                   |              | project, llm, started, ended, writes, |
+|                   |              | conversation (the recorded id)        |
+| `/api/scan`       | POST         | body {"project": id, "llm": name}:    |
+|                   |              | start the scan agent; 200 started;    |
+|                   |              | 409 one already runs; 422 bad         |
+|                   |              | references; 500 spawn failure         |
+| `/api/scan/stop`  | POST         | ask the running scan to stop (force   |
+|                   |              | on a second call); 409 when none runs |
+| `/scan/mcp`       | POST         | the scan's write-back mcp surface     |
+|                   |              | (set_project_details,                 |
+|                   |              | add_context_item; works only while a  |
+|                   |              | scan runs)                            |
+| `/api/conversations` | GET/HEAD  | conversation metas (newest first, at  |
+|                   |              | most 256), running ones badged by     |
+|                   |              | state                                 |
+| `/api/conversations/{id}` | GET/HEAD | one conversation: meta + records   |
+|                   |              | array; 404 unknown/bad id             |
+| `/api/conversations/stream` | GET | `text/event-stream`; unnamed clock   |
+|                   |              | ticks plus a named `conv` event each  |
+|                   |              | time the store version moves          |
 | anything else     | GET/HEAD     | 404; other methods → 405 (with `Allow`)         |
 
 Request bodies: `Content-Length` only (≤ 256 KB); `Transfer-Encoding:
 chunked` and duplicate `Content-Length` are rejected (400/413).
 
 SSE event format (`retry` hint at stream start, `: ping` comment every
-15 s; `X-Accel-Buffering: no` for proxies):
+15 s; `X-Accel-Buffering: no` for proxies). `/api/time` and the clock
+ticks on every stream:
 
 ```
 data: {"unix":1790414077,"iso":"2026-09-26T09:14:37Z"}
+```
+
+The conversations stream adds named events (clients pick what they
+follow; unnamed ticks keep proxies from reaping the stream):
+
+```
+event: conv
+data: {"v":179041407712}
 ```
 
 Adding a static file = drop it anywhere under `web/` and rebuild; it is
@@ -516,6 +634,15 @@ served automatically with the right MIME type. Dotfiles are skipped.
   runner is assembly, not translation. Reference problems surface the
   same way missing project directories do: a live flag on GET and a
   refused save until fixed.
+- **Conversations as append-only jsonl**: a transcript is written once
+  (records.jsonl) and never rewritten; only the small meta.json jumps
+  (atomically) when a state changes. Reading is a plain file walk, so
+  past conversations need no in-memory state and survive restarts;
+  a restart sweep closes anything still marked running. Sub-agent
+  transcripts are reconstructed from the surfaces flower itself
+  carries — the runner's stdout records plus the researchers' own
+  calls on `/mcp` — instead of tapping the sub-processes, keeping the
+  capture inside the server it already owns.
 - **Mobile columns via CSS scroll-snap**: the deck is a grid on wide
   screens and a snap-scrolling carousel on narrow ones; touch swipes are
   native, mouse drags/arrows/dots are a few lines of JS on top.
@@ -527,6 +654,11 @@ served automatically with the right MIME type. Dotfiles are skipped.
 - A `tools/call` on `/mcp` fetches its web page synchronously in the
   event loop, so the whole server waits (capped at ~25 s). Fine for
   the runner's rare, serial calls; revisit if tools get chatty.
+- One scan at a time; sub-agent transcripts are reconstructed from
+  the runner's records and flower's own `/mcp` surface — the
+  researchers' internal thinking is not captured (it never reaches
+  flower). Record texts are capped at 8 KiB; at most 256 newest
+  conversations are listed, older directories stay on disk.
 - Access log goes to stderr, one line per request.
 - Linux-only for now (`epoll`, POSIX sockets). Windows later needs:
   `epoll` → `select`/IOCP, `winsock2` init + `closesocket`, and a
@@ -571,6 +703,19 @@ served automatically with the right MIME type. Dotfiles are skipped.
             glob language), prompt files under prompts/mcp/, and the
             builtin online_researcher and filesystem_researcher
             agents using them
+      - [x] project scan agent (part 4d): POST /api/scan runs the
+            project_scanner agent as an llmkit runner child that
+            orchestrates the two researchers as agent-as-tool
+            servers and writes the project's details/context back
+            through POST /scan/mcp; the editor only reports a
+            background scan and links to its conversation
+      - [x] conversation store + Conversations page: every llm
+            conversation recorded under conversations/{ID}/
+            (meta.json + append-only records.jsonl), sub-agents as
+            their own parent-linked conversations, the page listing
+            past and present ones with live transcripts over a
+            named-event SSE channel, restart sweep closing
+            interrupted ones
       - [ ] drive `llmkit runner` conversations from a task (renders
             the selected agent's prompt with the project's context)
 - [ ] idle connection timeouts
