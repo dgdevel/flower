@@ -1399,13 +1399,18 @@ fail:
 
 /* the tools record's server list: the agent's mcp servers, with
  * urls of the form "/mcp" (this flower instance) resolved against
- * base_url; absolute urls pass through verbatim. An empty array
- * when the agent has no servers (the caller may append its own). */
-cJSON *agents_tools_record(const agent_t *a, const char *base_url)
+ * base_url; absolute urls pass through verbatim. A positive
+ * project_seq scopes a "/mcp" url to that project's surface,
+ * {base}/projects/{seq}/mcp — its fs tools are grounded in the
+ * project's working directory. An empty array when the agent has
+ * no servers (the caller may append its own). */
+cJSON *agents_tools_record(const agent_t *a, const char *base_url,
+                           long long project_seq)
 {
     cJSON *arr = cJSON_CreateArray();
     if (!arr) return NULL;
     if (!a) return arr;
+    char scoped[CFG_URL_MAX + 48];
     for (size_t i = 0; i < a->tool_count; i++) {
         const agent_tool_t *t = &a->tools[i];
         cJSON *one = cJSON_CreateObject();
@@ -1417,15 +1422,20 @@ cJSON *agents_tools_record(const agent_t *a, const char *base_url)
             if (!cJSON_AddStringToObject(one, "command_line", t->command_line))
                 goto fail;
         } else {
+            const char *url = t->url;
             if (t->url[0] == '/') { /* "/mcp": this flower instance */
-                char url[CFG_URL_MAX + 32];
-                if (snprintf(url, sizeof url, "%s%s", base_url, t->url) >=
-                        (int)sizeof url)
-                    goto fail;
-                if (!cJSON_AddStringToObject(one, "url", url)) goto fail;
-            } else if (!cJSON_AddStringToObject(one, "url", t->url)) {
-                goto fail;
+                int n;
+                if (project_seq > 0 && strcmp(t->url, "/mcp") == 0)
+                    n = snprintf(scoped, sizeof scoped,
+                                 "%s/projects/%lld/mcp", base_url,
+                                 project_seq);
+                else
+                    n = snprintf(scoped, sizeof scoped, "%s%s",
+                                 base_url, t->url);
+                if (n < 0 || n >= (int)sizeof scoped) goto fail;
+                url = scoped;
             }
+            if (!cJSON_AddStringToObject(one, "url", url)) goto fail;
             cJSON *h = headers_to_cjson(t->headers, t->header_count);
             if (h) cJSON_AddItemToObject(one, "headers", h);
         }

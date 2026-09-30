@@ -60,16 +60,34 @@ def base_url(recs):
     return os.environ.get("FLOWER_URL", "http://127.0.0.1:8199")
 
 
-def project_path(recs):
-    """the scanned project's directory, from the user record."""
+def project_name(recs):
+    """the scanned project's title, from the user record."""
     for r in recs:
         if r.get("type") != "user":
             continue
         for block in r.get("content", []):
-            m = re.search(r'at (\S+) now', block.get("text", ""))
+            m = re.search(r'Scan the project "(.*?)" now',
+                          block.get("text", ""))
             if m:
                 return m.group(1)
-    return "/etc"
+    return None
+
+
+def project_mcp(base, recs):
+    """the project's own mcp surface: the researchers' fs tools are
+    grounded in the project directory there (relative paths), so the
+    fake looks the project up by title and uses its /projects/{seq}/mcp
+    url — exactly what the real researcher seeds carry."""
+    name = project_name(recs)
+    try:
+        req = urllib.request.Request(base + "/api/projects")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            for p in json.loads(r.read()):
+                if name is None or p.get("title") == name:
+                    return "/projects/%d/mcp" % p["seq"]
+    except Exception as exc:
+        sys.stderr.write("fakellmkit: api/projects failed: %s\n" % exc)
+    return "/mcp"  # fallback: the server-wide surface
 
 
 def emit(rec):
@@ -90,7 +108,7 @@ def rpc(base, path, method, params):
 def main():
     recs = read_records()
     base = base_url(recs)
-    proj = project_path(recs)
+    surface = project_mcp(base, recs)
 
     emit({"type": "thinking", "text": "Planning the scan", "partial": True})
     time.sleep(STEP)
@@ -101,13 +119,14 @@ def main():
     time.sleep(STEP)
 
     # one researcher round: the invoke opens a sub-conversation; the
-    # researcher's own read_file (below) is folded into it
+    # researcher's own read_file (below, project-relative) is folded
+    # into it
     emit({"type": "tool_request", "tool": "filesystem_researcher.invoke",
           "arguments": {"input": "Find the build files and entry points."}})
     time.sleep(STEP)
     try:
-        rpc(base, "/mcp", "tools/call",
-            {"name": "read_file", "arguments": {"path": proj + "/README.md"}})
+        rpc(base, surface, "tools/call",
+            {"name": "read_file", "arguments": {"path": "README.md"}})
     except Exception as exc:  # the show goes on; tests assert the text
         sys.stderr.write("fakellmkit: read_file failed: %s\n" % exc)
     time.sleep(STEP)

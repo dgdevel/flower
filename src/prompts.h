@@ -26,7 +26,11 @@ char *prompt_text(const char *name);
 /*
  * Render {{variable}} templates. Known variables (a NULL project
  * renders them as empty strings):
- *   {{project_path}}        the project's working directory
+ *   {{project_path}}        the project's working directory —
+ *                           available, but unused by the shipped
+ *                           prompts: the fs tools are project-
+ *                           relative, so disclosing where the
+ *                           project lives is unnecessary
  *   {{project_name}}        the project's title
  *   {{project_attributes}}  its detail fields, "Field: text" per line
  *                           (empty fields omitted; multi-line fields

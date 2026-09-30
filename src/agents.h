@@ -214,8 +214,12 @@ cJSON *agents_llm_record(const agent_t *a, const llm_t *l);
 /* The runner's tools record (a cJSON array of mcp servers): the
  * agent's tools with urls of the form "/mcp" resolved against
  * base_url ("http://127.0.0.1:port"); absolute urls pass verbatim.
- * Empty array when the agent has no servers — the caller may append
- * its own entries before handing the array to the runner. */
-cJSON *agents_tools_record(const agent_t *a, const char *base_url);
+ * A project_seq > 0 scopes "/mcp" to that project's surface,
+ * {base}/projects/{seq}/mcp — the fs tools then work inside the
+ * project's directory. Empty array when the agent has no servers —
+ * the caller may append its own entries before handing the array
+ * to the runner. */
+cJSON *agents_tools_record(const agent_t *a, const char *base_url,
+                           long long project_seq);
 
 #endif

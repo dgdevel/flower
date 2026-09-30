@@ -44,6 +44,6 @@ How you work:
 
 Never invent a fact. When a researcher's answer contradicts the
 current details, trust the files and say so.
-Project: {{project_name}} at {{project_path}}
+Project: {{project_name}}
 {{project_attributes}}
 {{project_context}}

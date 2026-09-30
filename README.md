@@ -120,6 +120,7 @@ same lenient/strict contract, one file per concern:
 [
   {
     "id":   "9f2c4a1b0d7e6358",
+    "seq":  1,
     "dir":   "/home/dev/flower",
     "title": "flower",
     "color": "#58a6ff",
@@ -140,7 +141,11 @@ same lenient/strict contract, one file per concern:
 A project's identity is its `dir` (unique, must be an absolute path)
 plus a server-assigned `id` (16 hex chars, unique, stable across
 saves; a PUT may omit it — e.g. for a new project — and the server
-generates one, migrating files that predate ids on load). `title`
+generates one, migrating files that predate ids on load) and a
+server-assigned `seq` — a small sequential number (1, 2, …), unique
+among the current list and stable across saves, that scopes the
+per-project urls: a project's own mcp surface lives at
+`/projects/{seq}/mcp`. `title`
 defaults to the directory's basename when empty, `color` to a
 cycling palette and `emoji` to 🌸. Colors are `#rrggbb`, emoji/titles
 are valid UTF-8 without control characters (≤ 31 / 96 bytes), at most
@@ -262,7 +267,10 @@ They support a small `{{variable}}` template language
 prompt when the runner lands:
 
 ```
-{{project_path}}        the project's working directory
+{{project_path}}        the project's working directory (available,
+                        but unused by the shipped prompts — the fs
+                        tools are project-relative, so the prompts
+                        do not disclose it)
 {{project_name}}        the project's title
 {{project_attributes}}  its detail fields, "Field: text" per line
 {{project_context}}     its typed context items, "- [type] text" per line
@@ -292,18 +300,28 @@ subset over the streamable-http transport with plain json replies
   file or directory), `*.*` (any extension), `*.ext` (one
   extension), and each of those with the recursive `**` prefix to
   walk subdirectories (directories carry a trailing `/`, entries
-  sorted, symlinked directories never entered). The fs tools see
-  the machine as flower's own user does — absolute paths are the
-  reliable form.
+  sorted, symlinked directories never entered).
 - **`grep`** — the contents of the files a filepath glob selects,
   searched line by line for a POSIX extended regular expression
-  (the `grep -E` flavor, case-sensitive): `/dir/*.c` (the `.c`
-  files directly in `/dir`), `/dir/**/*.c` (every subdirectory
-  too), `/dir/one.c` (one file), `/dir` (everything under it).
+  (the `grep -E` flavor, case-sensitive): `dir/*.c` (the `.c`
+  files directly in `dir`), `dir/**/*.c` (every subdirectory
+  too), `dir/one.c` (one file), `dir` (everything under it).
   Matches return as `path:line:text`, sorted; binary and over-8
   MiB files are skipped, long lines cut, the reply capped at 200
   matches and closed with a `[N matches in K of M files]` tally
   (`no files match …` when the glob selects nothing).
+
+The fs tools resolve paths per surface. On the bare `/mcp` they see
+the machine as flower's own user does — absolute paths are the
+reliable form. A **project surface** — `POST /projects/{seq}/mcp`,
+same tool table — is grounded in that project's working directory:
+paths are relative to it (`.` is the project root, `src/main.c` a
+file in it, `..` may not climb out — checked after lexical
+normalization, so `src/../x` works while `../x` is refused), and
+replies and errors speak project-relative paths, so the surface
+never discloses where the project actually lives. Registering
+`{"type":"http","name":"flower","url":"http://host:port/projects/1/mcp"}`
+gives a model (or the mcp inspector) a project-scoped toolset.
 
 Any mcp client can use them — the llmkit runner included — by
 registering `{"type":"http","name":"flower","url":"http://host:port/mcp"}`
@@ -383,7 +401,11 @@ from seed files under `{config}/scan/`, and writes its findings back
 through flower's second mcp surface, `POST /scan/mcp`
 (`set_project_details`, `add_context_item` — they apply to the
 scanned project and save immediately; the editor picks the writes up
-as they land). One scan runs at a time; `POST /api/scan/stop` asks
+as they land). The researchers' seeds point their tool server at the
+scanned project's own surface, `/projects/{seq}/mcp`, so they work
+in project-relative paths ("." is the project root); the prompts no
+longer mention the project's absolute location, and neither do the
+tool replies. One scan runs at a time; `POST /api/scan/stop` asks
 it to stop (a second call forces it). The editor does not host the
 chat anymore — it only says that a scan is running in the
 background and links to the conversation.
@@ -544,6 +566,10 @@ tests/e2e/            playwright browser tests (firefox; config in
 | `/mcp`            | POST         | flower's own mcp server (see above):         |
 |                   |              | initialize/tools/list/tools/call json-rpc;   |
 |                   |              | notifications 202; parse error -32700        |
+| `/projects/{seq}/mcp` | POST     | the same research tools scoped to one       |
+|                   |              | project: fs paths relative to its working   |
+|                   |              | directory (jailed, project-relative replies);|
+|                   |              | 404 unknown seq                             |
 | `/api/tasks` | GET/HEAD  | task array (newest first) + live      |
 |                   |              | `project_ok` flag per entry                    |
 | `/api/tasks` | PUT       | body: the whole array (see tasks/);   |
@@ -643,6 +669,12 @@ served automatically with the right MIME type. Dotfiles are skipped.
   carries — the runner's stdout records plus the researchers' own
   calls on `/mcp` — instead of tapping the sub-processes, keeping the
   capture inside the server it already owns.
+- **Project context through the url, not the prompt**: a project's
+  mcp surface (`/projects/{seq}/mcp`) grounds the fs tools in its
+  working directory, so the tools are context-aware without the
+  prompt disclosing anything — relative paths in, project-relative
+  paths out, `..` jailed. One url answers "whose files am I
+  touching", for flower's own agents and outside mcp clients alike.
 - **Mobile columns via CSS scroll-snap**: the deck is a grid on wide
   screens and a snap-scrolling carousel on narrow ones; touch swipes are
   native, mouse drags/arrows/dots are a few lines of JS on top.
@@ -716,6 +748,11 @@ served automatically with the right MIME type. Dotfiles are skipped.
             past and present ones with live transcripts over a
             named-event SSE channel, restart sweep closing
             interrupted ones
+      - [x] per-project mcp surfaces: a sequential `seq` per project
+            and /projects/{seq}/mcp — the fs tools grounded in the
+            project's working directory (relative paths, jailed,
+            project-relative replies, no absolute path disclosed);
+            the scan researchers work in project-relative paths
       - [ ] drive `llmkit runner` conversations from a task (renders
             the selected agent's prompt with the project's context)
 - [ ] idle connection timeouts

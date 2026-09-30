@@ -32,6 +32,9 @@
 
 typedef struct {
     char id[PROJECT_ID_LEN + 1]; /* server-assigned, stable identity */
+    long long seq; /* short sequential identity for urls (the
+                    * per-project mcp lives at /projects/{seq}/mcp);
+                    * assigned like the id, unique in the list */
     char dir[PROJECT_DIR_MAX];
     char title[PROJECT_TITLE_MAX];
     char color[16];
@@ -66,6 +69,9 @@ void projects_clear(projects_t *p);
 
 /* Lookup by id: index, or -1. */
 int projects_find_id(const projects_t *p, const char *id);
+
+/* Lookup by the sequential identity: index, or -1. */
+int projects_find_seq(const projects_t *p, long long seq);
 
 /* Strict parse+validate a full project array (PUT body). On failure
  * fills err_field (e.g. "projects[1].color", "" for whole-document

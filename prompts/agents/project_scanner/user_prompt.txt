@@ -1,1 +1,1 @@
-Scan the project "{{project_name}}" at {{project_path}} now: use the filesystem researcher to explore the directory, write the four detail fields, add the context items worth keeping, and go online only if the files leave something important unexplained.
+Scan the project "{{project_name}}" now: use the filesystem researcher to explore the directory, write the four detail fields, add the context items worth keeping, and go online only if the files leave something important unexplained.

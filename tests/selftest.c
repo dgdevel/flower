@@ -216,6 +216,22 @@ static void mkfile(const char *path, const char *content)
     fclose(f);
 }
 
+/* call an fs tool dispatcher with a one- or two-string argument
+ * object — the per-project surface tests go through the
+ * dispatchers, because that is where path resolution lives */
+static char *fs_tool_ss(char *(*fn)(const cJSON *, char *, size_t),
+                        const char *k1, const char *v1,
+                        const char *k2, const char *v2,
+                        char *err, size_t err_n)
+{
+    cJSON *a = cJSON_CreateObject();
+    cJSON_AddStringToObject(a, k1, v1);
+    if (k2) cJSON_AddStringToObject(a, k2, v2);
+    char *r = fn(a, err, err_n);
+    cJSON_Delete(a);
+    return r;
+}
+
 static void test_fs(void)
 {
     char root[] = "/tmp/flower-fstest-XXXXXX";
@@ -387,6 +403,69 @@ static void test_fs(void)
     r = fs_read_path(p, 1, 4, err, sizeof err); /* starts inside é */
     check(r && (unsigned char)r[0] != 0xa9,
           "fs: partial utf-8 skipped at the start");
+    free(r);
+
+    /* the per-project surface: relative paths under a root, a jail,
+     * project-relative replies (the mcp dispatchers resolve) */
+    fs_set_root(root);
+    check(fs_rooted(), "fs: root set");
+
+    r = fs_tool_ss(fs_tool_read_file, "path", "notes.txt",
+                   NULL, NULL, err, sizeof err);
+    check(r && strcmp(r, "one\ntwo\nthree\n") == 0,
+          "fs: rooted read takes relative paths");
+    free(r);
+    r = fs_tool_ss(fs_tool_read_file, "path", "./src/main.c",
+                   NULL, NULL, err, sizeof err);
+    check(r && strcmp(r, "int main(){}\n") == 0,
+          "fs: rooted read accepts a ./ prefix");
+    free(r);
+    r = fs_tool_ss(fs_tool_list_files, "path", ".", "glob", "**/*.c",
+                   err, sizeof err);
+    check_contains(r, "src/main.c\n", "fs: rooted listing is project-relative");
+    check(r && !strstr(r, root), "fs: rooted listing hides the root path");
+    free(r);
+    r = fs_tool_ss(fs_tool_grep, "glob", "**/*.c", "pattern", "main",
+                   err, sizeof err);
+    check_contains(r, "src/main.c:1:int main(){}",
+                   "fs: rooted grep is project-relative");
+    check(r && !strstr(r, root), "fs: rooted grep hides the root path");
+    free(r);
+    r = fs_tool_ss(fs_tool_grep, "glob", ".", "pattern", "deep",
+                   err, sizeof err);
+    check_contains(r, "src/deep/edge.c:1:deep",
+                   "fs: rooted grep takes . as the project root");
+    free(r);
+
+    r = fs_tool_ss(fs_tool_read_file, "path", "/etc/hostname",
+                   NULL, NULL, err, sizeof err);
+    check(!r && strstr(err, "relative to the project"),
+          "fs: rooted surface refuses absolute paths");
+    r = fs_tool_ss(fs_tool_read_file, "path", "../escape",
+                   NULL, NULL, err, sizeof err);
+    check(!r && strstr(err, "escapes the project directory"),
+          "fs: rooted surface refuses .. escapes");
+    r = fs_tool_ss(fs_tool_read_file, "path", "src/../notes.txt",
+                   NULL, NULL, err, sizeof err);
+    check(r && strcmp(r, "one\ntwo\nthree\n") == 0,
+          "fs: rooted .. inside the project is fine");
+    free(r);
+    r = fs_tool_ss(fs_tool_read_file, "path", "missing.txt",
+                   NULL, NULL, err, sizeof err);
+    check(!r && strstr(err, "missing.txt") && !strstr(err, root),
+          "fs: rooted errors stay project-relative");
+
+    fs_set_root(NULL);
+    check(!fs_rooted(), "fs: root cleared");
+    r = fs_tool_ss(fs_tool_read_file, "path", "notes.txt",
+                   NULL, NULL, err, sizeof err);
+    check(!r && strstr(err, "absolute"),
+          "fs: bare surface demands absolute paths");
+    snprintf(p, sizeof p, "%s/notes.txt", root);
+    r = fs_tool_ss(fs_tool_read_file, "path", p,
+                   NULL, NULL, err, sizeof err);
+    check(r && strcmp(r, "one\ntwo\nthree\n") == 0,
+          "fs: bare surface keeps absolute paths");
     free(r);
 
     /* cleanup */

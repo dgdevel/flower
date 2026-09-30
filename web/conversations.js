@@ -260,22 +260,33 @@ function renderDetail() {
 
 /* ---------- live updates ---------- */
 
-let refreshing = false;
+/* one refresh at a time; callers that land mid-refresh await the run
+ * already in flight — the boot's hash-open needs a list that was
+ * actually fetched, not a skipped call (the focus handler can beat
+ * the boot to the first refresh). A bump landing mid-refresh is not
+ * lost either: one trailing re-run. */
+let refreshRun = null;
 let refreshAgain = false;
-async function refresh() {
-  if (refreshing) { refreshAgain = true; return; } /* a bump that lands
-                           * mid-refetch is not lost: one trailing re-run */
-  refreshing = true;
-  try {
-    await loadList();
-    if (selId) await loadDetail(selId);
-  } finally {
-    refreshing = false;
-    if (refreshAgain) {
-      refreshAgain = false;
-      refresh();
-    }
+
+function refresh() {
+  if (refreshRun) {
+    refreshAgain = true;
+    return refreshRun;
   }
+  const run = (async () => {
+    try {
+      await loadList();
+      if (selId) await loadDetail(selId);
+    } finally {
+      refreshRun = null;
+      if (refreshAgain) {
+        refreshAgain = false;
+        refresh();
+      }
+    }
+  })();
+  refreshRun = run;
+  return run;
 }
 
 function watch() {

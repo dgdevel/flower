@@ -1,5 +1,7 @@
 /*
- * fs — local-filesystem tools for /mcp. See fs.h for the contract.
+ * fs — local-filesystem tools for the mcp surfaces. See fs.h for
+ * the contract; the root handling (per-project surfaces) lives at
+ * the bottom, around the tool dispatchers.
  */
 #define _POSIX_C_SOURCE 200809L /* getline */
 #define _DEFAULT_SOURCE /* DT_DIR & friends */
@@ -525,6 +527,125 @@ char *fs_grep(const char *glob, const char *pattern,
 
 /* ---------- mcp dispatchers ---------- */
 
+/* the per-project root: set (by the server, around one dispatch)
+ * for a project surface (POST /projects/{seq}/mcp), empty on the
+ * bare /mcp. Single-threaded like everything, so plain state. */
+#define ROOT_MAX 1024 /* holds PROJECT_DIR_MAX with room */
+static char g_root[ROOT_MAX];
+static size_t g_root_len;
+
+void fs_set_root(const char *dir)
+{
+    g_root[0] = '\0';
+    g_root_len = 0;
+    if (!dir || dir[0] != '/' || !dir[1]) return;
+    size_t n = strlen(dir);
+    while (n > 1 && dir[n - 1] == '/') n--; /* trailing slashes off */
+    if (n >= sizeof g_root) return;
+    memcpy(g_root, dir, n);
+    g_root[n] = '\0';
+    g_root_len = n;
+}
+
+int fs_rooted(void)
+{
+    return g_root_len != 0;
+}
+
+/* lexically normalized absolute path: "//" and "." collapsed, ".."
+ * popped (never past the leading "/"). malloc'd, or NULL. */
+static char *normalize_abs(const char *path)
+{
+    if (!path || path[0] != '/') return NULL;
+    size_t n = strlen(path);
+    char *out = malloc(n + 2);
+    if (!out) return NULL;
+    size_t w = 0;
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 0) continue;              /* empty component */
+        if (len == 1 && start[0] == '.') continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (w > 0 && out[w - 1] != '/') w--;
+            if (w > 0) w--;                  /* drop the popped component */
+            continue;
+        }
+        out[w++] = '/';
+        memcpy(out + w, start, len);
+        w += len;
+    }
+    if (w == 0) out[w++] = '/';
+    out[w] = '\0';
+    return out;
+}
+
+/* resolve one tool input (a path, or grep's glob) for the current
+ * surface. Rooted: it must be relative and lands under the project
+ * root — "." is the project itself, ".." may not climb out. Bare
+ * /mcp: it must be absolute, as before. malloc'd, or NULL + err. */
+static char *resolve_input(const char *in, char *err, size_t err_n)
+{
+    if (!in || !in[0]) {
+        snprintf(err, err_n, "missing required string argument");
+        return NULL;
+    }
+    if (!g_root_len) {
+        if (in[0] != '/') {
+            snprintf(err, err_n,
+                     "paths on this surface must be absolute");
+            return NULL;
+        }
+        return normalize_abs(in);
+    }
+    if (in[0] == '/') {
+        snprintf(err, err_n,
+                 "paths here are relative to the project directory — "
+                 "drop the leading slash");
+        return NULL;
+    }
+    char *joined = malloc(g_root_len + strlen(in) + 2);
+    if (!joined) {
+        snprintf(err, err_n, "out of memory");
+        return NULL;
+    }
+    sprintf(joined, "%s/%s", g_root, in);
+    char *norm = normalize_abs(joined);
+    free(joined);
+    if (!norm) {
+        snprintf(err, err_n, "out of memory");
+        return NULL;
+    }
+    if (strncmp(norm, g_root, g_root_len) != 0 ||
+        (norm[g_root_len] != '\0' && norm[g_root_len] != '/')) {
+        free(norm);
+        snprintf(err, err_n, "path escapes the project directory");
+        return NULL;
+    }
+    return norm;
+}
+
+/* strip the "{root}/" prefix wherever it occurs in text: replies
+ * and errors speak project-relative paths, so the surface never
+ * discloses where the project lives. File contents are left alone. */
+static void unroot_text(char *text)
+{
+    if (!g_root_len || !text) return;
+    char prefix[ROOT_MAX + 1];
+    memcpy(prefix, g_root, g_root_len);
+    prefix[g_root_len] = '/';
+    prefix[g_root_len + 1] = '\0';
+    size_t plen = g_root_len + 1;
+    char *p = text;
+    while ((p = strstr(p, prefix)) != NULL) {
+        size_t rest = strlen(p + plen);
+        memmove(p, p + plen, rest + 1);
+    }
+}
+
 static int arg_number(const cJSON *args, const char *name, long long *out)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(args, name);
@@ -562,7 +683,12 @@ char *fs_tool_read_file(const cJSON *args, char *err, size_t err_n)
         return NULL;
     }
     if (r > 0) length = v;
-    return fs_read_path(p->valuestring, offset, length, err, err_n);
+    char *path = resolve_input(p->valuestring, err, err_n);
+    if (!path) return NULL;
+    char *out = fs_read_path(path, offset, length, err, err_n);
+    free(path);
+    if (!out) unroot_text(err); /* errors speak the display path */
+    return out;                 /* the content itself stays verbatim */
 }
 
 char *fs_tool_list_files(const cJSON *args, char *err, size_t err_n)
@@ -577,7 +703,13 @@ char *fs_tool_list_files(const cJSON *args, char *err, size_t err_n)
         snprintf(err, err_n, "missing required string argument 'glob'");
         return NULL;
     }
-    return fs_glob(p->valuestring, g->valuestring, err, err_n);
+    char *dir = resolve_input(p->valuestring, err, err_n);
+    if (!dir) return NULL;
+    char *out = fs_glob(dir, g->valuestring, err, err_n);
+    free(dir);
+    if (out) unroot_text(out); /* entries are project-relative */
+    else unroot_text(err);
+    return out;
 }
 
 char *fs_tool_grep(const cJSON *args, char *err, size_t err_n)
@@ -592,5 +724,11 @@ char *fs_tool_grep(const cJSON *args, char *err, size_t err_n)
         snprintf(err, err_n, "missing required string argument 'pattern'");
         return NULL;
     }
-    return fs_grep(g->valuestring, pj->valuestring, err, err_n);
+    char *glob = resolve_input(g->valuestring, err, err_n);
+    if (!glob) return NULL;
+    char *out = fs_grep(glob, pj->valuestring, err, err_n);
+    free(glob);
+    if (out) unroot_text(out); /* "path:line:text" stays relative */
+    else unroot_text(err);
+    return out;
 }

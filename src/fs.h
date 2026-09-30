@@ -2,14 +2,22 @@
 #define FLOWER_FS_H
 
 /*
- * fs — the local-filesystem tools behind /mcp: read a slice of a
- * file, list a directory through a small glob language
+ * fs — the local-filesystem tools behind the mcp surfaces: read a
+ * slice of a file, list a directory through a small glob language
  * (`*`, `*.*`, `*.ext` — each also with the recursive `**` prefix
  * to walk subdirectories), and grep the contents of the files a
- * filepath glob selects. Paths are resolved like the flower
- * process sees them — absolute paths are the reliable form (agents
- * get the project directory injected into their prompt); access is
- * whatever the server's own user may do.
+ * filepath glob selects.
+ *
+ * Two surfaces share these tools. The bare /mcp is server-wide:
+ * paths resolve like the flower process sees them — absolute paths
+ * are the reliable form. A project surface (POST
+ * /projects/{seq}/mcp) is grounded in the project's working
+ * directory by fs_set_root(): paths are relative to it ("." is the
+ * project itself, ".." may not climb out — the jail is checked
+ * after lexical normalization) and replies and errors speak
+ * project-relative paths, so the surface does not disclose where
+ * the project lives. Access is whatever the server's own user may
+ * do.
  */
 
 #include <cJSON.h>
@@ -49,9 +57,22 @@ char *fs_grep(const char *glob, const char *pattern,
 
 /* mcp tools/call dispatchers (the argument names match the schema):
  * read_file {path, offset?, length?}, list_files {path, glob},
- * grep {glob, pattern}. Same return contract as the web tools. */
+ * grep {glob, pattern}. Same return contract as the web tools.
+ * Path arguments are resolved against the surface root set by
+ * fs_set_root() — see above. */
 char *fs_tool_read_file(const cJSON *args, char *err, size_t err_n);
 char *fs_tool_list_files(const cJSON *args, char *err, size_t err_n);
 char *fs_tool_grep(const cJSON *args, char *err, size_t err_n);
+
+/* Ground the tool dispatchers in `dir` (a project's working
+ * directory): relative paths resolve under it and may not escape,
+ * replies and errors come back project-relative. NULL (or an empty
+ * string) restores the server-wide behavior — absolute paths only.
+ * The server sets this around one tools/call dispatch; being
+ * single-threaded is the locking. */
+void fs_set_root(const char *dir);
+
+/* is a root currently set? */
+int fs_rooted(void);
 
 #endif

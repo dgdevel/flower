@@ -1,5 +1,7 @@
-Which files to search: a directory path plus the list_files glob
-language. /dir/*.c — the .c files directly in /dir; /dir/**/*.c —
-the same in every subdirectory; /dir/**/* — every file under
-/dir; /dir/file.txt — one file; /dir — every file under /dir,
-recursively. The pattern part must be one path component.
+Which files to search: a directory plus the list_files glob
+language. *.c — the .c files directly in that directory; **/*.c —
+the same in every subdirectory; file.txt — one file; a bare
+directory — every file under it, recursively. The directory is
+relative to the project root on a project surface, absolute on
+the server-wide surface. The pattern part must be one path
+component.

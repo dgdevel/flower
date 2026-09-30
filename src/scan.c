@@ -501,7 +501,10 @@ static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
     rc |= put_record(&b, rec); cJSON_Delete(rec);
 
     rec = cJSON_CreateObject();
-    cJSON *servers = agents_tools_record(researcher, S.base_url);
+    /* the researcher's tools: flower's mcp scoped to the scanned
+     * project — the fs tools see its directory as their root */
+    cJSON *servers = agents_tools_record(researcher, S.base_url,
+                                         proj->seq);
     if (rec && servers && cJSON_AddStringToObject(rec, "type", "tools"))
         cJSON_AddItemToObject(rec, "tools", servers);
     else cJSON_Delete(servers);
@@ -606,7 +609,7 @@ static char *build_runner_input(const agent_t *scanner, const llm_t *llm,
 
     /* tools: the scanner's own (flower /scan/mcp) + the researchers */
     rec = cJSON_CreateObject();
-    cJSON *servers = agents_tools_record(scanner, S.base_url);
+    cJSON *servers = agents_tools_record(scanner, S.base_url, 0);
     if (!rec || !servers ||
         !cJSON_AddStringToObject(rec, "type", "tools")) {
         cJSON_Delete(servers);

@@ -828,6 +828,7 @@ async function saveNow() {
       for (const f of ALL_FIELDS)
         if (lp && sp[f] !== lp[f] && cur[f] === lp[f]) merged[f] = sp[f];
       if (!merged.id && sp.id) merged.id = sp.id; // server-generated
+      if (!merged.seq && sp.seq) merged.seq = sp.seq; // ditto the seq
       merged.exists = true; // saved == verified on disk
       return merged;
     });

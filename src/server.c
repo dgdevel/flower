@@ -15,6 +15,7 @@
 #include "agents.h"
 #include "conv.h"
 #include "tasks.h"
+#include "fs.h"
 #include "mcp.h"
 #include "scan.h"
 
@@ -436,6 +437,26 @@ static void handle_tasks_put(server_t *s, conn_t *c, http_request_t *req,
 
 /* ---------- the project scan agent ---------- */
 
+/* "/projects/{digits}/mcp" — a project's own research surface: the
+ * same tool table as /mcp, but the fs tools are grounded in the
+ * project's working directory (relative paths, jail-checked).
+ * Fills *seq and returns 1 when path has exactly this shape. */
+static int project_mcp_seq(const char *path, long long *seq)
+{
+    if (strncmp(path, "/projects/", 10) != 0) return 0;
+    const char *p = path + 10;
+    if (!(*p >= '0' && *p <= '9')) return 0;
+    long long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        if (v > 1000000000) return 0; /* not a sane seq */
+        p++;
+    }
+    if (strcmp(p, "/mcp") != 0) return 0;
+    *seq = v;
+    return 1;
+}
+
 /* POST /api/scan {"project": id, "llm": name} — spawn the llmkit
  * runner for the project_scanner agent. The reply is immediate;
  * progress arrives through GET /api/scan (the client polls). */
@@ -577,7 +598,8 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
                 free(j);
             }
         } else if (strcmp(path, "/mcp") == 0 ||
-                   strcmp(path, "/scan/mcp") == 0) {
+                   strcmp(path, "/scan/mcp") == 0 ||
+                   project_mcp_seq(path, &(long long){ 0 })) {
             status = 405;
             respond(s, c, 405, "text/plain; charset=utf-8",
                     "method not allowed\n", 19, false, false,
@@ -644,6 +666,30 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         } else {
             respond_json(s, c, 200, j, req->keep_alive);
             free(j);
+        }
+    } else if (post && project_mcp_seq(path, &(long long){ 0 })) {
+        /* the same research table, scoped to one project: the fs
+         * tools are grounded in its working directory for this
+         * dispatch (relative paths in, project-relative paths out) */
+        long long seq = 0;
+        project_mcp_seq(path, &seq);
+        int pi = projects_find_seq(&s->projects, seq);
+        if (pi < 0) {
+            status = 404;
+            respond(s, c, 404, "text/plain; charset=utf-8",
+                    "not found\n", 10, req->keep_alive, false, NULL);
+        } else {
+            fs_set_root(s->projects.items[pi].dir);
+            int note = 0;
+            char *j = mcp_handle_post(&MCP_RESEARCH, body, body_len, &note);
+            fs_set_root(NULL);
+            if (!j) {
+                status = 202;
+                respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
+            } else {
+                respond_json(s, c, 200, j, req->keep_alive);
+                free(j);
+            }
         }
     } else if (strcmp(path, "/api/theme") == 0 ||
                strcmp(path, "/api/projects") == 0 ||

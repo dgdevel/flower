@@ -72,6 +72,22 @@ static int id_used(const projects_t *p, size_t upto, const char *id)
     return 0;
 }
 
+static int seq_used(const projects_t *p, size_t upto, long long seq)
+{
+    for (size_t i = 0; i < upto; i++)
+        if (p->items[i].seq == seq) return 1;
+    return 0;
+}
+
+/* the next free sequential identity in the list being built */
+static long long next_seq(const projects_t *p, size_t upto)
+{
+    long long max = 0;
+    for (size_t i = 0; i < upto; i++)
+        if (p->items[i].seq > max) max = p->items[i].seq;
+    return max + 1;
+}
+
 /* ---------- entry parsing (shared by load & PUT) ---------- */
 
 /* the free-text detail fields: json key + offset into project_t */
@@ -88,9 +104,9 @@ static const struct { const char *key; size_t off; } DETAIL_FIELDS[] = {
  * problem into err_field/err_msg; lenient mode (load) repairs missing
  * or broken values with defaults and only fails on an unusable dir.
  * `index` selects the fallback palette color; `seen` is the list being
- * built (ids are generated to avoid the ids already in it); *gen_id
- * (nullable) reports that an id had to be generated. Returns 0 on
- * success.
+ * built (ids and seqs are generated to avoid the ones already in it);
+ * *gen_id (nullable) reports that an id or seq had to be generated.
+ * Returns 0 on success.
  */
 static int parse_entry(const cJSON *obj, size_t index, project_t *out,
                        const projects_t *seen, int strict, int *gen_id,
@@ -115,6 +131,32 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     } else {
         do gen_hex_id(out->id, PROJECT_ID_LEN);
         while (seen && id_used(seen, seen->count, out->id));
+        if (gen_id) *gen_id = 1;
+    }
+
+    /* the sequential identity: optional on the wire (the client
+     * echoes it back once assigned), never rewritten, assigned to
+     * whatever is new. It is what the per-project urls are built
+     * from — /projects/{seq}/mcp. */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "seq");
+    if (cJSON_IsNumber(j) && j->valuedouble == (long long)j->valuedouble &&
+        (long long)j->valuedouble > 0) {
+        out->seq = (long long)j->valuedouble;
+        if (seen && seq_used(seen, seen->count, out->seq)) {
+            if (strict) {
+                snprintf(err_field, err_field_n, "projects[%zu].seq", index);
+                snprintf(err_msg, err_msg_n, "duplicate seq");
+                return -1;
+            }
+            out->seq = next_seq(seen, seen->count);
+            if (gen_id) *gen_id = 1;
+        }
+    } else if (j && strict) {
+        snprintf(err_field, err_field_n, "projects[%zu].seq", index);
+        snprintf(err_msg, err_msg_n, "must be a positive number");
+        return -1;
+    } else {
+        out->seq = seen ? next_seq(seen, seen->count) : 1;
         if (gen_id) *gen_id = 1;
     }
 
@@ -227,6 +269,7 @@ static int parse_entry(const cJSON *obj, size_t index, project_t *out,
     if (strict) { /* unknown keys are typos -> reject (like theme.c) */
         cJSON_ArrayForEach(j, obj) {
             int known = j->string && (strcmp(j->string, "id") == 0 ||
+                strcmp(j->string, "seq") == 0 ||
                 strcmp(j->string, "dir") == 0 ||
                 strcmp(j->string, "title") == 0 ||
                 strcmp(j->string, "color") == 0 ||
@@ -327,6 +370,14 @@ int projects_find_id(const projects_t *p, const char *id)
     return -1;
 }
 
+/* seq lookup: index, or -1 (the per-project mcp urls use it) */
+int projects_find_seq(const projects_t *p, long long seq)
+{
+    for (size_t i = 0; i < p->count; i++)
+        if (p->items[i].seq == seq) return (int)i;
+    return -1;
+}
+
 void projects_clear(projects_t *p)
 {
     for (size_t i = 0; i < p->count; i++)
@@ -345,6 +396,7 @@ int projects_save(const projects_t *p)
             cJSON *o = cJSON_CreateObject();
             if (!o ||
                 !cJSON_AddStringToObject(o, "id", p->items[i].id) ||
+                !cJSON_AddNumberToObject(o, "seq", (double)p->items[i].seq) ||
                 !cJSON_AddStringToObject(o, "dir", p->items[i].dir) ||
                 !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
                 !cJSON_AddStringToObject(o, "color", p->items[i].color) ||
@@ -465,6 +517,7 @@ char *projects_to_json(const projects_t *p, int with_exists)
         cJSON *o = cJSON_CreateObject();
         if (!o ||
             !cJSON_AddStringToObject(o, "id", p->items[i].id) ||
+            !cJSON_AddNumberToObject(o, "seq", (double)p->items[i].seq) ||
             !cJSON_AddStringToObject(o, "dir", p->items[i].dir) ||
             !cJSON_AddStringToObject(o, "title", p->items[i].title) ||
             !cJSON_AddStringToObject(o, "color", p->items[i].color) ||

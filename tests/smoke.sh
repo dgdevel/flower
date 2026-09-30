@@ -103,8 +103,10 @@ for p in d:
     assert len(p["id"]) == 16, d                     # server-generated ids
     assert all(c in "0123456789abcdef" for c in p["id"]), d
 assert d[0]["id"] != d[1]["id"], d                   # unique
+assert [p["seq"] for p in d] == [1, 2], d            # sequential ids, in order
 ' || fail "projects did not get unique server-generated ids"
 grep -q '"id"' "$CFG/projects.json" || fail "project ids not persisted"
+grep -q '"seq"' "$CFG/projects.json" || fail "project seq not persisted"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"id\":\"zzz\",\"dir\":\"$CFG/alpha\"}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: malformed id: expected 422, got $code"
 [ -f "$CFG/projects.json" ] || fail "projects.json not written to config dir"
@@ -127,6 +129,7 @@ curl -s "$B/api/projects" | python3 -c '
 import json, sys
 p = json.load(sys.stdin)[0]
 assert p["description"] == "two lines\nof context", p   # survives GET (exists flag on)
+assert p["seq"] == 1, p        # seq assigned; the client echoes it back on PUTs
 ' || fail "GET /api/projects lost the detail fields"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"description\":\"$(printf 'x%.0s' $(seq 1 4200))\"}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: oversized description: expected 422, got $code"
@@ -135,6 +138,12 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/al
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"scope\":5}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: non-string detail field: expected 422, got $code"
 curl -s "$B/api/projects" | grep -q '"the bees"' || fail "rejected PUTs must not change stored details"
+# a seq echoed back is kept as-is (this PUT replaces the list; the
+# sections after bring their own projects)
+curl -s -X PUT --data "[{\"seq\":7,\"dir\":\"$CFG/alpha\"}]" "$B/api/projects" | python3 -c '
+import json, sys
+assert json.load(sys.stdin)[0]["seq"] == 7, "echoed seq"
+' || fail "an echoed seq must be kept as-is"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data 'not json' "$B/api/projects")
 [ "$code" = 400 ] || fail "projects: malformed JSON: expected 400, got $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '{"dir":"/x"}' "$B/api/projects")
@@ -149,6 +158,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG\",
 [ "$code" = 422 ] || fail "projects: bad color: expected 422, got $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG\",\"nonsense\":1}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: unknown key: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"seq\":1,\"dir\":\"$CFG/alpha\"},{\"seq\":1,\"dir\":\"$CFG\"}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: duplicate seq: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"seq\":0,\"dir\":\"$CFG/alpha\"}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: non-positive seq: expected 422, got $code"
 curl -s "$B/api/projects" | grep -q "$CFG/alpha" || fail "rejected PUTs must not change the stored projects"
 
 echo "== 6b. exists flag tracks the filesystem =="
@@ -536,6 +549,62 @@ assert d["error"]["code"] == -32700, d
 ' || fail "mcp: bad json should be -32700"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$B/mcp")
 [ "$code" = 405 ] || fail "mcp: GET should be 405, got $code"
+
+echo "== 6g2. per-project mcp surface (relative paths, jail) =="
+mkdir -p "$CFG/projroot/src/deep"
+printf 'project root readme\n' > "$CFG/projroot/README.md"
+printf 'int main(){}\n' > "$CFG/projroot/src/main.c"
+printf 'a deep edge\n' > "$CFG/projroot/src/deep/edge.c"
+printf 'outside the project\n' > "$CFG/outside.txt"
+curl -s -X PUT --data "[{\"dir\":\"$CFG/projroot\",\"title\":\"projroot\"}]" "$B/api/projects" >/dev/null
+SQ=$(curl -s "$B/api/projects" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert len(d) == 1 and d[0]["seq"] == 1, d
+print(d[0]["seq"])')
+prpc() { curl -s -X POST -H "Content-Type: application/json" --data "$1" "$B/projects/$SQ/mcp"; }
+prpc '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+names = {t["name"] for t in d["result"]["tools"]}
+assert names == {"web_search", "web_fetch", "read_file", "list_files", "grep"}, d
+' || fail "project mcp: tools/list shows the research set"
+prpc '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["content"][0]["text"] == "project root readme\n", d
+' || fail "project mcp: read_file takes relative paths"
+prpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_files","arguments":{"path":".","glob":"**/*"}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "README.md\n" in t and "src/main.c\n" in t and "src/deep/edge.c\n" in t, d
+assert "'"$CFG"'" not in t, d                # no absolute path leaks
+' || fail "project mcp: listing is project-relative"
+prpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"grep","arguments":{"glob":"**/*.c","pattern":"main|edge"}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "src/main.c:1:int main(){}" in t and "src/deep/edge.c:1:a deep edge" in t, d
+assert "'"$CFG"'" not in t, d
+' || fail "project mcp: grep is project-relative"
+prpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"../outside.txt"}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d
+assert "escapes" in d["result"]["content"][0]["text"], d
+assert "outside the project" not in d["result"]["content"][0]["text"], d
+' || fail "project mcp: .. may not escape the project"
+prpc '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/hostname"}}}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d
+assert "relative to the project" in d["result"]["content"][0]["text"], d
+' || fail "project mcp: absolute paths are refused"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{}' "$B/projects/999/mcp")
+[ "$code" = 404 ] || fail "project mcp: unknown project: expected 404, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/projects/$SQ/mcp")
+[ "$code" = 405 ] || fail "project mcp: GET should be 405, got $code"
 curl -s -X PUT --data '[]' "$B/api/projects" >/dev/null
 curl -s -X PUT --data '[]' "$B/api/tasks" >/dev/null
 

@@ -1,2 +1,3 @@
-Absolute path of the file to read. Relative paths resolve against
-the server's working directory — prefer absolute.
+Path of the file to read: relative to the project directory on a
+project surface ("." is the project root), absolute on the
+server-wide surface.
