@@ -19,9 +19,10 @@ actions** (nested without a depth limit, each with a title,
 description, state and refinement type) edited in column three;
 projects carry context items of the same shape. Part 4's web side
 has landed: flower offers its own **mcp server** at `POST /mcp`
-(`web_search`, `web_fetch`), builtin agents get their prompts from
-tweakable, template-capable **prompt files** under `prompts/`, and
-**`online_researcher`** (web) and **`filesystem_researcher`**
+(the filesystem tools), the web tools come from **llmkit itself**
+(`llmkit builtin-mcp`, ≥ 1.2.0), builtin agents get their prompts
+from tweakable, template-capable **prompt files** under `prompts/`,
+and **`online_researcher`** (web) and **`filesystem_researcher`**
 (local files — `read_file`, `list_files` with a small glob
 language, `grep` over file contents) are built on the tools and
 ship compiled in. The **project scan agent** drives the whole
@@ -47,9 +48,10 @@ Pages: `/` (main app — three columns, projects manager),
 (themed component gallery).
 
 Requires: Linux, a C11 compiler (`cc`), GNU make ≥ 4.3 (grouped targets),
-and **cJSON** (system package `libcjson`, discovered via pkg-config)
-and **libcurl** (package `libcurl`, also via pkg-config — it powers the
-web tools behind `/mcp`).
+**cJSON** (system package `libcjson`, discovered via pkg-config) and
+**llmkit ≥ 1.2.0** on `PATH` (or pointed at by `-l`/`$FLOWER_LLMKIT`)
+— it runs the scan conversations and ships the web tools
+(`llmkit builtin-mcp`).
 
 ## How it works
 
@@ -243,10 +245,12 @@ merged into
 never written to `agents/`, their names are reserved (PUT rejects a
 user agent taking one). Their system prompts are not C strings but
 compiled-in **prompt files** (see below), tweakable without touching
-code. `online_researcher` carries flower's own mcp server as its
-tool (`{"type":"http","name":"flower","url":"/mcp"}` — the url
+code. `filesystem_researcher` carries flower's own mcp server as
+its tool (`{"type":"http","name":"flower","url":"/mcp"}` — the url
 means "this flower instance" and is resolved when a task is handed
-to the runner). Tasks no longer reference agents or llms (see
+to the runner); `online_researcher`'s tool server is assembled at
+scan time instead (llmkit's builtin web tools behind an mcp-proxy
+config). Tasks no longer reference agents or llms (see
 below); the stores remain for the conversation runner later parts
 will add.
 
@@ -258,7 +262,10 @@ served over http):
 ```
 prompts/
   agents/<name>/system_prompt.txt        builtin agents' prompts
-  mcp/<tool>/description.txt             tool description (tools/list)
+  mcp/<tool>/description.txt             tool description (fs tools:
+                                        tools/list; web tools: the
+                                        mcp-proxy config src/scan.c
+                                        writes per scan)
   mcp/<tool>/arguments/<arg>.txt         per-argument hint
 ```
 
@@ -283,16 +290,9 @@ project renders the known variables as empty strings.
 subset over the streamable-http transport with plain json replies
 (revision `2025-11-25`, matching what llmkit's client speaks):
 `initialize`, `notifications/*` (answered `202`), `tools/list`,
-`tools/call`, `ping`. The tools are flower's own web readers
-(`src/web.c`, libcurl + `src/html.c`):
+`tools/call`, `ping`. The tools are flower's own filesystem
+readers (`src/fs.c`):
 
-- **`web_search`** — queries DuckDuckGo's html endpoint and returns
-  the top ten results as `Url: …` / `Description: title — snippet`
-  records.
-- **`web_fetch`** — fetches one page, picks its main content
-  (readability-lite: obvious boilerplate stripped, paragraph
-  containers scored) and returns it as markdown (headings, lists,
-  links, code fences survive).
 - **`read_file`** — a slice of a local file (`path`, optional
   `offset`/`length`, default and clamp 64 KiB, utf-8 boundaries
   kept whole, binary content refused).
@@ -311,6 +311,17 @@ subset over the streamable-http transport with plain json replies
   matches and closed with a `[N matches in K of M files]` tally
   (`no files match …` when the glob selects nothing).
 
+The **web tools** (`web_search` on DuckDuckGo, `web_fetch` with a
+readability-lite markdown reduction) used to live here; they are
+llmkit's own now — `llmkit builtin-mcp` (≥ 1.2.0) serves them on
+stdio. flower's researchers reach them through an `llmkit
+mcp-proxy` config written beside the scan seeds: a whitelist of
+exactly `web_search`/`web_fetch` (the file tools stay out —
+researchers are read-only), renamed and redescribed with flower's
+own prompt texts under `prompts/mcp/web_*/`, so the model still
+calls `flower.web_search(query)` and `flower.web_fetch(url)` and
+the texts stay tweakable without touching C.
+
 The fs tools resolve paths per surface. On the bare `/mcp` they see
 the machine as flower's own user does — absolute paths are the
 reliable form. A **project surface** — `POST /projects/{seq}/mcp`,
@@ -323,11 +334,10 @@ never discloses where the project actually lives. Registering
 `{"type":"http","name":"flower","url":"http://host:port/projects/1/mcp"}`
 gives a model (or the mcp inspector) a project-scoped toolset.
 
-Any mcp client can use them — the llmkit runner included — by
-registering `{"type":"http","name":"flower","url":"http://host:port/mcp"}`
-as a tool server; the model then sees `flower.web_search`,
-`flower.web_fetch`, `flower.read_file`, `flower.list_files` and
-`flower.grep`.
+Any mcp client can use the fs tools — the llmkit runner included —
+by registering `{"type":"http","name":"flower","url":"http://host:port/mcp"}`
+as a tool server; the model then sees `flower.read_file`,
+`flower.list_files` and `flower.grep`.
 
 `tasks/` — one directory per **task**, named by its
 server-generated 32-hex-char id, holding `task.json` with the
@@ -401,11 +411,16 @@ from seed files under `{config}/scan/`, and writes its findings back
 through flower's second mcp surface, `POST /scan/mcp`
 (`set_project_details`, `add_context_item` — they apply to the
 scanned project and save immediately; the editor picks the writes up
-as they land). The researchers' seeds point their tool server at the
-scanned project's own surface, `/projects/{seq}/mcp`, so they work
-in project-relative paths ("." is the project root); the prompts no
-longer mention the project's absolute location, and neither do the
-tool replies. One scan runs at a time; `POST /api/scan/stop` asks
+as they land). The filesystem researcher's seed points its tool
+server at the scanned project's own surface,
+`/projects/{seq}/mcp`, so it works in project-relative paths
+("." is the project root); the prompts no longer mention the
+project's absolute location, and neither do the tool replies. The
+online researcher's seed carries a stdio tool server instead:
+`llmkit mcp-proxy {config}/scan/web-tools.jsonl`, the curated view
+of `llmkit builtin-mcp`'s web tools described above — so its web
+calls run inside its own llmkit children, never reaching flower.
+One scan runs at a time; `POST /api/scan/stop` asks
 it to stop (a second call forces it). The editor does not host the
 chat anymore — it only says that a scan is running in the
 background and links to the conversation.
@@ -439,11 +454,13 @@ like every store.
 The scan's conversation graph: the scan itself is the **main**
 conversation (`Project scan — <title>`); every researcher invoke
 opens a **sub-conversation** carrying the scan's id in `parent` —
-its prompt as the opening `user` record, the researcher's own tool
-calls (arriving on flower's `/mcp` while the invoke runs; the
-researchers own disjoint tool sets, so calls attribute unambiguously)
-as `tool_call`/`tool_result` records, and the invoke's answer as its
-closing `response`. The runner's stdout records feed the main
+its prompt as the opening `user` record, the invoke's answer as
+its closing `response`, and — for the filesystem researcher, whose
+tool calls still arrive on flower's `/mcp` while the invoke runs —
+`tool_call`/`tool_result` records between them. The online
+researcher's web calls happen inside its own llmkit children and
+reach no flower surface, so its transcript holds the prompt and
+the answer only. The runner's stdout records feed the main
 transcript (thinking/response blocks — partials folded — and the
 scanner's own tool calls).
 
@@ -459,8 +476,8 @@ button while a scan runs.
 ## Repository layout
 
 ```
-Makefile              build: embed assets + prompts, compile (cJSON and
-                      libcurl via pkg-config), selftest, link
+Makefile              build: embed assets + prompts, compile (cJSON
+                      via pkg-config), selftest, link
 tools/embed.c         asset compiler: web/** and prompts/** -> C arrays
                       (deterministic, sorted, escaping-safe for any
                       binary content; second table under the "prompt" prefix)
@@ -492,13 +509,11 @@ src/conv.{c,h}       conversations/ backend: one directory per
                       records.jsonl), the store behind the
                       Conversations page
 src/scan.{c,h}       the project scan agent: researcher seeds, the
-                      llmkit runner child, the write-back tools
-                      (POST /scan/mcp) and the conversation capture
+                      web tools proxy config (llmkit builtin-mcp,
+                      curated via mcp-proxy), the llmkit runner
+                      child, the write-back tools (POST /scan/mcp)
+                      and the conversation capture
 src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
-src/html.{c,h}        tolerant html tokenizer/DOM, readability-lite and the
-                      markdown emitter (src/web.c's reading engine)
-src/web.{c,h}         outbound fetching (libcurl) + the web tools: ddg search
-                      record extraction, page-to-markdown
 src/fs.{c,h}          local-filesystem tools: read_file (offset/length
                       slices), list_files (the ** glob language) and
                       grep (a regex over the files a filepath glob
@@ -526,8 +541,8 @@ web/emoji.js          GENERATED by tools/emoji.py — the full Unicode emoji
                       list for the picker (v18.0, 3,963 emojis)
 web/style.css         styles driven entirely by theme variables
 tests/smoke.sh        end-to-end smoke tests (make check)
-tests/selftest.c      offline parser checks: ddg extraction, readability/
-                      markdown, prompt templating (fixtures in tests/fixtures)
+tests/selftest.c      offline checks: prompt templating, the fs tools
+                      (fixtures in tests/fixtures)
 tests/fakellmkit.py   a scripted llmkit runner stand-in: plays a scan
                       conversation (researcher round + write-back) so
                       the conversation pipeline is testable end to end
@@ -563,10 +578,11 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | deletes removed agents' files; 400 bad JSON;   |
 |                   |              | 422 invalid entry/unknown llm/duplicate or    |
 |                   |              | builtin-reserved name                          |
-| `/mcp`            | POST         | flower's own mcp server (see above):         |
-|                   |              | initialize/tools/list/tools/call json-rpc;   |
-|                   |              | notifications 202; parse error -32700        |
-| `/projects/{seq}/mcp` | POST     | the same research tools scoped to one       |
+| `/mcp`            | POST         | flower's own mcp server (see above): the   |
+|                   |              | fs research tools; initialize/tools/list/  |
+|                   |              | tools/call json-rpc; notifications 202;    |
+|                   |              | parse error -32700                        |
+| `/projects/{seq}/mcp` | POST     | the same fs tools scoped to one          |
 |                   |              | project: fs paths relative to its working   |
 |                   |              | directory (jailed, project-relative replies);|
 |                   |              | 404 unknown seq                             |
@@ -666,9 +682,23 @@ served automatically with the right MIME type. Dotfiles are skipped.
   past conversations need no in-memory state and survive restarts;
   a restart sweep closes anything still marked running. Sub-agent
   transcripts are reconstructed from the surfaces flower itself
-  carries — the runner's stdout records plus the researchers' own
-  calls on `/mcp` — instead of tapping the sub-processes, keeping the
-  capture inside the server it already owns.
+  carries — the runner's stdout records plus the filesystem
+  researcher's calls on `/mcp` — instead of tapping the
+  sub-processes, keeping the capture inside the server it already
+  owns.
+- **Web tools delegated to llmkit** (≥ 1.2.0): DuckDuckGo search and
+  page-to-markdown are exactly what `llmkit builtin-mcp` ships, so
+  flower no longer carries its own fetch/readability/markdown
+  pipeline (or the libcurl link). Curation stays flower's: an
+  `llmkit mcp-proxy` config grown per scan whitelists exactly
+  `web_search`/`web_fetch` (researchers stay read-only — the
+  builtin's file tools, `file_create` included, never pass) and
+  re-attaches flower's own prompt texts, so the model-facing
+  contract (`flower.web_search(query)`, `flower.web_fetch(url)`)
+  is unchanged. Trade-off: those calls run inside the researcher's
+  llmkit children, off flower's surfaces, so its transcript keeps
+  the prompt and the answer but not the web tool records — and
+  flower's own mcp surfaces serve the fs tools only.
 - **Project context through the url, not the prompt**: a project's
   mcp surface (`/projects/{seq}/mcp`) grounds the fs tools in its
   working directory, so the tools are context-aware without the
@@ -683,14 +713,20 @@ served automatically with the right MIME type. Dotfiles are skipped.
 
 - No TLS, no URL percent-decoding (exact path match only).
 - No idle keep-alive timeouts.
-- A `tools/call` on `/mcp` fetches its web page synchronously in the
-  event loop, so the whole server waits (capped at ~25 s). Fine for
-  the runner's rare, serial calls; revisit if tools get chatty.
+- A `tools/call` on `/mcp` runs its filesystem walk synchronously in
+  the event loop. Fine for the runner's rare, serial calls; revisit
+  if tools get chatty. (The web fetches moved into the researcher's
+  own llmkit children and no longer block flower's loop at all.)
 - One scan at a time; sub-agent transcripts are reconstructed from
   the runner's records and flower's own `/mcp` surface — the
   researchers' internal thinking is not captured (it never reaches
-  flower). Record texts are capped at 8 KiB; at most 256 newest
-  conversations are listed, older directories stay on disk.
+  flower), and the online researcher's web tool calls are not
+  either (they run inside its llmkit children). Record texts are
+  capped at 8 KiB; at most 256 newest conversations are listed,
+  older directories stay on disk.
+- Scans need llmkit ≥ 1.2.0 (`builtin-mcp`, `mcp-proxy`); with an
+  older binary the online researcher's tool server is required, so
+  its conversation fails loudly instead of silently losing tools.
 - Access log goes to stderr, one line per request.
 - Linux-only for now (`epoll`, POSIX sockets). Windows later needs:
   `epoll` → `select`/IOCP, `winsock2` init + `closesocket`, and a
@@ -729,12 +765,14 @@ served automatically with the right MIME type. Dotfiles are skipped.
             evaluation_method, rule — text + creation time), with
             editors in column one and column two
       - [x] custom-made mcp servers offered by flower itself —
-            POST /mcp (streamable-http json-rpc) with the web tools
-            web_search (DuckDuckGo html) and web_fetch (readability +
-            markdown) and the fs tools read_file/list_files/grep (the
-            glob language), prompt files under prompts/mcp/, and the
-            builtin online_researcher and filesystem_researcher
-            agents using them
+            POST /mcp (streamable-http json-rpc) with the fs tools
+            read_file/list_files/grep (the glob language), prompt
+            files under prompts/mcp/, and the builtin
+            online_researcher and filesystem_researcher agents
+            using them; the web tools (web_search on DuckDuckGo,
+            web_fetch as readability + markdown) started here too
+            and later moved into llmkit itself (builtin-mcp behind
+            an mcp-proxy whitelist, ≥ 1.2.0)
       - [x] project scan agent (part 4d): POST /api/scan runs the
             project_scanner agent as an llmkit runner child that
             orchestrates the two researchers as agent-as-tool

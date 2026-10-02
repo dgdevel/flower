@@ -1,8 +1,10 @@
 /*
  * mcp — flower's own mcp servers: the json-rpc dispatch behind
  * POST /mcp and POST /scan/mcp. See mcp.h for the surface; the
- * research tools live in src/web.c and src/fs.c, the scan write-back
- * tools in src/scan.c, their prompt texts under prompts/mcp/.
+ * research fs tools live in src/fs.c, the web tools are llmkit's
+ * own (`llmkit builtin-mcp`, curated for the online researcher by
+ * the proxy config src/scan.c writes), the scan write-back tools
+ * in src/scan.c, the prompt texts under prompts/mcp/.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -10,7 +12,6 @@
 
 #include "fs.h"
 #include "prompts.h"
-#include "web.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,32 +21,6 @@
 
 /* ---------- tool implementations (the research set) ---------- */
 
-static char *fn_web_search(const cJSON *args, char *err, size_t err_n)
-{
-    const cJSON *q = cJSON_GetObjectItemCaseSensitive(args, "query");
-    if (!cJSON_IsString(q) || !q->valuestring[0]) {
-        snprintf(err, err_n, "missing required string argument 'query'");
-        return NULL;
-    }
-    return web_search(q->valuestring, err, err_n);
-}
-
-static char *fn_web_fetch(const cJSON *args, char *err, size_t err_n)
-{
-    const cJSON *u = cJSON_GetObjectItemCaseSensitive(args, "url");
-    if (!cJSON_IsString(u) || !u->valuestring[0]) {
-        snprintf(err, err_n, "missing required string argument 'url'");
-        return NULL;
-    }
-    return web_read(u->valuestring, err, err_n);
-}
-
-static const mcp_arg_t ARGS_WEB_SEARCH[] = {
-    { "query", "string", 1 }, { NULL }
-};
-static const mcp_arg_t ARGS_WEB_FETCH[] = {
-    { "url", "string", 1 }, { NULL }
-};
 static const mcp_arg_t ARGS_READ_FILE[] = {
     { "path",   "string", 1 },
     { "offset", "number", 0 },
@@ -63,11 +38,11 @@ static const mcp_arg_t ARGS_GREP[] = {
     { NULL }
 };
 
-/* the research surface behind POST /mcp. The scan surface (MCP_SCAN)
+/* the research surface behind POST /mcp: flower's filesystem
+ * readers. The web tools the model used to reach here are llmkit's
+ * own now (see the header comment). The scan surface (MCP_SCAN)
  * is defined next to its tools, in src/scan.c. */
 static const mcp_tool_t RESEARCH_TOOLS[] = {
-    { "web_search", ARGS_WEB_SEARCH, fn_web_search },
-    { "web_fetch",  ARGS_WEB_FETCH,  fn_web_fetch },
     { "read_file",  ARGS_READ_FILE,  fs_tool_read_file },
     { "list_files", ARGS_LIST_FILES, fs_tool_list_files },
     { "grep",       ARGS_GREP,       fs_tool_grep },

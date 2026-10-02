@@ -42,7 +42,9 @@ extern long syscall(long number, ...);
  * tools each one uses on flower's /mcp surface (their sets are
  * disjoint — that is what attributes an incoming /mcp call to the
  * right sub-conversation), and the sub-conversation currently open
- * for its invoke */
+ * for its invoke. online_researcher lists no /mcp tools: its web
+ * calls run inside its own llmkit children (mcp-proxy → builtin-mcp)
+ * and never reach flower, so they land in no transcript */
 typedef struct {
     const char *agent;
     const char *tools[8]; /* NULL-terminated */
@@ -53,7 +55,7 @@ static researcher_t RESEARCHERS[] = {
     { "filesystem_researcher",
       { "read_file", "list_files", "grep", NULL }, { 0 } },
     { "online_researcher",
-      { "web_search", "web_fetch", NULL }, { 0 } },
+      { NULL }, { 0 } },
 };
 
 /* the runner's tool calls, in flight until their response record
@@ -478,9 +480,135 @@ static int write_file_atomic(const char *path, const char *buf, size_t len)
     return 0;
 }
 
+/* ---------- the online researcher's web tools ---------- */
+
+/* llmkit (>= 1.2.0) ships generic web tools as `llmkit builtin-mcp`.
+ * flower hands them to the online researcher through an
+ * `llmkit mcp-proxy` config written beside the seeds: only
+ * web_search and web_fetch pass the whitelist (the file tools stay
+ * out — researchers are read-only), and both carry flower's own
+ * texts from prompts/mcp/, so the model sees the same
+ * flower.web_search(query) / flower.web_fetch(url) tools as when
+ * flower served them itself. The calls run inside the researcher's
+ * own llmkit children; they never reach flower, so they land in no
+ * transcript */
+
+/* one {"type":"expose",…} record: tool `tool`, its upstream argument
+ * `upstream_arg` renamed to flower's `arg` when the two differ */
+static int put_web_expose(sbuf_t *b, const char *tool,
+                          const char *upstream_arg, const char *arg)
+{
+    char path[96], sel[64];
+    snprintf(sel, sizeof sel, "builtin.%s", tool);
+
+    cJSON *one = cJSON_CreateObject();
+    cJSON *args = cJSON_CreateObject();
+    cJSON *ex = cJSON_CreateObject();
+    int ok = one && args && ex &&
+             cJSON_AddStringToObject(ex, "type", "expose") != NULL &&
+             cJSON_AddStringToObject(ex, "tool", sel) != NULL &&
+             cJSON_AddStringToObject(ex, "name", tool) != NULL;
+
+    snprintf(path, sizeof path, "mcp/%s/description.txt", tool);
+    char *d = prompt_text(path);
+    if (ok && d && *d)
+        ok = cJSON_AddStringToObject(ex, "description", d) != NULL;
+    free(d);
+
+    if (ok && strcmp(upstream_arg, arg) != 0)
+        ok = cJSON_AddStringToObject(one, "name", arg) != NULL;
+    snprintf(path, sizeof path, "mcp/%s/arguments/%s.txt", tool, arg);
+    d = prompt_text(path);
+    if (ok && d && *d)
+        ok = cJSON_AddStringToObject(one, "description", d) != NULL;
+    free(d);
+
+    if (ok) {
+        cJSON_AddItemToObject(args, upstream_arg, one);
+        cJSON_AddItemToObject(ex, "arguments", args);
+    } else {
+        cJSON_Delete(one);
+        cJSON_Delete(args);
+    }
+    int rc = ok ? put_record(b, ex) : -1;
+    cJSON_Delete(ex);
+    return rc;
+}
+
+static int write_web_tools_config(const char *path, char *err, size_t err_n)
+{
+    char q_llmkit[1100], cmd[1200];
+    shell_quote(S.llmkit, q_llmkit, sizeof q_llmkit);
+    snprintf(cmd, sizeof cmd, "%s builtin-mcp", q_llmkit);
+
+    sbuf_t b = { 0 };
+    int rc = 0;
+
+    /* the upstream: llmkit's own generic web tools */
+    cJSON *srv = cJSON_CreateObject();
+    cJSON *servers = cJSON_CreateArray();
+    cJSON *rec = cJSON_CreateObject();
+    if (srv) {
+        cJSON_AddStringToObject(srv, "type", "stdio");
+        cJSON_AddStringToObject(srv, "name", "builtin");
+        cJSON_AddStringToObject(srv, "command_line", cmd);
+        if (servers) cJSON_AddItemToArray(servers, srv);
+        else cJSON_Delete(srv);
+    }
+    if (rec) {
+        cJSON_AddStringToObject(rec, "type", "tools");
+        cJSON_AddItemToObject(rec, "tools", servers);
+    } else {
+        cJSON_Delete(servers);
+    }
+    rc |= put_record(&b, rec);
+    cJSON_Delete(rec);
+
+    /* flower's view: the two web tools, none of the file tools */
+    rc |= put_web_expose(&b, "web_search", "keywords", "query");
+    rc |= put_web_expose(&b, "web_fetch", "url", "url");
+
+    if (rc != 0 || !b.data) {
+        free(b.data);
+        snprintf(err, err_n, "cannot assemble the web tools config");
+        return -1;
+    }
+    if (write_file_atomic(path, b.data, b.len) != 0) {
+        free(b.data);
+        snprintf(err, err_n, "cannot write %s", path);
+        return -1;
+    }
+    free(b.data);
+    return 0;
+}
+
+/* the researcher's web tool server: the proxy grown from that config,
+ * named "flower" so the model keeps calling flower.web_search /
+ * flower.web_fetch — the system prompt already speaks those names */
+static int add_web_tools_server(cJSON *servers, const char *cfg)
+{
+    char q_llmkit[1100], q_cfg[4400], cmd[5600];
+    shell_quote(S.llmkit, q_llmkit, sizeof q_llmkit);
+    shell_quote(cfg, q_cfg, sizeof q_cfg);
+    snprintf(cmd, sizeof cmd, "%s mcp-proxy %s", q_llmkit, q_cfg);
+
+    cJSON *srv = cJSON_CreateObject();
+    if (!srv ||
+        !cJSON_AddStringToObject(srv, "type", "stdio") ||
+        !cJSON_AddStringToObject(srv, "name", "flower") ||
+        !cJSON_AddStringToObject(srv, "command_line", cmd) ||
+        !cJSON_AddBoolToObject(srv, "required", 1)) {
+        cJSON_Delete(srv);
+        return -1;
+    }
+    cJSON_AddItemToArray(servers, srv);
+    return 0;
+}
+
 /* the seed for one researcher: header, the chosen llm, the research
- * tools (flower /mcp), the rendered system prompt and the
- * agent-as-tool presentation of its single invoke tool */
+ * tools (flower /mcp, or llmkit's builtin web tools for the online
+ * researcher), the rendered system prompt and the agent-as-tool
+ * presentation of its single invoke tool */
 static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
                                  const project_t *proj, const char *file,
                                  char *err, size_t err_n)
@@ -505,6 +633,25 @@ static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
      * project — the fs tools see its directory as their root */
     cJSON *servers = agents_tools_record(researcher, S.base_url,
                                          proj->seq);
+    if (servers && strcmp(researcher->name, "online_researcher") == 0) {
+        /* the online researcher reads the web instead: llmkit's
+         * builtin web tools, curated by the proxy config written
+         * beside this seed */
+        char cfg[4352];
+        seed_path("web-tools.jsonl", cfg, sizeof cfg);
+        if (write_web_tools_config(cfg, err, err_n) != 0) {
+            cJSON_Delete(servers);
+            free(b.data);
+            return -1;
+        }
+        if (add_web_tools_server(servers, cfg) != 0) {
+            cJSON_Delete(servers);
+            free(b.data);
+            snprintf(err, err_n, "cannot assemble the %s web tools server",
+                     researcher->name);
+            return -1;
+        }
+    }
     if (rec && servers && cJSON_AddStringToObject(rec, "type", "tools"))
         cJSON_AddItemToObject(rec, "tools", servers);
     else cJSON_Delete(servers);
@@ -852,6 +999,8 @@ static void unlink_seeds(void)
     seed_path("filesystem_researcher.jsonl", path, sizeof path);
     unlink(path);
     seed_path("online_researcher.jsonl", path, sizeof path);
+    unlink(path);
+    seed_path("web-tools.jsonl", path, sizeof path);
     unlink(path);
 }
 

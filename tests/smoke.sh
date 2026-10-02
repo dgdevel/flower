@@ -219,8 +219,9 @@ assert d[0]["builtin"] is True and d[0]["llm"] == "", d
 assert "llm_ok" not in d[0], d    # builtins pick their llm per task
 for i in (1, 2):
     assert d[i]["builtin"] is True, d
-    assert d[i]["tools"][0]["name"] == "flower", d   # flower own mcp server
-    assert d[i]["tools"][0]["url"] == "/mcp", d      # resolved when a task runs
+assert d[1]["tools"][0]["name"] == "flower", d   # flower own mcp server
+assert d[1]["tools"][0]["url"] == "/mcp", d      # resolved when a task runs
+assert not d[2].get("tools"), d   # web tools: llmkit builtin-mcp, attached at scan time
 assert "researcher" in d[1]["system_prompt"].lower(), d  # prompts compiled in
 assert "filesystem" in d[1]["system_prompt"].lower(), d
 assert "web" in d[2]["system_prompt"].lower(), d
@@ -436,12 +437,6 @@ curl -s "$B/api/projects" | grep -q '"server room floods"' || fail "rejected PUT
 curl -s "$B/api/tasks" | grep -q '"no deploys on fridays"' || fail "rejected PUTs must not change stored task context"
 
 echo "== 6g. mcp endpoint (flower's own tools) =="
-cat > "$CFG/fixture.html" <<'HTML'
-<!doctype html><html><body><nav>skip this nav</nav>
-<article><h1>Fixture page</h1>
-<p>A paragraph with <a href="https://example.com/x">a link</a>.</p>
-</article></body></html>
-HTML
 rpc() { curl -s -X POST -H "Content-Type: application/json" --data "$1" "$B/mcp"; }
 rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' | python3 -c '
 import json, sys
@@ -457,10 +452,7 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 tools = {t["name"]: t for t in d["result"]["tools"]}
-assert set(tools) >= {"web_search", "web_fetch", "read_file", "list_files", "grep"}, d
-assert tools["web_fetch"]["inputSchema"]["required"] == ["url"], d
-assert "description" in tools["web_fetch"]["inputSchema"]["properties"]["url"], d
-assert "duckduckgo" in tools["web_search"]["description"].lower(), d  # from prompts/
+assert set(tools) == {"read_file", "list_files", "grep"}, d  # web tools live in llmkit now
 rf = tools["read_file"]["inputSchema"]
 assert rf["required"] == ["path"], d
 assert rf["properties"]["offset"]["type"] == "number", d   # optional numbers
@@ -470,21 +462,11 @@ assert tools["grep"]["inputSchema"]["required"] == ["glob", "pattern"], d
 assert "grep -E" in tools["grep"]["description"], d
 assert "**" in tools["grep"]["inputSchema"]["properties"]["glob"]["description"], d
 ' || fail "mcp: tools/list with prompt-file descriptions"
-rpc "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"file://$CFG/fixture.html\"}}}" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-b = d["result"]["content"][0]
-assert b["type"] == "text", d
-assert "# Fixture page" in b["text"], d            # readability picked the article
-assert "[a link](https://example.com/x)" in b["text"], d
-assert "skip this nav" not in b["text"], d
-assert d["result"]["isError"] is False, d
-' || fail "mcp: tools/call web_fetch on a file:// fixture"
-rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"web_search","arguments":{}}}' | python3 -c '
+rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{}}}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["result"]["isError"] is True, d           # tool failure is readable content
-assert "query" in d["result"]["content"][0]["text"], d
+assert "path" in d["result"]["content"][0]["text"], d
 ' || fail "mcp: tools/call with a missing argument"
 mkdir -p "$CFG/fstree/sub/deep"
 printf "line one\nline two\n" > "$CFG/fstree/notes.txt"
@@ -567,7 +549,7 @@ prpc '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 names = {t["name"] for t in d["result"]["tools"]}
-assert names == {"web_search", "web_fetch", "read_file", "list_files", "grep"}, d
+assert names == {"read_file", "list_files", "grep"}, d  # web tools live in llmkit now
 ' || fail "project mcp: tools/list shows the research set"
 prpc '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"}}}' | python3 -c '
 import json, sys
@@ -636,6 +618,29 @@ curl -s -X PUT --data '[{"name":"ollama","endpoint_protocol":"openai","api_base"
 PROJ=$(curl -s "$B/api/projects" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\"}" "$B/api/scan")
 [ "$code" = 200 ] || fail "scan: fake runner did not start: expected 200, got $code"
+# the seeds and the web tools proxy config exist while the scan runs
+# (they are unlinked when it ends, like every scan scratch file)
+[ -f "$CFG/scan/web-tools.jsonl" ] || fail "scan: web tools proxy config not written"
+python3 - "$CFG/scan/web-tools.jsonl" <<'EOF' || fail "scan: web tools proxy config is wrong"
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+upstream = recs[0]
+assert upstream["type"] == "tools", recs
+srv = upstream["tools"][0]
+assert srv["type"] == "stdio" and srv["name"] == "builtin", recs
+assert "builtin-mcp" in srv["command_line"], recs
+exposed = {r["tool"]: r for r in recs if r["type"] == "expose"}
+assert set(exposed) == {"builtin.web_search", "builtin.web_fetch"}, recs
+ws = exposed["builtin.web_search"]
+assert ws["name"] == "web_search", recs
+assert ws["arguments"]["keywords"]["name"] == "query", recs  # flower's arg name
+assert "duckduckgo" in ws["description"].lower(), recs       # flower's prompt text
+assert not any(r["type"] == "hide" for r in recs), recs      # a pure whitelist
+EOF
+grep -q "mcp-proxy .*web-tools.jsonl" "$CFG/scan/online_researcher.jsonl" \
+    || fail "scan: online researcher seed lacks the web tools server"
+grep -q "/mcp" "$CFG/scan/filesystem_researcher.jsonl" \
+    || fail "scan: fs researcher seed lacks flower's mcp server"
 for _ in $(seq 1 60); do
     curl -s "$B/api/scan" | grep -q '"done":true' && break
     sleep 0.25

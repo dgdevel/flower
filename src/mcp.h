@@ -10,9 +10,12 @@
  *
  * Two surfaces, two tool tables:
  *
- *   MCP_RESEARCH  POST /mcp — the research tools (web_search,
- *                 web_fetch, read_file, list_files, grep). What the
- *                 researcher agents and any external client get.
+ *   MCP_RESEARCH  POST /mcp — flower's filesystem research tools
+ *                 (read_file, list_files, grep). What the fs
+ *                 researcher agent and any external client get; the
+ *                 web tools live in llmkit itself (`llmkit
+ *                 builtin-mcp`, handed to the online researcher
+ *                 through an mcp-proxy config src/scan.c writes).
  *   MCP_SCAN      POST /scan/mcp — the project scan's write-back
  *                 tools (set_project_details, add_context_item,
  *                 defined in src/scan.c). They apply to the project

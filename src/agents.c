@@ -873,9 +873,13 @@ void agents_free(agents_t *a)
  * their llm themselves. System prompts live as tweakable prompt
  * files (prompts/agents/<name>/system_prompt.txt) and are resolved
  * on first use; the fallbacks below only cover a missing file.
- * online_researcher carries flower's own mcp server as its tool —
- * url "/mcp" means "this flower instance" and is resolved to a real
- * url when a task is handed to the runner. */
+ * filesystem_researcher carries flower's own mcp server as its tool
+ * — url "/mcp" means "this flower instance" and is resolved to a
+ * real url when a task is handed to the runner. online_researcher
+ * reads the web, not the project: its tool server is llmkit's own
+ * builtin web toolset, assembled by src/scan.c at scan time (the
+ * command line needs the llmkit binary and a generated proxy
+ * config), like the scanner's researcher servers below. */
 static agent_t BUILTIN_AGENTS[] = {
     {
         .name = "assistant",
@@ -886,15 +890,8 @@ static agent_t BUILTIN_AGENTS[] = {
         .name = "online_researcher",
         .llm = "",
         .system_prompt = "",
-        .tools = {
-            {
-                .type = "http",
-                .name = "flower",
-                .url = "/mcp",
-                .required = 1,
-            },
-        },
-        .tool_count = 1,
+        /* no stored tool server: src/scan.c attaches llmkit's builtin
+         * web tools (mcp-proxy curated) when it writes the seed */
     },
     {
         .name = "filesystem_researcher",

@@ -15,7 +15,9 @@
  *             ├─ filesystem_researcher.invoke   (stdio, agent-as-tool)
  *             │    └─ flower /mcp: read_file, list_files, grep, …
  *             ├─ online_researcher.invoke       (stdio, agent-as-tool)
- *             │    └─ flower /mcp: web_search, web_fetch, …
+ *             │    └─ llmkit mcp-proxy → builtin-mcp: web_search,
+ *             │       web_fetch (inside the researcher's own children;
+ *             │       those calls reach no flower transcript)
  *             └─ flower /scan/mcp: set_project_details,
  *                add_context_item → the scanned project + save
  *
@@ -23,11 +25,12 @@
  * scan gets the main one, every researcher invoke its own
  * sub-conversation linked to it. The runner's stdout records feed
  * the main transcript (text blocks, tool calls and results); the
- * researchers' inner tool calls arrive on flower's own /mcp surface
- * while their invoke runs and are folded into the open
- * sub-conversation (the researchers own disjoint tool sets, so the
- * calls attribute unambiguously). Everything is durable and readable
- * under {config}/conversations/ — GET /api/conversations, live via
+ * filesystem researcher's inner tool calls arrive on flower's own
+ * /mcp surface while its invoke runs and are folded into the open
+ * sub-conversation. The online researcher's web calls run inside
+ * its own llmkit children (its proxy and the builtin server) and
+ * are not captured. Everything is durable and readable under
+ * {config}/conversations/ — GET /api/conversations, live via
  * the /api/conversations/stream SSE channel.
  *
  * The runner's stdout is read non-blocking through the server's
