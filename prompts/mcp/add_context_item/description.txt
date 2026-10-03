@@ -1,1 +1,4 @@
-Add one typed context item to the scanned project. type is one of fact, pattern, risk, success_metric, failure_sign, evaluation_method, rule; text is a short, self-contained statement. Only add items worth keeping — an item that is already on the project is rejected.
+Add one typed context item to the scanned project.
+Type is one of fact, pattern, risk, success_metric, failure_sign, evaluation_method, rule.
+Text is a short, self-contained statement.
+Only add items worth keeping - an item that is already on the project is rejected.

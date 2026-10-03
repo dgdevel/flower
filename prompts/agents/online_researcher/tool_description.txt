@@ -1,1 +1,1 @@
-Research the web: pass a research query and get a detailed, source-backed answer, with the urls it used.
+Researcher for the web: ask to research query and get a detailed, source-backed answer.

@@ -1,1 +1,7 @@
-Research the project's local files: pass a natural-language question about what is on disk — the project's structure, the contents of a configuration or source file, where something is defined — and get a detailed, source-backed answer with exact file paths.
+Researcher that reply in natural language. Ask direct question and get response.
+Examples:
+- what is this project about?
+- is it a software?
+- what programming language is used?
+- are there docs in the project?
+- what is the program entry point?

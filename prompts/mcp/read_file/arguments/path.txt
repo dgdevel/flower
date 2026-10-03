@@ -1,3 +1,1 @@
-Path of the file to read: relative to the project directory on a
-project surface ("." is the project root), absolute on the
-server-wide surface.
+Path of the file to read: relative to the project directory "."

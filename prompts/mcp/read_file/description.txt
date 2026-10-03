@@ -1,8 +1,3 @@
-Read a slice of a local file as plain text. How the path is
-resolved depends on the surface: on a project surface paths are
-relative to the project's working directory — "." is the project
-root, "src/main.c" a file in it, ".." may not climb out; on the
-server-wide surface paths are absolute. Use it after list_files
-(or when you already know the path) to inspect configuration,
-source, notes, logs. Binary files are refused; directories belong
-to list_files.
+Read a slice of a local file as plain text. How the path is resolved depends on the surface: on a project surface paths are relative to the project's working directory - "." is the project
+root, "src/main.c" a file in it; on the server-wide surface paths are absolute. Use it after list_files (or when you already know the path) to inspect configuration,source, notes, logs.
+Binary files are refused; directories belong to list_files.

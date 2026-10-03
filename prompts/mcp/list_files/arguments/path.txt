@@ -1,3 +1,1 @@
-Directory to list: relative to the project directory on a project
-surface ("." is the project root), absolute on the server-wide
-surface.
+Directory to list: relative to the project directory on a project surface ("." is the project root), absolute on the server-wide surface.

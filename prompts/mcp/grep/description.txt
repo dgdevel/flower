@@ -1,14 +1,4 @@
-Search the contents of local files for a regular expression, like
-grep -E: every matching line comes back as "path:line number:text",
-sorted by path, with a final "[N matches in K of M files]" tally.
-Pick the files with the glob argument, which is the list_files
-pattern language prefixed with the directory to search —
-dir/*.c (the .c files directly in dir), dir/**/*.c (in every
-subdirectory too), dir/file.txt (one file), dir (every file under
-dir). On a project surface the directory is relative to the
-project's working directory ("." is the project root) and the
-matches come back project-relative; on the server-wide surface it
-is an absolute path. Binary files and files over 8 MB are skipped,
-overlong lines are cut, and the reply stops after 200 matches.
-Use it to find where something is defined, used or mentioned
-before reading whole files.
+Search the contents of local files matching a regular expression, like grep -E.
+Every matching line comes back as "path:line number:text" and a final recap.
+Binary files are skipped, long output get cut.
+
