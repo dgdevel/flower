@@ -3,7 +3,7 @@
 
 /*
  * fs — the local-filesystem tools behind the mcp surfaces: read a
- * slice of a file, list a directory through a small glob language
+ * line range of a file, list a directory through a small glob language
  * (`*`, `*.*`, `*.ext` — each also with the recursive `**` prefix
  * to walk subdirectories), and grep the contents of the files a
  * filepath glob selects.
@@ -23,10 +23,12 @@
 #include <cJSON.h>
 #include <stddef.h>
 
-/* Read `length` bytes from `offset` (both clamped sensibly; see the
- * tool description) and return them as a malloc'd string, or NULL
+/* Read `length` lines starting at 1-based line `offset` (both
+ * clamped sensibly; see the tool description) — lines come back
+ * whole, a line cut by the byte budget ends the reply with
+ * "[truncated]" — and return them as a malloc'd string, or NULL
  * with a short message in err (missing file, directory, binary
- * content, offset past end, …). */
+ * content, start line past the end, …). */
 char *fs_read_path(const char *path, long long offset, long long length,
                    char *err, size_t err_n);
 

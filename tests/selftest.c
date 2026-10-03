@@ -239,39 +239,58 @@ static void test_fs(void)
     check_contains(r, "\xE2\x80\xA6", "fs: grep long line cut with …");
     free(r);
 
-    /* read_file */
+    /* read_file: offset is the 1-based start line, length the
+     * number of lines */
     snprintf(p, sizeof p, "%s/notes.txt", root);
-    r = fs_read_path(p, 0, 64, err, sizeof err);
+    r = fs_read_path(p, 1, 64, err, sizeof err);
     check(r && strcmp(r, "one\ntwo\nthree\n") == 0, "fs: read whole file");
     free(r);
-    r = fs_read_path(p, 4, 4, err, sizeof err);
+    r = fs_read_path(p, 2, 1, err, sizeof err);
     check(r && strcmp(r, "two\n") == 0, "fs: read with offset+length");
     free(r);
-    r = fs_read_path(p, 4, 1000000, err, sizeof err);
+    r = fs_read_path(p, 2, 1000000, err, sizeof err);
     check(r && strcmp(r, "two\nthree\n") == 0, "fs: length clamped to rest");
     free(r);
     r = fs_read_path(p, 100, 4, err, sizeof err);
     check(!r && strstr(err, "past the end"), "fs: offset past eof errors");
+    r = fs_read_path(p, 0, 4, err, sizeof err);
+    check(!r && strstr(err, "1 or more"), "fs: offset 0 rejected");
     snprintf(p, sizeof p, "%s/binary.bin", root);
-    r = fs_read_path(p, 0, 8, err, sizeof err);
+    r = fs_read_path(p, 1, 8, err, sizeof err);
     check(!r && strstr(err, "binary"), "fs: NUL byte detected as binary");
     snprintf(p, sizeof p, "%s/src", root);
-    r = fs_read_path(p, 0, 8, err, sizeof err);
+    r = fs_read_path(p, 1, 8, err, sizeof err);
     check(!r && strstr(err, "directory"), "fs: directory read refused");
-    r = fs_read_path("/nonexistent-file-xyz", 0, 8, err, sizeof err);
+    r = fs_read_path("/nonexistent-file-xyz", 1, 8, err, sizeof err);
     check(!r && err[0], "fs: missing file errors");
 
-    /* utf-8 slices stay whole */
+    /* whole lines keep multibyte characters intact */
     snprintf(p, sizeof p, "%s/utf8.txt", root);
-    mkfile(p, "a\xc3\xa9" "bcdef ghij \xe2\x82\xac""end");
-    r = fs_read_path(p, 0, 4, err, sizeof err); /* cuts inside é */
-    check(r && (unsigned char)r[strlen(r) - 1] != 0xa9,
-          "fs: partial utf-8 trimmed at the end");
+    mkfile(p, "a\xc3\xa9" "bcdef ghij \xe2\x82\xac""end\nnext\n");
+    r = fs_read_path(p, 1, 1, err, sizeof err);
+    check(r && strstr(r, "\xc3\xa9") && strstr(r, "\xe2\x82\xac"),
+          "fs: multibyte characters survive whole");
     free(r);
-    r = fs_read_path(p, 1, 4, err, sizeof err); /* starts inside é */
-    check(r && (unsigned char)r[0] != 0xa9,
-          "fs: partial utf-8 skipped at the start");
-    free(r);
+
+    /* the byte budget cuts an oversized line on a utf-8 boundary */
+    snprintf(p, sizeof p, "%s/huge.txt", root);
+    {
+        enum { BUDGET = 64 * 1024, PAD = BUDGET - 1 };
+        char *big = malloc(PAD + 8);
+        if (!big) exit(2);
+        memset(big, 'x', PAD);
+        memcpy(big + PAD, "\xc3\xa9" "tail\n", 6); /* é straddles the cut */
+        FILE *hf = fopen(p, "wb");
+        if (!hf) { perror(p); exit(2); }
+        fwrite(big, 1, PAD + 6, hf);
+        fclose(hf);
+        free(big);
+        r = fs_read_path(p, 1, 10, err, sizeof err);
+        check(r && (unsigned char)r[PAD - 1] == 'x' && r[PAD] == '[',
+              "fs: byte-budget cut keeps utf-8 whole");
+        check_contains(r, "[truncated]\n", "fs: byte-budget cut is marked");
+        free(r);
+    }
 
     /* the per-project surface: relative paths under a root, a jail,
      * project-relative replies (the mcp dispatchers resolve) */

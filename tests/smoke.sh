@@ -480,10 +480,10 @@ t = d["result"]["content"][0]["text"]
 assert "sub/main.c" in t and "sub/deep/edge.c" in t, d
 assert "util.js" not in t, d
 ' || fail "mcp: list_files recursive glob"
-rpc "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\",\"offset\":14,\"length\":4}}}" | python3 -c '
+rpc "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\",\"offset\":2,\"length\":1}}}" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["result"]["content"][0]["text"] == "two\n", repr(d["result"]["content"][0]["text"])
+assert d["result"]["content"][0]["text"] == "line two\n", repr(d["result"]["content"][0]["text"])
 ' || fail "mcp: read_file offset+length"
 rpc "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\",\"offset\":999}}}" | python3 -c '
 import json, sys

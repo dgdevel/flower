@@ -1,1 +1,1 @@
-Byte offset to start reading at, 0 by default.
+Line number to start reading at, 1-based. 1 by default.

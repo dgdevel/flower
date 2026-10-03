@@ -293,9 +293,10 @@ subset over the streamable-http transport with plain json replies
 `tools/call`, `ping`. The tools are flower's own filesystem
 readers (`src/fs.c`):
 
-- **`read_file`** — a slice of a local file (`path`, optional
-  `offset`/`length`, default and clamp 64 KiB, utf-8 boundaries
-  kept whole, binary content refused).
+- **`read_file`** — a line range of a local file (`path`, optional
+  1-based `offset` and line-count `length`, default and clamp 2000
+  lines and 64 KiB — lines come back whole, a budget-cut oversized
+  line ends the reply with `[truncated]` — binary content refused).
 - **`list_files`** — one directory through a small glob: `*` (any
   file or directory), `*.*` (any extension), `*.ext` (one
   extension), and each of those with the recursive `**` prefix to
@@ -514,10 +515,10 @@ src/scan.{c,h}       the project scan agent: researcher seeds, the
                       child, the write-back tools (POST /scan/mcp)
                       and the conversation capture
 src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
-src/fs.{c,h}          local-filesystem tools: read_file (offset/length
-                      slices), list_files (the ** glob language) and
-                      grep (a regex over the files a filepath glob
-                      selects)
+src/fs.{c,h}          local-filesystem tools: read_file (1-based
+                      offset/length line ranges), list_files (the
+                      ** glob language), grep (a regex over the
+                      files a filepath glob selects)
 src/mcp.{c,h}         flower's own mcp server: json-rpc dispatch for POST /mcp
                       and /scan/mcp (per-surface tool tables, optional
                       conversation logging)

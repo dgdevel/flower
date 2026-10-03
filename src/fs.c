@@ -18,8 +18,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define READ_DEFAULT  (64 * 1024) /* bytes when length is omitted   */
-#define READ_MAX      (64 * 1024) /* hard clamp: the reply must fit */
+#define READ_DEFAULT  (2000)       /* lines when length is omitted   */
+#define READ_MAX      (2000)       /* hard clamp on the line count   */
+#define READ_BYTES    (64 * 1024)  /* hard clamp: the reply must fit */
 #define LIST_MAX      2000        /* lines before "[truncated]"     */
 #define LIST_DEPTH    48          /* recursion cap for **           */
 
@@ -36,6 +37,22 @@ static int utf8_len(unsigned char c)
     return 0;
 }
 
+/* trim a partial utf-8 sequence off the end of line[0..take) (set
+ * when the byte budget cuts a line mid-character) */
+static size_t utf8_trim_tail(const char *line, size_t take)
+{
+    for (int back = 1; back <= 3 && take >= (size_t)back; back++) {
+        unsigned char c = (unsigned char)line[take - back];
+        int len = utf8_len(c);
+        if (len > 0) {
+            if (len > back) take -= (size_t)back; /* incomplete */
+            break;
+        }
+        /* still continuation bytes, keep walking back */
+    }
+    return take;
+}
+
 char *fs_read_path(const char *path, long long offset, long long length,
                    char *err, size_t err_n)
 {
@@ -43,8 +60,8 @@ char *fs_read_path(const char *path, long long offset, long long length,
         snprintf(err, err_n, "missing required string argument 'path'");
         return NULL;
     }
-    if (offset < 0) {
-        snprintf(err, err_n, "offset must be 0 or more");
+    if (offset <= 0) {
+        snprintf(err, err_n, "offset must be 1 or more");
         return NULL;
     }
     if (length <= 0) {
@@ -71,53 +88,61 @@ char *fs_read_path(const char *path, long long offset, long long length,
         fclose(f);
         return NULL;
     }
-    if ((long long)st.st_size > 0 && offset >= (long long)st.st_size) {
-        snprintf(err, err_n, "offset %lld is past the end of %s (%lld bytes)",
-                 offset, path, (long long)st.st_size);
-        fclose(f);
-        return NULL;
-    }
 
-    if (fseeko(f, offset, SEEK_SET) != 0) {
-        snprintf(err, err_n, "cannot seek %s: %s", path, strerror(errno));
-        fclose(f);
-        return NULL;
-    }
+    /* skip to the start line, counting what we pass so the
+     * past-the-end error can say how many lines there are */
+    char *line = NULL;
+    size_t cap = 0;
+    long long seen = 0;
+    while (seen < offset - 1 && getline(&line, &cap, f) != -1)
+        seen++;
 
-    char *buf = malloc((size_t)length + 1);
-    if (!buf) {
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *out = open_memstream(&buf, &len);
+    if (!out) {
+        free(line);
+        fclose(f);
         snprintf(err, err_n, "out of memory");
-        fclose(f);
         return NULL;
     }
-    size_t n = fread(buf, 1, (size_t)length, f);
-    fclose(f);
-
-    /* a NUL byte means this is not text the model can use */
-    if (memchr(buf, '\0', n)) {
-        free(buf);
-        snprintf(err, err_n, "%s looks like a binary file", path);
-        return NULL;
-    }
-
-    /* keep utf-8 sequences whole: skip into a cut one at the start,
-     * trim a partial one at the end */
-    size_t start = 0;
-    while (start < n && utf8_len((unsigned char)buf[start]) == 0)
-        start++; /* continuation bytes: the tail of a cut character */
-    size_t end = n;
-    for (int back = 1; back <= 3 && end - start >= (size_t)back; back++) {
-        unsigned char c = (unsigned char)buf[end - back];
-        if (utf8_len(c) > 0) {
-            if (utf8_len(c) > back) end -= (size_t)back; /* incomplete */
-            break;
+    long long got = 0;
+    size_t used = 0;
+    int cut = 0;
+    ssize_t n;
+    while (got < length && (n = getline(&line, &cap, f)) != -1) {
+        seen++;
+        /* a NUL byte means this is not text the model can use */
+        if (memchr(line, '\0', (size_t)n)) {
+            fclose(out);
+            free(buf);
+            free(line);
+            fclose(f);
+            snprintf(err, err_n, "%s looks like a binary file", path);
+            return NULL;
         }
-        /* still continuation bytes, keep walking back */
+        size_t take = (size_t)n;
+        if (used + take > READ_BYTES) {
+            /* the byte budget cuts this (oversized) line */
+            take = utf8_trim_tail(line, READ_BYTES - used);
+            cut = 1;
+        }
+        fwrite(line, 1, take, out);
+        used += take;
+        got++;
+        if (cut) break;
     }
+    free(line);
+    fclose(f);
+    if (cut) fputs("[truncated]\n", out);
+    fclose(out);
 
-    size_t keep = end - start;
-    memmove(buf, buf + start, keep);
-    buf[keep] = '\0';
+    if (got == 0) {
+        free(buf);
+        snprintf(err, err_n, "line %lld is past the end of %s (%lld lines)",
+                 offset, path, seen);
+        return NULL;
+    }
     return buf;
 }
 
@@ -669,7 +694,7 @@ char *fs_tool_read_file(const cJSON *args, char *err, size_t err_n)
         snprintf(err, err_n, "missing required string argument 'path'");
         return NULL;
     }
-    long long offset = 0, length = READ_DEFAULT;
+    long long offset = 1, length = READ_DEFAULT;
     long long v;
     int r = arg_number(args, "offset", &v);
     if (r < 0) {
