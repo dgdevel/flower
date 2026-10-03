@@ -120,4 +120,20 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
 char *tasks_to_json(const tasks_t *c, int with_flags,
                     const projects_t *projects);
 
+/* ---------- live-store helpers (the task planner's write-back) ---------- */
+
+/* index of the task with this id, or -1 */
+int tasks_find_id(const tasks_t *c, const char *id);
+
+/* drop the task's whole action tree (the tree is owned by the store) */
+void task_clear_actions(task_t *t);
+
+/* every action in the task's tree, at any depth */
+size_t task_count_actions(const task_t *t);
+
+/* the wire names of the refinement-loop types ("act" is the default);
+ * -1 when the name is not one of them */
+int action_type_from_name(const char *name);
+const char *action_type_name(int type);
+
 #endif

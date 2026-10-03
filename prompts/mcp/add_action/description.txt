@@ -1,0 +1,1 @@
+Append one action to the planned task's tree, as the last child of `parent` (empty or omitted = the root). Every added action starts pending — states belong to the user. The answer lists the whole tree (path + title per line); use those paths as the next `parent`. Add one action per call.

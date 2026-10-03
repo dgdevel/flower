@@ -214,7 +214,7 @@ import json, sys
 d = json.load(sys.stdin)
 assert [a["name"] for a in d] == \
     ["assistant", "filesystem_researcher", "online_researcher",
-     "project_scanner"], d  # builtins
+     "project_scanner", "task_planner"], d  # builtins
 assert d[0]["builtin"] is True and d[0]["llm"] == "", d
 assert "llm_ok" not in d[0], d    # builtins pick their llm per task
 for i in (1, 2):
@@ -228,6 +228,8 @@ assert "web" in d[2]["system_prompt"].lower(), d
 assert d[3]["builtin"] is True, d
 assert d[3]["tools"][0]["url"] == "/scan/mcp", d     # the scan mcp server
 assert "project" in d[3]["system_prompt"].lower(), d
+assert d[4]["builtin"] is True and not d[4].get("tools"), d  # planner: tools attached at plan time
+assert "task" in d[4]["system_prompt"].lower(), d
 ' || fail "GET /api/agents should start with the builtin agents"
 curl -s -X PUT -H "Content-Type: application/json" --data-binary '[
  {"name":"gardener","llm":"ollama","inference_options":{"temperature":0.7,"max_tokens":2048,"stop":"END"},"system_prompt":"You tend flowers.","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @mcp/fs /tmp","required":true,"terminal_tools":["read_file"]}]},
@@ -246,6 +248,7 @@ import json, sys
 d = {a["name"]: a.get("llm_ok") for a in json.load(sys.stdin)}
 assert d == {"assistant": None, "filesystem_researcher": None,
              "online_researcher": None, "project_scanner": None,
+             "task_planner": None,
              "gardener": True, "thinker": True}, d
 ' || fail "GET /api/agents should report llm_ok flags (builtins carry none)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '[{"name":"Assistant","llm":"ollama"}]' "$B/api/agents")
@@ -875,5 +878,193 @@ assert "# Previous Run" in u["text"], d
 # the seed is the last run itself, transcript and all — not a stub
 assert "Scan the project \"scan target\" now." in u["text"], d
 ' || fail "scan: the follow-up should carry the previous run and the request"
+
+echo "== 10. the task planner: New Task Auto =="
+# rejects before anything spawns: a missing field, a bad reference
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{}" "$B/api/plan")
+[ "$code" = 422 ] || fail "plan: missing fields: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"missing\",\"prompt\":\"plan a thing\"}" "$B/api/plan")
+[ "$code" = 422 ] || fail "plan: unknown llm: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"nope\",\"llm\":\"ollama\",\"prompt\":\"plan a thing\"}" "$B/api/plan")
+[ "$code" = 422 ] || fail "plan: unknown project: expected 422, got $code"
+BAD=$(python3 -c 'print("x" * 5000)')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"prompt\":\"$BAD\"}" "$B/api/plan")
+[ "$code" = 422 ] || fail "plan: over-long prompt: expected 422, got $code"
+curl -s "$B/api/plan" | grep -q '"running":false' || fail "plan: rejected starts must not flip the status"
+
+# the write-back surface lists its three tools
+curl -s -X POST --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/plan/mcp" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+names = [t["name"] for t in d["result"]["tools"]]
+assert names == ["set_task_title", "add_action", "clear_actions"], d
+' || fail "plan: tools/list should name the three write-back tools"
+
+# start: the task exists at once, the conversation is interactive
+R=$(curl -s -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"prompt\":\"Plan the test layout fix\nmake it so\"}" "$B/api/plan")
+PLAN_CONV=$(echo "$R" | python3 -c 'import json,sys; print(json.load(sys.stdin)["conversation"])')
+PLAN_TASK=$(echo "$R" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task"])')
+[ ${#PLAN_CONV} = 32 ] || fail "plan: no conversation id in the reply: $R"
+curl -s "$B/api/tasks" >"$CFG/plan-tasks.json"
+python3 - "$PLAN_TASK" "$CFG/plan-tasks.json" <<'EOF' || fail "plan: the task should exist from the start"
+import json, sys
+d = json.load(open(sys.argv[2]))
+t = [x for x in d if x["id"] == sys.argv[1]]
+assert t and t[0]["title"] == "Plan the test layout fix", d
+assert t[0].get("actions", []) == [], d   # empty lists are omitted on the wire
+EOF
+curl -s "$B/api/conversations/$PLAN_CONV" >"$CFG/plan-conv.json"
+python3 - "$CFG/plan-conv.json" <<'EOF' || fail "plan: the conversation should be interactive"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["interactive"] is True and d["state"] == "running", d
+assert d["records"][0]["k"] == "user", d
+assert "Plan the test layout fix" in d["records"][0]["text"], d
+EOF
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"prompt\":\"another\"}" "$B/api/plan")
+[ "$code" = 409 ] || fail "plan: one at a time: expected 409, got $code"
+
+# the seeds exist while the plan runs, under the plan- tag
+[ -f "$CFG/scan/plan-filesystem_researcher.jsonl" ] || fail "plan: fs researcher seed not written"
+grep -q "/plan/research/mcp" "$CFG/scan/plan-filesystem_researcher.jsonl" \
+    || fail "plan: the fs seed should point at the plan research surface"
+grep -q "task_planner\|You are" "$CFG/scan/plan-online_researcher.jsonl" \
+    || fail "plan: the online seed was not written"
+
+# the fake plays its turn (~4s): title + three actions land, pending
+for _ in $(seq 1 80); do
+    curl -s "$B/api/plan" | grep -q '"writes":4' && break
+    sleep 0.25
+done
+curl -s "$B/api/tasks" >"$CFG/plan-tasks.json"
+python3 - "$PLAN_TASK" "$CFG/plan-tasks.json" <<'EOF' || fail "plan: the write-backs did not land"
+import json, sys
+d = json.load(open(sys.argv[2]))
+t = [x for x in d if x["id"] == sys.argv[1]][0]
+assert t["title"] == "Fake planned task", t
+flat = []
+def walk(lst, depth=0):
+    for a in lst:
+        flat.append((depth, a["title"], a.get("type", "act"), a.get("state", "pending")))
+        walk(a.get("children", []), depth + 1)
+walk(t["actions"])
+assert [f[1] for f in flat] == ["Research the codebase", "Write the change",
+                                "Check the edge cases"], t
+assert flat[0][2] == "observe", t          # the type the fake passed
+assert all(f[3] == "pending" for f in flat), t  # mcp actions start pending
+assert flat[2][0] == 1, t                  # parent "1" nested it
+EOF
+# the researcher round is recorded as a sub-conversation of the plan
+curl -s "$B/api/conversations" >"$CFG/plan-convs.json"
+python3 - "$PLAN_CONV" "$CFG/plan-convs.json" <<'EOF' || fail "plan: the researcher sub-conversation is missing"
+import json, sys
+d = json.load(open(sys.argv[2]))
+subs = [c for c in d if c["parent"] == sys.argv[1]]
+assert subs and subs[0]["agent"] == "filesystem_researcher", d
+EOF
+SUB=$(curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+print([c for c in json.load(sys.stdin) if c["parent"] == "'"$PLAN_CONV"'"][0]["id"])')
+curl -s "$B/api/conversations/$SUB" >"$CFG/plan-sub.json"
+python3 - "$CFG/plan-sub.json" <<'EOF' || fail "plan: the researcher transcript should carry the fs call"
+import json, sys
+d = json.load(open(sys.argv[1]))
+kinds = [r["k"] for r in d["records"]]
+assert "user" in kinds and "tool_call" in kinds, d
+tools = [r["tool"] for r in d["records"] if r["k"] == "tool_call"]
+assert "read_file" in tools, d
+EOF
+
+# the reply loop: a reply cannot delete; unknown ids and idle
+# conversations are told apart
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{}' "$B/api/conversations/$PLAN_CONV/reply")
+[ "$code" = 422 ] || fail "reply: missing text: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"text":"hi"}' "$B/api/conversations/deadbeefdeadbeefdeadbeefdeadbeef/reply")
+[ "$code" = 404 ] || fail "reply: unknown id: expected 404, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"text":"hi"}' "$B/api/conversations/$SUB/reply")
+[ "$code" = 409 ] || fail "reply: a sub-conversation is not interactive: expected 409, got $code"
+# a turn takes its time: the reply only lands once it is over
+for _ in $(seq 1 60); do
+    curl -s "$B/api/plan" | grep -q '"awaiting_reply":true' && break
+    sleep 0.25
+done
+curl -s "$B/api/plan" | grep -q '"awaiting_reply":true' \
+    || fail "plan: a finished turn should wait for a reply"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"text":"add a follow-up action"}' "$B/api/conversations/$PLAN_CONV/reply")
+[ "$code" = 200 ] || fail "reply: the running plan should take it: expected 200, got $code"
+for _ in $(seq 1 80); do
+    curl -s "$B/api/conversations/$PLAN_CONV" | grep -q '"Plan updated."' && break
+    sleep 0.25
+done
+curl -s "$B/api/tasks" >"$CFG/plan-tasks.json"
+python3 - "$PLAN_TASK" "$CFG/plan-tasks.json" <<'EOF' || fail "reply: the refinement turn did not write"
+import json, sys
+d = json.load(open(sys.argv[2]))
+t = [x for x in d if x["id"] == sys.argv[1]][0]
+flat = []
+def walk(lst, depth=0):
+    for a in lst:
+        flat.append(a["title"]); walk(a.get("children", []))
+walk(t["actions"])
+assert any(x.startswith("Follow-up:") for x in flat), t
+EOF
+curl -s "$B/api/conversations/$PLAN_CONV" >"$CFG/plan-conv.json"
+python3 - "$CFG/plan-conv.json" <<'EOF' || fail "plan: a finished turn must leave the conversation running"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["state"] == "running", d          # interactive: waits for a reply
+assert any(r.get("text") == "Plan ready. Reply to refine it."
+           for r in d["records"]), d
+EOF
+python3 - "$CFG/plan-conv.json" <<'EOF' || fail "reply: the transcript should carry both turns"
+import json, sys
+d = json.load(open(sys.argv[1]))
+users = [r for r in d["records"] if r["k"] == "user"]
+assert len(users) == 2 and "add a follow-up action" in users[-1]["text"], d
+assert any(r.get("text") == "Plan updated." for r in d["records"]), d
+EOF
+
+# a conversation still running cannot be deleted — the whole tree goes
+# only after it stopped
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/api/conversations/$PLAN_CONV")
+[ "$code" = 409 ] || fail "delete: a running conversation: expected 409, got $code"
+curl -s -X POST "$B/api/plan/stop" >/dev/null
+for _ in $(seq 1 40); do
+    curl -s "$B/api/plan" | grep -q '"running":false' && break
+    sleep 0.25
+done
+curl -s "$B/api/conversations/$PLAN_CONV" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["state"] == "stopped", d
+' || fail "plan: stopping should close the conversation"
+# the sub-agent still sits in the tree: deleting the root takes it too
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/conversations/$SUB")
+[ "$code" = 200 ] || fail "delete: the sub-conversation should still exist"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/api/conversations/$PLAN_CONV")
+[ "$code" = 200 ] || fail "delete: expected 200, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/conversations/$PLAN_CONV")
+[ "$code" = 404 ] || fail "delete: the conversation should be gone"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/conversations/$SUB")
+[ "$code" = 404 ] || fail "delete: the sub-conversation should go with its parent"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$B/api/conversations/$PLAN_CONV")
+[ "$code" = 404 ] || fail "delete: an unknown id: expected 404, got $code"
+
+# a scan follow-up still seeds from the last scan — the plan's
+# conversations never leak into it
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"note\":\"after the plan\"}" "$B/api/scan")
+[ "$code" = 200 ] || fail "scan: a follow-up after a plan: expected 200, got $code"
+for _ in $(seq 1 60); do
+    curl -s "$B/api/scan" | grep -q '"done":true' && break
+    sleep 0.25
+done
+curl -s "$B/api/conversations" >"$CFG/plan-convs.json"
+python3 - "$CFG/plan-convs.json" <<'EOF' || fail "scan: the follow-up should continue the scan, not the plan"
+import json, sys
+d = json.load(open(sys.argv[1]))
+main = [c for c in d if c["agent"] == "project_scanner"][0]
+assert main["title"].startswith("Project scan"), d
+EOF
 
 echo "ALL SMOKE TESTS PASSED"

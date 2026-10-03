@@ -409,6 +409,55 @@ test("tasks: deleting a project must not block task creation afterwards", async 
     .toBe(true);
 });
 
+test("new task auto: the modal starts a planned task that fills itself", async ({ page, request }) => {
+  await resetProjects(request);
+  mkdirSync(`${WORK}/autoplan`, { recursive: true });
+  await request.put("/api/llms", {
+    data: [{ name: "ollama", endpoint_protocol: "openai",
+             api_base: "http://localhost:11434/v1", model: "m" }],
+  });
+  await request.put("/api/projects", {
+    data: [{ dir: `${WORK}/autoplan`, title: "auto garden" }],
+  });
+  await page.goto("/");
+
+  const pane2 = page.locator('.pane[data-pane="1"]');
+  const pane3 = page.locator('.pane[data-pane="2"]');
+
+  // the button sits after New task; the modal wants a prompt
+  await pane2.locator("#new-task-auto").click();
+  await expect(page.locator("#plan-modal")).toBeVisible();
+  await page.locator("#plan-start").click();
+  await expect(page.locator("#err-plan-prompt"))
+    .toContainText("describe the task first");
+  await page.locator("#plan-prompt").fill("Plan the test layout fix");
+  await page.locator("#plan-start").click();
+  await expect(page.locator("#plan-modal")).toBeHidden();
+
+  // the task exists at once; the fake planner refines its title and
+  // grows its action tree while we watch
+  const row = pane2.locator(".task-row").first();
+  await expect(row).toContainText("Plan the test layout fix");
+  await expect(row).toContainText("Fake planned task", { timeout: 15000 });
+
+  // the button became a link to the conversation
+  const open = pane2.locator("#plan-open");
+  await expect(open).toBeVisible({ timeout: 5000 });
+  await expect(open).toHaveAttribute(
+    "href", /^conversations\.html#[0-9a-f]{32}$/);
+
+  // column three fills with the planned tree, every action pending
+  await expect(pane3.locator(".action")).toHaveCount(3, { timeout: 15000 });
+  await expect(pane3.locator(".action .action-state").first())
+    .toHaveValue("pending");
+
+  // stopping the conversation turns the button back
+  await request.post("/api/plan/stop");
+  await expect(pane2.locator("#new-task-auto"))
+    .toBeVisible({ timeout: 15000 });
+  await expect(open).toBeHidden();
+});
+
 test("emoji picker: search narrows the Unicode list, Escape closes", async ({ page, request }) => {
   await resetProjects(request);
   mkdirSync(`${WORK}/picker`, { recursive: true });

@@ -22,6 +22,16 @@ async function waitScanIdle(request: import("@playwright/test").APIRequestContex
   throw new Error("a scan is still running");
 }
 
+// same for the task planner (the interactive fake waits for replies)
+async function waitPlanIdle(request: import("@playwright/test").APIRequestContext) {
+  for (let i = 0; i < 80; i++) {
+    const d = await (await request.get("/api/plan")).json();
+    if (!d.running) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error("a plan is still running");
+}
+
 test("top bar links to the conversations page", async ({ page }) => {
   await page.goto("/");
   const link = page.locator("header.top nav a", { hasText: "Conversations" });
@@ -93,9 +103,11 @@ test("conversations: a scan is recorded live, sub-agents linked", async ({ page,
   await expect(page.locator(".conv-log")).toContainText(
     "flower.set_project_details");
 
-  // the sub-agent conversation: its own entry, its own transcript
+  // the sub-agent conversation: collapsed under its parent's row,
+  // revealed by the twistie, with its own transcript
+  await main.locator(".conv-tw").click();
   const sub = page
-    .locator(".conv-row", { hasText: "filesystem_researcher" })
+    .locator(".conv-row.sub", { hasText: "filesystem_researcher" })
     .first();
   await expect(sub).toBeVisible();
   await sub.click();
@@ -107,6 +119,84 @@ test("conversations: a scan is recorded live, sub-agents linked", async ({ page,
   // …and it links back to the conversation that spawned it
   await page.locator(".conv-parent").click();
   await expect(page.locator("#conv-detail h2")).toContainText("Project scan");
+});
+
+test("a task plan is interactive: collapsed tree, replies, delete", async ({ page, request }) => {
+  mkdirSync(`${WORK}/planconv`, { recursive: true });
+  writeFileSync(`${WORK}/planconv/README.md`, "e2e fixture\n");
+  await waitScanIdle(request);
+  await waitPlanIdle(request);
+
+  await request.put("/api/llms", {
+    data: [{ name: "ollama", endpoint_protocol: "openai",
+             api_base: "http://localhost:11434/v1", model: "m" }],
+  });
+  await request.put("/api/projects", {
+    data: [{ dir: `${WORK}/planconv`, title: "plan garden" }],
+  });
+  // earlier runs' plans (stopped) would collide with the row counts
+  const old = await (await request.get("/api/conversations")).json();
+  for (const c of old.filter((x) => x.agent === "task_planner"))
+    await request.delete("/api/conversations/" + c.id);
+  const projects = await (await request.get("/api/projects")).json();
+  const r = await request.post("/api/plan", {
+    data: { project: projects[0].id, llm: "ollama",
+            prompt: "Plan the fixture cleanup" },
+  });
+  expect(r.ok()).toBeTruthy();
+
+  await page.goto("/conversations.html");
+
+  // the plan's conversation appears, flagged interactive; its
+  // sub-agents stay collapsed until the twistie opens them
+  const root = page
+    .locator(".conv-row", { hasText: "Task plan — Plan the fixture cleanup" })
+    .first();
+  await expect(root).toBeVisible({ timeout: 15000 });
+  await expect(root.locator(".conv-flag")).toHaveText("interactive");
+  await expect(page.locator(".conv-row.sub")).toHaveCount(0);
+  await root.locator(".conv-tw").click();
+  const sub = page
+    .locator(".conv-row.sub", { hasText: "filesystem_researcher" })
+    .first();
+  await expect(sub).toBeVisible();
+
+  // the open conversation offers the reply box while it runs
+  await root.click();
+  await expect(page.locator("#conv-detail h2"))
+    .toContainText("Task plan — Plan the fixture cleanup");
+  await expect(page.locator("#conv-reply-text")).toBeVisible();
+  await expect(page.locator(".conv-log")).toContainText(
+    "Plan ready.", { timeout: 15000 });
+
+  // one turn at a time: the reply only lands once the turn is over
+  // (the conversation stays running between turns)
+  await expect.poll(async () =>
+    (await (await request.get("/api/plan")).json()).awaiting_reply,
+    { timeout: 15000 }).toBe(true);
+
+  // a reply is a turn: the fake adds an action and answers
+  await page.locator("#conv-reply-text").fill("add a follow-up action");
+  await page.locator("#conv-reply-send").click();
+  await expect(page.locator(".conv-log")).toContainText(
+    "add a follow-up action", { timeout: 15000 });
+  await expect(page.locator(".conv-log")).toContainText(
+    "Plan updated.", { timeout: 15000 });
+
+  // stop, then delete: the whole tree leaves with its root
+  await page.locator("#conv-stop").click();
+  await expect(page.locator("#conv-detail .badge"))
+    .toHaveText("stopped", { timeout: 15000 });
+  const del = page.locator("#conv-delete");
+  await del.click(); // arms…
+  await expect(del).toHaveText("sure?");
+  await del.click(); // …and confirms
+  await expect(page.locator("#conv-detail .placeholder-title"))
+    .toHaveText("No conversation open");
+  await expect(
+    page.locator(".conv-row", { hasText: "Task plan — Plan the fixture cleanup" }))
+    .toHaveCount(0);
+  await expect(page.locator(".conv-row.sub")).toHaveCount(0);
 });
 
 test("a finished run stays linked to its project and can be continued", async ({ page, request }) => {

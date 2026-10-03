@@ -541,6 +541,175 @@ async function startScan() {
   }
 }
 
+/* ---------- the task planner (New Task Auto) ----------
+ *
+ * A modal collects the prompt; POST api/plan creates the task and
+ * starts the interactive task_planner conversation. While it runs,
+ * the button becomes a link to the conversation, the task list and
+ * action tree adopt the server's writes live, and the Conversations
+ * page offers the reply box (the refinement loop). One plan at a
+ * time — the server says so when a second one is asked for. */
+
+let planConv = null;    // the running plan's conversation id
+let planTaskId = null;  // the task it fills
+let planTimer = 0;
+
+const planModalEl = () => document.getElementById("plan-modal");
+
+function planLlName() {
+  const sel = document.getElementById("plan-llm");
+  return sel && sel.value ? sel.value : "";
+}
+
+/* like the scan's pick, its own remembered choice */
+function planLlmSelect() {
+  const sel = el("select", { id: "plan-llm", "aria-label": "LLM to plan with" });
+  if (!llms.length) {
+    const o = el("option", {
+      value: "", text: "no llm endpoints — add one in Config" });
+    o.selected = true;
+    sel.append(o);
+    return sel;
+  }
+  const remembered = localStorage.getItem("flower.plan.llm") ||
+                     localStorage.getItem("flower.scan.llm") || "";
+  const chosen = llms.some((l) => l.name === remembered)
+    ? remembered : llms[0].name;
+  for (const l of llms) {
+    const o = el("option", { value: l.name, text: l.name });
+    if (l.name === chosen) o.selected = true;
+    sel.append(o);
+  }
+  return sel;
+}
+
+function openPlanModal() {
+  const m = planModalEl();
+  if (!m || !currentProjectId()) return;
+  const row = document.getElementById("plan-llm-row");
+  row.textContent = "";
+  row.append(planLlmSelect());
+  const ta = document.getElementById("plan-prompt");
+  ta.value = "";
+  const err = document.getElementById("err-plan-prompt");
+  if (err) err.textContent = "";
+  m.hidden = false;
+  ta.focus();
+}
+
+function closePlanModal() {
+  const m = planModalEl();
+  if (m) m.hidden = true;
+}
+
+function planPromptValid() {
+  const ta = document.getElementById("plan-prompt");
+  const err = document.getElementById("err-plan-prompt");
+  const v = (ta && ta.value || "").trim();
+  let msg = "";
+  if (!v) msg = "describe the task first";
+  else if (bytes(v) > 4095) msg = "too long (4095 bytes at most)";
+  else if (!noControlsMulti(v)) msg = "no control characters";
+  if (err) err.textContent = msg;
+  return !msg;
+}
+
+async function startAutoPlan() {
+  const pid = currentProjectId();
+  const name = planLlName();
+  const ta = document.getElementById("plan-prompt");
+  if (!pid || !planPromptValid()) return;
+  const prompt = ta.value.trim();
+  let r;
+  try {
+    r = await fetch("api/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: pid, llm: name, prompt }),
+    });
+  } catch (_) {
+    const err = document.getElementById("err-plan-prompt");
+    if (err) err.textContent = "network error — the plan was not started";
+    return;
+  }
+  if (!r.ok) {
+    let msg = `plan failed (${r.status})`;
+    try { msg = (await r.json()).error || msg; } catch (_) {}
+    const err = document.getElementById("err-plan-prompt");
+    if (err) err.textContent = msg;
+    return;
+  }
+  const d = await r.json();
+  localStorage.setItem("flower.plan.llm", name);
+  planConv = d.conversation || null;
+  planTaskId = d.task || null;
+  closePlanModal();
+  await adoptPlanWrites();
+  await loadConvs(); // the running conversation, for the button link
+  if (planTaskId && tasks.some((c) => c.id === planTaskId))
+    selectTask(tasks.findIndex((c) => c.id === planTaskId));
+  renderTaskList(); // the button becomes the conversation link
+  setTaskStatus("planning — reply in the conversation to refine it", "ok");
+  pollPlan();
+}
+
+/* the planner writes through the server; adopt its version of the
+ * task list without disturbing a field mid-edit (like the scan) */
+async function adoptPlanWrites() {
+  if (taskSaveTimer) return; // edits not yet saved: keep them
+  try {
+    const r = await fetch("api/tasks");
+    if (!r.ok) return;
+    const selId = (tasks[taskSel] || {}).id;
+    tasks = (await r.json()).map(taskFromWire);
+    taskSel = Math.max(-1, tasks.findIndex((c) => c.id === selId));
+    renderTaskList();
+    if (!editingIn(taskDetailsEl)) renderTaskDetails();
+    if (!editingIn(actionListEl)) renderActions();
+  } catch (_) { /* keep showing what we have */ }
+}
+
+/* while the plan runs: follow its writes and its conversation; when
+ * the conversation ends the button returns and the task stays */
+async function pollPlan() {
+  clearTimeout(planTimer);
+  try {
+    const r = await fetch("api/plan");
+    if (r.ok) {
+      const d = await r.json();
+      planConv = d.running && d.conversation ? d.conversation : planConv;
+      if (!d.running) planConv = null;
+    }
+  } catch (_) { /* transient: try again on the next tick */ }
+  await adoptPlanWrites();
+  await loadConvs();
+  if (planConv) {
+    renderTaskList(); // the link stays current
+    planTimer = setTimeout(pollPlan, 1600);
+    return;
+  }
+  renderTaskList();
+}
+
+/* the auto button: a button while no plan runs for this project, a
+ * link to the running conversation while one does */
+function autoButtonUpdate() {
+  const btn = document.getElementById("new-task-auto");
+  const link = document.getElementById("plan-open");
+  if (!btn || !link) return;
+  const pid = currentProjectId();
+  const run = pid
+    ? convs.find((c) => c.agent === "task_planner" && c.project === pid &&
+                          c.state === "running")
+    : null;
+  btn.hidden = !pid || !!run;
+  link.hidden = !run;
+  if (run) {
+    link.href = "conversations.html#" + run.id;
+    link.textContent = "Planning… open ▸";
+  }
+}
+
 /* context-item wiring shared by the project editor and the task
  * details — both panes own a context list edited in place. `owner`
  * finds the list's owner (or null), `save` autosaves after an edit,
@@ -1104,7 +1273,10 @@ document.addEventListener("click", (e) => {
   if (picker && !e.target.closest(".emoji-picker, .emoji-pick")) closePicker();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && picker) closePicker();
+  if (e.key !== "Escape") return;
+  if (picker) closePicker();
+  const m = planModalEl();
+  if (m && !m.hidden) closePlanModal();
 });
 
 /* ---------- deck navigation (mobile) ---------- */
@@ -1284,6 +1456,7 @@ function renderTaskList() {
   taskCountEl.textContent =
     vis.length ? `${vis.length} task${vis.length === 1 ? "" : "s"}` : "";
   document.getElementById("new-task").hidden = !pid;
+  autoButtonUpdate();
 }
 
 function renderTaskDraft() {
@@ -1624,6 +1797,21 @@ taskListEl.addEventListener("keydown", (e) => {
 });
 
 document.getElementById("new-task").addEventListener("click", startTaskDraft);
+document.getElementById("new-task-auto")
+  .addEventListener("click", openPlanModal);
+document.getElementById("plan-start")
+  .addEventListener("click", startAutoPlan);
+document.getElementById("plan-cancel")
+  .addEventListener("click", closePlanModal);
+planModalEl().addEventListener("click", (e) => {
+  if (e.target === planModalEl()) closePlanModal(); // the backdrop
+});
+document.getElementById("plan-prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    startAutoPlan();
+  }
+});
 
 taskDetailsEl.addEventListener("input", (e) => {
   /* context item text: live state + live errors, autosave below */
@@ -1959,6 +2147,19 @@ actionListEl.addEventListener("input", (e) => {
       if (scanState.running) pollScan();
     }
   } catch (_) { /* no scan state, no polling */ }
+
+  /* a plan may outlive a page reload too: follow its writes */
+  try {
+    const r = await fetch("api/plan");
+    if (r.ok) {
+      const d = await r.json();
+      if (d.running && d.conversation) {
+        planConv = d.conversation;
+        planTaskId = d.task || null;
+        pollPlan();
+      }
+    }
+  } catch (_) { /* no plan state, no polling */ }
 
   const pane = Number(localStorage.getItem("flower.pane") || "0") || 0;
   if (narrow.matches && pane > 0) deckEl.scrollLeft = pane * deckEl.clientWidth;

@@ -1,8 +1,9 @@
 /*
  * scan — the project scan agent. See scan.h for the process graph;
  * the pieces here are the two write-back mcp tools (MCP_SCAN), the
- * researcher seed files, the runner child, its stdout feed and the
- * conversation capture around all of it.
+ * runner child, its stdout feed and the conversation capture around
+ * all of it. The researcher seeds and the child plumbing live in
+ * src/researchers.c, shared with the task planner (src/plan.c).
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -11,27 +12,22 @@
 #include "context.h"
 #include "conv.h"
 #include "prompts.h"
+#include "researchers.h"
 #include "theme.h"
 #include "util.h"
 
 #include <cJSON.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-
-/* syscall(2) is only declared under _GNU_SOURCE in glibc; the
- * close_range fast path below is worth one targeted declaration */
-extern long syscall(long number, ...);
 
 /* the orchestrator's runner options: research invokes are whole
  * conversations, so a generous tool timeout and many rounds */
@@ -41,25 +37,9 @@ extern long syscall(long number, ...);
 /* how much of a previous run's transcript a follow-up carries */
 #define SCAN_PREV_MAX        8192
 
-/* the researchers: the agents the scanner orchestrates, the research
- * tools each one uses on flower's /mcp surface (their sets are
- * disjoint — that is what attributes an incoming /mcp call to the
- * right sub-conversation), and the sub-conversation currently open
- * for its invoke. online_researcher lists no /mcp tools: its web
- * calls run inside its own llmkit children (mcp-proxy → builtin-mcp)
- * and never reach flower, so they land in no transcript */
-typedef struct {
-    const char *agent;
-    const char *tools[8]; /* NULL-terminated */
-    char sub[CONV_ID_LEN + 1];
-} researcher_t;
-
-static researcher_t RESEARCHERS[] = {
-    { "filesystem_researcher",
-      { "read_file", "list_files", "grep", NULL }, { 0 } },
-    { "online_researcher",
-      { NULL }, { 0 } },
-};
+/* this engine's open sub-conversations, one slot per researcher
+ * (the researcher defs themselves live in src/researchers.c) */
+static char SUBS[RESEARCHERS_MAX][CONV_ID_LEN + 1];
 
 /* the runner's tool calls, in flight until their response record
  * arrives (a FIFO: llmkit answers calls in order) */
@@ -321,41 +301,38 @@ static void args_brief(const cJSON *args, char *dst, size_t n)
     free(j);
 }
 
-static researcher_t *researcher_for_tool(const char *tool)
+/* the researcher def's index into the shared table, -1 when unknown */
+static int researcher_index(const researcher_def_t *r)
 {
-    if (!tool) return NULL;
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
-        for (size_t k = 0; RESEARCHERS[i].tools[k]; k++)
-            if (strcmp(RESEARCHERS[i].tools[k], tool) == 0)
-                return &RESEARCHERS[i];
-    return NULL;
+    return r ? (int)(r - researchers()) : -1;
 }
 
 /* "<agent>.invoke" — the runner's name for one researcher round */
-static researcher_t *researcher_for_invoke(const char *tool)
+static int invoke_index(const char *tool)
 {
-    if (!tool) return NULL;
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++) {
-        const char *agent = RESEARCHERS[i].agent;
+    if (!tool) return -1;
+    for (size_t i = 0; i < researchers_count(); i++) {
+        const char *agent = researchers()[i].agent;
         size_t alen = strlen(agent);
         if (strncmp(tool, agent, alen) == 0 &&
             strcmp(tool + alen, ".invoke") == 0)
-            return &RESEARCHERS[i];
+            return (int)i;
     }
-    return NULL;
+    return -1;
 }
 
-static researcher_t *researcher_for_sub(const char *sub)
+/* the researcher whose sub-conversation `sub` is, -1 when none */
+static int sub_index(const char *sub)
 {
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
-        if (RESEARCHERS[i].sub[0] && strcmp(RESEARCHERS[i].sub, sub) == 0)
-            return &RESEARCHERS[i];
-    return NULL;
+    if (!sub || !sub[0]) return -1;
+    for (size_t i = 0; i < researchers_count(); i++)
+        if (strcmp(SUBS[i], sub) == 0) return (int)i;
+    return -1;
 }
 
 /* the invoke's prompt becomes the sub-conversation's title (first
  * line) and its opening user record */
-static void open_sub(researcher_t *r, const char *input)
+static void open_sub(int idx, const char *input)
 {
     input = input ? input : "";
     char line[256], title[CONV_TITLE_MAX];
@@ -366,12 +343,15 @@ static void open_sub(researcher_t *r, const char *input)
     }
     line[i] = '\0';
     utf8_trunc(title, sizeof title, line, 96);
-    if (!title[0]) snprintf(title, sizeof title, "%s round", r->agent);
+    if (!title[0])
+        snprintf(title, sizeof title, "%s round",
+                 researchers()[idx].agent);
 
     char id[CONV_ID_LEN + 1];
-    if (conv_create(r->agent, S.llm, S.project, S.conv, title, id) != 0)
+    if (conv_create(researchers()[idx].agent, S.llm, S.project, S.conv,
+                    title, 0, id) != 0)
         return; /* the call still lands in the main conversation */
-    snprintf(r->sub, sizeof r->sub, "%s", id);
+    snprintf(SUBS[idx], sizeof SUBS[idx], "%s", id);
     conv_add(id, "user", NULL, input, 0);
 }
 
@@ -379,57 +359,27 @@ static void close_sub(const char *sub, int state, const char *answer)
 {
     conv_add(sub, "response", NULL, answer ? answer : "", 0);
     conv_finish(sub, (conv_state_t)state);
-    researcher_t *r = researcher_for_sub(sub);
-    if (r) r->sub[0] = '\0';
+    int idx = sub_index(sub);
+    if (idx >= 0) SUBS[idx][0] = '\0';
 }
 
 /* the researchers' own tool calls, arriving on flower's /mcp surface
  * while their invoke runs: folded into the open sub-conversation.
- * Calls while nothing is open are somebody else's (an external mcp
- * client) and are not recorded. */
+ * Calls while nothing is open are somebody else's (another engine's
+ * run, or an external mcp client) and are not recorded. */
 static void log_research_tool(const char *tool, const cJSON *args,
                               const char *result, int is_error)
 {
     if (!S.running) return;
-    researcher_t *r = researcher_for_tool(tool);
-    if (!r || !r->sub[0]) return;
+    int idx = researcher_index(researcher_for_tool(tool));
+    if (idx < 0 || !SUBS[idx][0]) return;
     char brief[448];
     args_brief(args, brief, sizeof brief);
-    conv_add(r->sub, "tool_call", tool, brief, 0);
-    conv_add(r->sub, "tool_result", tool, result ? result : "", is_error);
+    conv_add(SUBS[idx], "tool_call", tool, brief, 0);
+    conv_add(SUBS[idx], "tool_result", tool, result ? result : "", is_error);
 }
 
-/* ---------- record plumbing (cJSON -> one jsonl line) ---------- */
-
-static int put_record(sbuf_t *out, const cJSON *rec)
-{
-    if (!rec) return -1;
-    char *line = cJSON_PrintUnformatted(rec);
-    if (!line) return -1;
-    int rc = sb_puts(out, line) != 0 || sb_putc(out, '\n') != 0 ? -1 : 0;
-    free(line);
-    return rc;
-}
-
-static cJSON *text_record(const char *type, const char *text)
-{
-    cJSON *rec = cJSON_CreateObject();
-    cJSON *block = cJSON_CreateObject();
-    cJSON *blocks = cJSON_CreateArray();
-    if (!rec || !block || !blocks ||
-        !cJSON_AddStringToObject(rec, "type", type) ||
-        !cJSON_AddStringToObject(block, "type", "text") ||
-        !cJSON_AddStringToObject(block, "text", text ? text : ""))
-        goto fail;
-    cJSON_AddItemToArray(blocks, block);
-    cJSON_AddItemToObject(rec, "content", blocks);
-    return rec;
-fail:
-    cJSON_Delete(rec);
-    cJSON_Delete(block);
-    cJSON_Delete(blocks);
-    return NULL;
-}
+/* ---------- prompt rendering ---------- */
 
 /* a compiled-in prompt file, rendered for `proj`, with a fallback */
 static char *render_prompt(const char *path, const project_t *proj,
@@ -481,319 +431,21 @@ static char *scan_user_prompt(const project_t *proj)
     return out;
 }
 
-/* ---------- researcher seeds ---------- */
-
-static void seed_path(const char *file, char *buf, size_t n)
-{
-    snprintf(buf, n, "%s/scan/%s", theme_dir(), file);
-}
-
-/* the seed's stable home: {config}/scan/<tag><agent>.jsonl. Scans use
- * a bare tag (their seeds are scratch, unlinked at the end); the
- * researcher subcommand prefixes debug- so its seeds never collide
- * with a concurrent scan's */
-static void researcher_seed_path(const char *tag, const char *agent,
-                                 char *buf, size_t n)
-{
-    char file[96];
-    snprintf(file, sizeof file, "%s%s.jsonl", tag, agent);
-    seed_path(file, buf, n);
-}
-
-/* sh-safe: 'foo' with embedded quotes escaped */
-static void shell_quote(const char *in, char *out, size_t n)
-{
-    size_t o = 0;
-    if (o < n - 1) out[o++] = '\'';
-    for (const char *p = in; *p && o < n - 4; p++) {
-        if (*p == '\'') {
-            out[o++] = '\'';
-            out[o++] = '\\';
-            out[o++] = '\'';
-            out[o++] = '\'';
-        } else {
-            out[o++] = *p;
-        }
-    }
-    if (o < n - 1) out[o++] = '\'';
-    out[o] = '\0';
-}
-
-/* atomic write of raw bytes (the seeds are jsonl, not one json doc) */
-static int write_file_atomic(const char *path, const char *buf, size_t len)
-{
-    char tmp[4352 + 16];
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
-    size_t w = fwrite(buf, 1, len, f);
-    if (w != len || fflush(f) != 0 || fclose(f) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    return 0;
-}
-
-/* ---------- the online researcher's web tools ---------- */
-
-/* llmkit (>= 1.2.0) ships generic web tools as `llmkit builtin-mcp`.
- * flower hands them to the online researcher through an
- * `llmkit mcp-proxy` config written beside the seeds: only
- * web_search and web_fetch pass the whitelist (the file tools stay
- * out — researchers are read-only), and both carry flower's own
- * texts from prompts/mcp/, so the model sees the same
- * flower.web_search(query) / flower.web_fetch(url) tools as when
- * flower served them itself. The calls run inside the researcher's
- * own llmkit children; they never reach flower, so they land in no
- * transcript */
-
-/* one {"type":"expose",…} record: tool `tool`, its upstream argument
- * `upstream_arg` renamed to flower's `arg` when the two differ */
-static int put_web_expose(sbuf_t *b, const char *tool,
-                          const char *upstream_arg, const char *arg)
-{
-    char path[96], sel[64];
-    snprintf(sel, sizeof sel, "builtin.%s", tool);
-
-    cJSON *one = cJSON_CreateObject();
-    cJSON *args = cJSON_CreateObject();
-    cJSON *ex = cJSON_CreateObject();
-    int ok = one && args && ex &&
-             cJSON_AddStringToObject(ex, "type", "expose") != NULL &&
-             cJSON_AddStringToObject(ex, "tool", sel) != NULL &&
-             cJSON_AddStringToObject(ex, "name", tool) != NULL;
-
-    snprintf(path, sizeof path, "mcp/%s/description.txt", tool);
-    char *d = prompt_text(path);
-    if (ok && d && *d)
-        ok = cJSON_AddStringToObject(ex, "description", d) != NULL;
-    free(d);
-
-    if (ok && strcmp(upstream_arg, arg) != 0)
-        ok = cJSON_AddStringToObject(one, "name", arg) != NULL;
-    snprintf(path, sizeof path, "mcp/%s/arguments/%s.txt", tool, arg);
-    d = prompt_text(path);
-    if (ok && d && *d)
-        ok = cJSON_AddStringToObject(one, "description", d) != NULL;
-    free(d);
-
-    if (ok) {
-        cJSON_AddItemToObject(args, upstream_arg, one);
-        cJSON_AddItemToObject(ex, "arguments", args);
-    } else {
-        cJSON_Delete(one);
-        cJSON_Delete(args);
-    }
-    int rc = ok ? put_record(b, ex) : -1;
-    cJSON_Delete(ex);
-    return rc;
-}
-
-static int write_web_tools_config(const char *path, char *err, size_t err_n)
-{
-    char q_llmkit[1100], cmd[1200];
-    shell_quote(S.llmkit, q_llmkit, sizeof q_llmkit);
-    snprintf(cmd, sizeof cmd, "%s builtin-mcp", q_llmkit);
-
-    sbuf_t b = { 0 };
-    int rc = 0;
-
-    /* the upstream: llmkit's own generic web tools */
-    cJSON *srv = cJSON_CreateObject();
-    cJSON *servers = cJSON_CreateArray();
-    cJSON *rec = cJSON_CreateObject();
-    if (srv) {
-        cJSON_AddStringToObject(srv, "type", "stdio");
-        cJSON_AddStringToObject(srv, "name", "builtin");
-        cJSON_AddStringToObject(srv, "command_line", cmd);
-        if (servers) cJSON_AddItemToArray(servers, srv);
-        else cJSON_Delete(srv);
-    }
-    if (rec) {
-        cJSON_AddStringToObject(rec, "type", "tools");
-        cJSON_AddItemToObject(rec, "tools", servers);
-    } else {
-        cJSON_Delete(servers);
-    }
-    rc |= put_record(&b, rec);
-    cJSON_Delete(rec);
-
-    /* flower's view: the two web tools, none of the file tools */
-    rc |= put_web_expose(&b, "web_search", "keywords", "query");
-    rc |= put_web_expose(&b, "web_fetch", "url", "url");
-
-    if (rc != 0 || !b.data) {
-        free(b.data);
-        snprintf(err, err_n, "cannot assemble the web tools config");
-        return -1;
-    }
-    if (write_file_atomic(path, b.data, b.len) != 0) {
-        free(b.data);
-        snprintf(err, err_n, "cannot write %s", path);
-        return -1;
-    }
-    free(b.data);
-    return 0;
-}
-
-/* the researcher's web tool server: the proxy grown from that config,
- * named "flower" so the model keeps calling flower.web_search /
- * flower.web_fetch — the system prompt already speaks those names */
-static int add_web_tools_server(cJSON *servers, const char *cfg)
-{
-    char q_llmkit[1100], q_cfg[4400], cmd[5600];
-    shell_quote(S.llmkit, q_llmkit, sizeof q_llmkit);
-    shell_quote(cfg, q_cfg, sizeof q_cfg);
-    snprintf(cmd, sizeof cmd, "%s mcp-proxy %s", q_llmkit, q_cfg);
-
-    cJSON *srv = cJSON_CreateObject();
-    if (!srv ||
-        !cJSON_AddStringToObject(srv, "type", "stdio") ||
-        !cJSON_AddStringToObject(srv, "name", "flower") ||
-        !cJSON_AddStringToObject(srv, "command_line", cmd) ||
-        !cJSON_AddBoolToObject(srv, "required", 1)) {
-        cJSON_Delete(srv);
-        return -1;
-    }
-    cJSON_AddItemToArray(servers, srv);
-    return 0;
-}
-
-/* the seed for one researcher: header, the chosen llm, the research
- * tools (flower /mcp, or llmkit's builtin web tools for the online
- * researcher), the rendered system prompt and the agent-as-tool
- * presentation of its single invoke tool. `tag` namespaces the seed
- * (and the web tools config beside it) — "" for scans, "debug-" for
- * the researcher subcommand */
-static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
-                                 const project_t *proj, const char *tag,
-                                 char *err, size_t err_n)
-{
-    char path[4352], dpath[4352];
-    researcher_seed_path(tag, researcher->name, path, sizeof path);
-    snprintf(dpath, sizeof dpath, "%s/scan", theme_dir());
-    mkdir(dpath, 0700);
-
-    sbuf_t b = { 0 };
-    int rc = 0;
-    cJSON *rec;
-
-    rec = cJSON_Parse("{\"type\":\"header\",\"version\":1}");
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
-
-    rec = agents_llm_record(researcher, llm);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
-
-    rec = cJSON_CreateObject();
-    /* the researcher's tools: flower's mcp scoped to the scanned
-     * project — the fs tools see its directory as their root */
-    cJSON *servers = agents_tools_record(researcher, S.base_url,
-                                         proj->seq);
-    if (servers && strcmp(researcher->name, "online_researcher") == 0) {
-        /* the online researcher reads the web instead: llmkit's
-         * builtin web tools, curated by the proxy config written
-         * beside this seed */
-        char wname[96], cfg[4352];
-        snprintf(wname, sizeof wname, "%sweb-tools.jsonl", tag);
-        seed_path(wname, cfg, sizeof cfg);
-        if (write_web_tools_config(cfg, err, err_n) != 0) {
-            cJSON_Delete(servers);
-            free(b.data);
-            return -1;
-        }
-        if (add_web_tools_server(servers, cfg) != 0) {
-            cJSON_Delete(servers);
-            free(b.data);
-            snprintf(err, err_n, "cannot assemble the %s web tools server",
-                     researcher->name);
-            return -1;
-        }
-    }
-    if (rec && servers && cJSON_AddStringToObject(rec, "type", "tools"))
-        cJSON_AddItemToObject(rec, "tools", servers);
-    else cJSON_Delete(servers);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
-
-    /* the researcher's prompt, rendered for this project (the
-     * {{project_*}} variables are the scan's whole brief) */
-    char *system = prompt_render(researcher->system_prompt, proj);
-    rec = text_record("system", system);
-    free(system);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
-
-    /* the invoke presentation: prompt files, like every other text */
-    char ppath[160];
-    char *d;
-    snprintf(ppath, sizeof ppath, "agents/%s/tool_description.txt",
-             researcher->name);
-    d = prompt_text(ppath);
-    rec = cJSON_CreateObject();
-    if (rec && cJSON_AddStringToObject(rec, "type", "agent-as-tool")) {
-        if (d && *d) cJSON_AddStringToObject(rec, "tool_description", d);
-        free(d);
-        snprintf(ppath, sizeof ppath, "agents/%s/input_description.txt",
-                 researcher->name);
-        d = prompt_text(ppath);
-        if (d && *d) cJSON_AddStringToObject(rec, "input_description", d);
-        free(d);
-    } else {
-        free(d);
-    }
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
-
-    if (rc != 0 || !b.data) {
-        free(b.data);
-        snprintf(err, err_n, "cannot assemble the %s seed", researcher->name);
-        return -1;
-    }
-    if (write_file_atomic(path, b.data, b.len) != 0) {
-        free(b.data);
-        snprintf(err, err_n, "cannot write %s", path);
-        return -1;
-    }
-    free(b.data);
-    return 0;
-}
-
 /* ---------- the runner's stdin records ---------- */
 
-/* the two researchers as stdio servers, grown from their seeds */
+/* the two researchers as stdio servers, grown from their seeds. The
+ * fs tools are scoped to the scanned project — its surface grounds
+ * relative paths in the project's directory */
 static int add_researcher_servers(cJSON *servers, const llm_t *llm,
                                   const project_t *proj, char *err, size_t err_n)
 {
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++) {
-        const char *name = RESEARCHERS[i].agent;
-        const agent_t *ag = agents_builtin_get(name);
-        if (!ag) {
-            snprintf(err, err_n, "builtin agent %s is missing", name);
+    char fs_url[CFG_URL_MAX + 64];
+    snprintf(fs_url, sizeof fs_url, "%s/projects/%lld/mcp", S.base_url,
+             proj->seq);
+    for (size_t i = 0; i < researchers_count(); i++) {
+        if (researcher_add_server(servers, &researchers()[i], llm, proj, "",
+                                  S.llmkit, fs_url, err, err_n) != 0)
             return -1;
-        }
-        char seed[4352];
-        researcher_seed_path("", name, seed, sizeof seed);
-        if (write_researcher_seed(ag, llm, proj, "", err, err_n) != 0)
-            return -1;
-
-        char q_llmkit[1100], q_seed[4400];
-        shell_quote(S.llmkit, q_llmkit, sizeof q_llmkit);
-        shell_quote(seed, q_seed, sizeof q_seed);
-        char cmd[5600];
-        snprintf(cmd, sizeof cmd, "%s agent-as-tool %s", q_llmkit, q_seed);
-
-        cJSON *srv = cJSON_CreateObject();
-        if (!srv ||
-            !cJSON_AddStringToObject(srv, "type", "stdio") ||
-            !cJSON_AddStringToObject(srv, "name", name) ||
-            !cJSON_AddStringToObject(srv, "command_line", cmd) ||
-            !cJSON_AddBoolToObject(srv, "required", 1)) {
-            cJSON_Delete(srv);
-            snprintf(err, err_n, "out of memory");
-            return -1;
-        }
-        cJSON_AddItemToArray(servers, srv);
     }
     return 0;
 }
@@ -809,10 +461,10 @@ static char *build_runner_input(const agent_t *scanner, const llm_t *llm,
     cJSON *rec;
 
     rec = cJSON_Parse("{\"type\":\"header\",\"version\":1}");
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     rec = agents_llm_record(scanner, llm);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     /* tools: the scanner's own (flower /scan/mcp) + the researchers */
     rec = cJSON_CreateObject();
@@ -830,28 +482,28 @@ static char *build_runner_input(const agent_t *scanner, const llm_t *llm,
         return NULL;
     }
     cJSON_AddItemToObject(rec, "tools", servers);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     rec = cJSON_CreateObject();
     if (rec && cJSON_AddStringToObject(rec, "type", "options")) {
         cJSON_AddNumberToObject(rec, "max_tool_rounds", SCAN_MAX_ROUNDS);
         cJSON_AddNumberToObject(rec, "tool_call_timeout", SCAN_TOOL_TIMEOUT);
     }
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     char *system = render_prompt("agents/project_scanner/system_prompt.txt",
                                  proj, "You are a project scan agent.");
-    rec = text_record("system", system);
+    rec = rec_text("system", system);
     free(system);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     char *user = scan_user_prompt(proj);
-    rec = text_record("user", user);
+    rec = rec_text("user", user);
     free(user);
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     rec = cJSON_Parse("{\"type\":\"flush\"}");
-    rc |= put_record(&b, rec); cJSON_Delete(rec);
+    rc |= rec_put(&b, rec); cJSON_Delete(rec);
 
     if (rc != 0 || !b.data) {
         free(b.data);
@@ -863,97 +515,14 @@ static char *build_runner_input(const agent_t *scanner, const llm_t *llm,
 
 /* ---------- the child ---------- */
 
-static int write_all(int fd, const char *buf, size_t len)
-{
-    while (len > 0) {
-        ssize_t n = write(fd, buf, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        buf += n;
-        len -= (size_t)n;
-    }
-    return 0;
-}
-
-/* fork/exec `llmkit runner`; the seed goes to its stdin (it drains
- * eagerly, so the blocking write cannot stall), its stdout comes
- * back non-blocking through the epoll loop. Returns 0 on success. */
+/* fork/exec the runner and hand it the whole feed at once; its stdin
+ * closes with the feed (a scan is one turn — the interactive variant
+ * that keeps it open lives in src/plan.c) */
 static int spawn_runner(const char *input, char *err, size_t err_n)
 {
-    int in_pipe[2], out_pipe[2];
-    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
-        snprintf(err, err_n, "pipe: %s", strerror(errno));
-        if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
-        if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
+    if (runner_spawn(S.llmkit, input, S.epfd, &S.pid, &S.out_fd,
+                     err, err_n) != 0)
         return -1;
-    }
-
-    fflush(NULL);
-    pid_t pid = fork();
-    if (pid < 0) {
-        snprintf(err, err_n, "fork: %s", strerror(errno));
-        close(in_pipe[0]); close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        /* the child: jsonl on stdin/stdout, stderr passes through */
-        dup2(in_pipe[0], 0);
-        dup2(out_pipe[1], 1);
-        setpgid(0, 0); /* its own group: stopping it reaches its own
-                          stdio servers, never flower */
-        /* flower's stop handlers must not survive into the exec
-         * window: reset them, or a stop signal arrives while this is
-         * still the flower image and gets swallowed by the handler */
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-        /* nothing else is inherited: other servers' pipes and any
-         * open sockets belong to the parent, not to the runner */
-        int closed = 0;
-#ifdef SYS_close_range
-        if (syscall(SYS_close_range, 3, ~0U, 0) == 0) closed = 1;
-#endif
-        if (!closed) {
-            long maxfd = sysconf(_SC_OPEN_MAX);
-            if (maxfd < 0) maxfd = 16384;
-            for (int fd = 3; fd < maxfd; fd++) close(fd);
-        }
-        if (strchr(S.llmkit, '/'))
-            execl(S.llmkit, "llmkit", "runner", (char *)NULL);
-        else
-            execlp(S.llmkit, "llmkit", "runner", (char *)NULL);
-        _exit(127);
-    }
-    close(in_pipe[0]);
-    close(out_pipe[1]);
-    setpgid(pid, pid); /* both sides race to set it; either winning is fine */
-
-    int rc = write_all(in_pipe[1], input, strlen(input));
-    int e = errno;
-    close(in_pipe[1]);
-    if (rc != 0) {
-        snprintf(err, err_n, "cannot feed the runner: %s", strerror(e));
-        close(out_pipe[0]);
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        return -1;
-    }
-
-    int fl = fcntl(out_pipe[0], F_GETFL, 0);
-    if (fl >= 0) fcntl(out_pipe[0], F_SETFL, fl | O_NONBLOCK);
-    struct epoll_event ev = { .events = EPOLLIN, .data.fd = out_pipe[0] };
-    if (epoll_ctl(S.epfd, EPOLL_CTL_ADD, out_pipe[0], &ev) != 0) {
-        snprintf(err, err_n, "epoll_ctl: %s", strerror(errno));
-        close(out_pipe[0]);
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        return -1;
-    }
-
-    S.pid = pid;
-    S.out_fd = out_pipe[0];
     S.out.len = 0; /* fresh buffer for this run */
     if (S.out.data) S.out.data[0] = '\0';
     return 0;
@@ -1002,15 +571,15 @@ static void handle_line(char *line)
         args_brief(args, brief, sizeof brief);
         /* a researcher invoke opens the researcher's own
          * sub-conversation, linked to this scan's */
-        researcher_t *r = researcher_for_invoke(tn);
-        if (r) {
+        int idx = invoke_index(tn);
+        if (idx >= 0) {
             const cJSON *input =
                 cJSON_GetObjectItemCaseSensitive(args, "input");
-            open_sub(r, cJSON_IsString(input) && input->valuestring
-                         ? input->valuestring : "");
+            open_sub(idx, cJSON_IsString(input) && input->valuestring
+                          ? input->valuestring : "");
         }
         conv_add(S.conv, "tool_call", tn, brief, 0);
-        pend_push(tn, r ? r->sub : "");
+        pend_push(tn, idx >= 0 ? SUBS[idx] : "");
     } else if (strcmp(t, "tool_response") == 0) {
         /* answers arrive in call order: the FIFO entry says whether
          * the call was an invoke whose conversation closes here */
@@ -1054,13 +623,7 @@ static void process_lines(void)
 
 static void unlink_seeds(void)
 {
-    char path[4352];
-    seed_path("filesystem_researcher.jsonl", path, sizeof path);
-    unlink(path);
-    seed_path("online_researcher.jsonl", path, sizeof path);
-    unlink(path);
-    seed_path("web-tools.jsonl", path, sizeof path);
-    unlink(path);
+    researchers_unlink_seeds("");
 }
 
 static void scan_finish(void)
@@ -1110,12 +673,12 @@ static void scan_finish(void)
 
     /* close the conversations: still-open sub-conversations first
      * (children before the parent), then the scan's own */
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
-        if (RESEARCHERS[i].sub[0]) {
-            conv_add(RESEARCHERS[i].sub, "error", NULL,
+    for (size_t i = 0; i < researchers_count(); i++)
+        if (SUBS[i][0]) {
+            conv_add(SUBS[i], "error", NULL,
                      "the scan ended before this conversation finished", 1);
-            conv_finish(RESEARCHERS[i].sub, CONV_STOPPED);
-            RESEARCHERS[i].sub[0] = '\0';
+            conv_finish(SUBS[i], CONV_STOPPED);
+            SUBS[i][0] = '\0';
         }
     if (S.conv[0]) {
         if (S.error[0]) conv_add(S.conv, "error", NULL, S.error, 1);
@@ -1216,7 +779,8 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
      * (captured before this run's own conversation exists) */
     snprintf(S.note, sizeof S.note, "%s", note ? note : "");
     S.prev[0] = '\0';
-    if (S.note[0]) conv_latest_root_id(project_id, S.prev);
+    if (S.note[0])
+        conv_latest_root_id(project_id, "project_scanner", S.prev);
 
     /* the conversation this scan is recorded in — created before the
      * child so even a failed spawn leaves a readable trace */
@@ -1224,7 +788,7 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
     snprintf(title, sizeof title, "Project scan — %s",
              p->title[0] ? p->title : p->dir);
     if (conv_create("project_scanner", llm_name ? llm_name : "", project_id,
-                    "", title, S.conv) != 0) {
+                    "", title, 0, S.conv) != 0) {
         snprintf(err, err_n, "cannot create the conversation record");
         return SCAN_START_SPAWN;
     }
@@ -1394,12 +958,9 @@ int researcher_main(int argc, char **argv)
         return 2;
     }
 
-    /* only the two researchers run here — the scanner itself has no
-     * life outside a scan */
-    int found = 0;
-    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
-        if (strcmp(agent, RESEARCHERS[i].agent) == 0) found = 1;
-    if (!found) {
+    /* only the two researchers run here — the scanner and the
+     * planner have no life outside their engines */
+    if (!researcher_by_agent(agent)) {
         fprintf(stderr, "flower researcher: '%s' is not a researcher agent"
                         " (filesystem_researcher | online_researcher)\n",
                 agent);
@@ -1461,27 +1022,32 @@ int researcher_main(int argc, char **argv)
         return 1;
     }
 
-    /* write_researcher_seed reads the wiring scan_attach sets for the
-     * server; a debug run needs only these two of it */
-    snprintf(S.llmkit, sizeof S.llmkit, "%s",
-             llmkit && llmkit[0] ? llmkit : "llmkit");
-    snprintf(S.base_url, sizeof S.base_url, "%s",
-             base_url && base_url[0] ? base_url
-                                     : "http://127.0.0.1:8080");
+    /* the seed writer needs the wiring the server gets from
+     * scan_attach; a debug run needs only these three of it */
+    char lk[512], base[CFG_URL_MAX + 32];
+    snprintf(lk, sizeof lk, "%s", llmkit && llmkit[0] ? llmkit : "llmkit");
+    snprintf(base, sizeof base, "%s",
+             base_url && base_url[0] ? base_url : "http://127.0.0.1:8080");
 
+    const researcher_def_t *def = researcher_by_agent(agent);
+    char fs_url[CFG_URL_MAX + 64];
+    snprintf(fs_url, sizeof fs_url, "%s/projects/%lld/mcp", base, p->seq);
     char err[192] = "";
-    if (write_researcher_seed(ag, l, p, "debug-", err, sizeof err) != 0) {
-        fprintf(stderr, "flower researcher: %s\n", err);
+    if (!def ||
+        researcher_write_seed(def, l, p, "debug-", lk, fs_url,
+                              err, sizeof err) != 0) {
+        fprintf(stderr, "flower researcher: %s\n",
+                def ? err : "the researcher definition is missing");
         return 1;
     }
 
     char seed[4352];
     researcher_seed_path("debug-", agent, seed, sizeof seed);
-    if (strchr(S.llmkit, '/'))
-        execl(S.llmkit, "llmkit", "agent-as-tool", seed, (char *)NULL);
+    if (strchr(lk, '/'))
+        execl(lk, "llmkit", "agent-as-tool", seed, (char *)NULL);
     else
-        execlp(S.llmkit, "llmkit", "agent-as-tool", seed, (char *)NULL);
-    fprintf(stderr, "flower researcher: cannot run %s: %s\n", S.llmkit,
+        execlp(lk, "llmkit", "agent-as-tool", seed, (char *)NULL);
+    fprintf(stderr, "flower researcher: cannot run %s: %s\n", lk,
             strerror(errno));
     return 127;
 }

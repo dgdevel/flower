@@ -1,0 +1,1 @@
+Where the action sits in the refinement loop: observe, analyze, find_root_cause, act (the default), validate or improve.

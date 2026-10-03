@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 /* ---------- paths & ids ---------- */
 
@@ -89,6 +90,7 @@ typedef struct {
     char title[CONV_TITLE_MAX];
     long long started, ended;
     int state;
+    int interactive;
 } conv_meta_t;
 
 /* lenient parse: whatever is missing stays default, nothing fails */
@@ -119,6 +121,8 @@ static void meta_from_json(const cJSON *j, conv_meta_t *m)
         int s = state_from_name(v->valuestring);
         if (s >= 0) m->state = s;
     }
+    v = cJSON_GetObjectItemCaseSensitive(j, "interactive");
+    if (cJSON_IsBool(v)) m->interactive = cJSON_IsTrue(v);
 }
 
 static int meta_load(const char *id, conv_meta_t *m)
@@ -152,6 +156,8 @@ static int meta_save(const conv_meta_t *m)
         cJSON_AddNumberToObject(o, "started", (double)m->started) &&
         cJSON_AddNumberToObject(o, "ended", (double)m->ended) &&
         cJSON_AddStringToObject(o, "state", state_name(m->state));
+    if (ok && m->interactive)
+        ok = cJSON_AddBoolToObject(o, "interactive", 1) != NULL;
     char path[4352 + 64];
     conv_path(m->id, "meta.json", path, sizeof path);
     int rc = ok ? save_json_atomic(path, o) : -1;
@@ -172,6 +178,10 @@ static cJSON *meta_to_cjson(const conv_meta_t *m)
         !cJSON_AddNumberToObject(o, "started", (double)m->started) ||
         !cJSON_AddNumberToObject(o, "ended", (double)m->ended) ||
         !cJSON_AddStringToObject(o, "state", state_name(m->state))) {
+        cJSON_Delete(o);
+        return NULL;
+    }
+    if (m->interactive && !cJSON_AddBoolToObject(o, "interactive", 1)) {
         cJSON_Delete(o);
         return NULL;
     }
@@ -258,7 +268,8 @@ void conv_boot(void)
 }
 
 int conv_create(const char *agent, const char *llm, const char *project,
-                const char *parent, const char *title, char *id_out)
+                const char *parent, const char *title, int interactive,
+                char *id_out)
 {
     if (!agent || !agent[0] || !title || !title[0]) return -1;
 
@@ -279,6 +290,7 @@ int conv_create(const char *agent, const char *llm, const char *project,
     m.started = (long long)time(NULL);
     m.ended = 0;
     m.state = CONV_RUNNING;
+    m.interactive = interactive ? 1 : 0;
 
     char dir[4352 + 64], root[4352];
     convs_dir(root, sizeof root);
@@ -438,20 +450,113 @@ char *conv_get_json(const char *id)
     return s;
 }
 
-void conv_latest_root_id(const char *project, char *id_out)
+void conv_latest_root_id(const char *project, const char *agent,
+                         char *id_out)
 {
     id_out[0] = '\0';
-    if (!project || !project[0]) return;
+    if (!project || !project[0] || !agent || !agent[0]) return;
     size_t n;
     conv_meta_t *all = load_metas(&n); /* newest first */
     if (!all) return;
     for (size_t i = 0; i < n; i++) {
         if (all[i].parent[0]) continue; /* a sub-agent, not a run */
         if (strcmp(all[i].project, project) != 0) continue;
+        if (strcmp(all[i].agent, agent) != 0) continue;
         snprintf(id_out, CONV_ID_LEN + 1, "%s", all[i].id);
         break;
     }
     free(all);
+}
+
+int conv_exists(const char *id)
+{
+    if (!conv_valid_id(id)) return 0;
+    conv_meta_t m;
+    return meta_load(id, &m) == 0;
+}
+
+/* rmdir one conversation directory: its files (meta.json,
+ * records.jsonl) unlinked, unknown leftovers removed too */
+static int rm_conv_dir(const char *id)
+{
+    char idbuf[CONV_ID_LEN + 1], dir[4352 + 64];
+    path_set(idbuf, sizeof idbuf, id);
+    conv_path(idbuf, "", dir, sizeof dir);
+    /* conv_path appends "/file": cut the trailing slash for opendir */
+    size_t dl = strlen(dir);
+    if (dl && dir[dl - 1] == '/') dir[dl - 1] = '\0';
+
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    char path[4352 + 80];
+    const struct dirent *e;
+    int rc = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 ||
+            strcmp(e->d_name, "..") == 0) continue;
+        char name[256 + 1];
+        snprintf(name, sizeof name, "%s", e->d_name);
+        snprintf(path, sizeof path, "%s/%s", dir, name);
+        if (unlink(path) != 0 && errno != ENOENT) rc = -1;
+    }
+    closedir(d);
+    if (rmdir(dir) != 0) return -1;
+    return rc;
+}
+
+conv_del_result_t conv_delete(const char *id, char *err, size_t err_n)
+{
+    conv_meta_t m;
+    if (!conv_valid_id(id) || meta_load(id, &m) != 0)
+        return CONV_DEL_MISSING;
+
+    /* the id and every sub-agent below it (sub-agents do not spawn
+     * their own, but the walk costs nothing and stays true) */
+    char ids[CONV_LIST_MAX][CONV_ID_LEN + 1];
+    size_t n = 0;
+    path_set(ids[n++], sizeof ids[0], id);
+    int again = 1;
+    while (again && n < CONV_LIST_MAX) {
+        again = 0;
+        size_t n_all;
+        conv_meta_t *all = load_metas(&n_all);
+        if (!all) break;
+        for (size_t i = 0; i < n_all; i++) {
+            if (!all[i].parent[0]) continue;
+            int known = 0;
+            for (size_t k = 0; k < n; k++)
+                if (strcmp(ids[k], all[i].parent) == 0) known = 1;
+            if (!known) continue;
+            int have = 0;
+            for (size_t k = 0; k < n; k++)
+                if (strcmp(ids[k], all[i].id) == 0) have = 1;
+            if (have) continue;
+            if (all[i].state == CONV_RUNNING) {
+                snprintf(err, err_n,
+                         "conversation %s is still running — stop it first",
+                         all[i].id);
+                free(all);
+                return CONV_DEL_RUNNING;
+            }
+            path_set(ids[n++], sizeof ids[0], all[i].id);
+            again = 1;
+        }
+        free(all);
+    }
+
+    if (m.state == CONV_RUNNING) {
+        snprintf(err, err_n,
+                 "conversation %s is still running — stop it first", id);
+        return CONV_DEL_RUNNING;
+    }
+
+    int rc = CONV_DEL_OK;
+    for (size_t i = 0; i < n; i++)
+        if (rm_conv_dir(ids[i]) != 0) rc = CONV_DEL_IO;
+    if (rc == CONV_DEL_IO)
+        snprintf(err, err_n, "cannot remove the conversation directory");
+    g_version++;
+    return rc;
 }
 
 /* one record object -> "kind[tool]: text" + newline (the timestamp is

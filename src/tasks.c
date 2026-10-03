@@ -680,6 +680,45 @@ tasks_parse_result_t tasks_from_json(const char *buf, size_t len,
     return TASKS_OK;
 }
 
+/* ---------- live-store helpers ---------- */
+
+int tasks_find_id(const tasks_t *c, const char *id)
+{
+    if (!id) return -1;
+    for (size_t i = 0; i < c->count; i++)
+        if (strcmp(c->items[i].id, id) == 0) return (int)i;
+    return -1;
+}
+
+void task_clear_actions(task_t *t)
+{
+    if (!t) return;
+    actions_free(t->actions);
+    t->actions = NULL;
+}
+
+static size_t count_actions(const action_t *a)
+{
+    size_t n = 0;
+    for (; a; a = a->next_sibling) n += 1 + count_actions(a->first_child);
+    return n;
+}
+
+size_t task_count_actions(const task_t *t)
+{
+    return t ? count_actions(t->actions) : 0;
+}
+
+int action_type_from_name(const char *name)
+{
+    return name ? type_from_name(name) : -1;
+}
+
+const char *action_type_name(int type)
+{
+    return type_name(type);
+}
+
 char *tasks_to_json(const tasks_t *c, int with_flags,
                     const projects_t *projects)
 {

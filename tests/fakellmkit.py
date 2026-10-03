@@ -10,9 +10,14 @@ Two modes, picked like the real binary picks its subcommand:
 
 The runner mode: flower hands the runner its records on stdin (llm,
 tools, system, user, flush) and reads the conversation back from
-stdout as jsonl records. This script plays a short, deterministic
-project-scan conversation that exercises flower's whole capture
-pipeline:
+stdout as jsonl records. Which script plays depends on the tools
+record: a /plan/mcp write-back server means the task planner, and one
+child plays exactly one turn — llmkit ends a conversation at the
+final response, so flower starts a fresh child per reply, seeded with
+the replayed transcript plus the new user record. The fake tells the
+two apart by the user records in its feed: one user = the planning
+turn (title + a small tree), more = a refinement turn (one more
+action). Otherwise this is the project-scan conversation:
 
   - streamed thinking/response blocks (partials folded server-side)
   - a filesystem_researcher.invoke round, with the researcher's own
@@ -50,6 +55,24 @@ def read_records():
             recs.append(json.loads(line))
         except ValueError:
             pass
+    return recs
+
+
+def read_until_flush():
+    """the records up to and including the first flush — enough to
+    tell the planner from the scanner and to script the first turn."""
+    recs = []
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        recs.append(rec)
+        if rec.get("type") == "flush":
+            break
     return recs
 
 
@@ -185,10 +208,88 @@ def agent_mode(seed_path):
     return 0
 
 
-def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "agent-as-tool":
-        return agent_mode(sys.argv[2] if len(sys.argv) > 2 else "")
-    recs = read_records()
+def plan_base_url(recs):
+    """the planner variant: the write-back server carries it."""
+    for r in recs:
+        if r.get("type") != "tools":
+            continue
+        for srv in r.get("tools", []):
+            url = srv.get("url", "")
+            if url.endswith("/plan/mcp"):
+                return url[: -len("/plan/mcp")]
+    return None
+
+
+def plan_call(base, tool, args):
+    """one write-back round, in the runner's own order: the request
+    record, the real call against flower's /plan/mcp surface, then
+    the response record with flower's answer."""
+    emit({"type": "tool_request", "tool": "flower." + tool, "arguments": args})
+    time.sleep(STEP)
+    try:
+        r = rpc(base, "/plan/mcp", "tools/call",
+                {"name": tool, "arguments": args})
+        answer = r["result"]["content"][0]["text"]
+    except Exception as exc:
+        answer = "%s failed: %s" % (tool, exc)
+        sys.stderr.write("fakellmkit: %s\n" % answer)
+    emit({"type": "tool_response", "text": answer})
+
+
+def user_count(recs):
+    return sum(1 for r in recs if r.get("type") == "user")
+
+
+def plan_mode(recs):
+    """the task-planner script, one turn per process. The first turn
+    (one user record in the feed) researches, sets the title and
+    builds a small tree; a later turn (its feed replays the whole
+    transcript, so it carries more user records) adds one more
+    action — the interactive refinement loop."""
+    base = plan_base_url(recs)
+
+    if user_count(recs) > 1:
+        last = ""
+        for r in recs:
+            if r.get("type") != "user":
+                continue
+            for block in r.get("content", []):
+                last = block.get("text", "")
+        plan_call(base, "add_action", {"title": "Follow-up: %s" % last[:60]})
+        emit({"type": "response", "text": "Plan updated.", "partial": False})
+        return 0
+
+    emit({"type": "thinking", "text": "Reading the project first", "partial": True})
+    time.sleep(STEP)
+    emit({"type": "thinking", "text": ".", "partial": False})
+
+    emit({"type": "tool_request", "tool": "filesystem_researcher.invoke",
+          "arguments": {"input": "What does this project build?"}})
+    time.sleep(STEP)
+    try:
+        rpc(base, "/plan/research/mcp", "tools/call",
+            {"name": "read_file", "arguments": {"path": "README.md"}})
+    except Exception as exc:
+        sys.stderr.write("fakellmkit: plan read_file failed: %s\n" % exc)
+    time.sleep(STEP)
+    emit({"type": "tool_response", "text": "A single-binary webapp."})
+
+    plan_call(base, "set_task_title", {"title": "Fake planned task"})
+
+    tree = [
+        {"title": "Research the codebase", "type": "observe"},
+        {"title": "Write the change"},
+        {"title": "Check the edge cases", "parent": "1"},
+    ]
+    for a in tree:
+        plan_call(base, "add_action", a)
+
+    emit({"type": "response", "text": "Plan ready. Reply to refine it.",
+          "partial": False})
+    return 0
+
+
+def scan_mode(recs):
     base = base_url(recs)
     surface = project_mcp(base, recs)
 
@@ -230,6 +331,23 @@ def main():
     emit({"type": "tool_response", "text": "saved 1 field: description"})
     emit({"type": "response", "text": "Scan complete.", "partial": False})
     return 0
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "agent-as-tool":
+        return agent_mode(sys.argv[2] if len(sys.argv) > 2 else "")
+    recs = read_until_flush()
+    if plan_base_url(recs) is not None:
+        return plan_mode(recs)
+    for line in sys.stdin:  # the rest of a one-shot scan feed
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            pass
+    return scan_mode(recs)
 
 
 if __name__ == "__main__":

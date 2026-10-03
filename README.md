@@ -31,7 +31,12 @@ agent as an `llmkit runner` child that orchestrates the two
 researchers and writes its findings back into the project — and
 every conversation it touches is recorded durably under
 `conversations/` and readable on the **Conversations** page, live
-while it runs. See *Roadmap*.
+while it runs. The **task planner** rides the same stack
+interactively: "New task auto" takes a prompt, creates the task and
+runs the `task_planner` agent — the two researchers behind it, the
+title and action tree written back through `POST /plan/mcp` — as a
+conversation that stays open between turns for the user's replies,
+so plan and task are refined together. See *Roadmap*.
 
 ## Quick start
 
@@ -531,6 +536,43 @@ store version; the page refetches what it shows). The detail view
 links parent ↔ sub-conversations both ways and hosts the Stop
 button while a scan runs.
 
+## The task planner (New Task Auto)
+
+The **task planner** is the scan's interactive sibling, started from
+column two: "New task auto" opens a modal for the prompt (and the
+llm pick), `POST /api/plan` creates the task — title seeded from the
+prompt's first line, an empty action tree — and runs the compiled-in
+`task_planner` agent as another `llmkit runner` child. Like the
+scanner it orchestrates the two researchers as `invoke` tools
+(seeds under `{config}/scan/plan-*`) and writes back through its own
+mcp surface, `POST /plan/mcp`: `set_task_title`, `add_action`
+(append one action under a `parent` path — the answer lists the
+whole tree so the paths are grounded; **every added action starts
+pending**, states belong to the user) and `clear_actions` (rebuild a
+misshapen plan). The filesystem researcher works through the plan's
+private surface `POST /plan/research/mcp` — the same fs tools
+grounded in the task's project, so a plan and a scan can run at the
+same time without their transcripts mixing.
+
+The difference is the lifetime. llmkit ends a conversation at the
+final response of a turn (stdin open or not), so **a turn is one
+runner child** and the interactive lifetime is flower's: the
+conversation is marked `interactive`, a clean turn leaves it open,
+and there the Conversations page shows a reply box — `POST
+/api/conversations/{id}/reply` starts the next turn as a fresh child
+fed the replayed transcript plus the new user record, which is
+llmkit's own continuation contract (*input + previous output + a new
+turn*, `examples/runner/continuation.jsonl`). The user and the model
+then refine the title and the tree together, turn by turn, until the
+conversation is stopped (`POST /api/plan/stop`; one turn at a time —
+a reply while the model is still answering is refused, and a turn
+that fails ends the conversation). One plan runs at a time; the
+"New task auto" button becomes a link to the conversation while it
+does, and the task list/action tree adopt the planner's writes live.
+Deleting a conversation (`DELETE /api/conversations/{id}`) removes
+it together with every sub-agent conversation below it, once
+nothing in that tree is still running.
+
 ## Repository layout
 
 ```
@@ -564,13 +606,21 @@ src/context.{c,h}    typed context items shared by projects and
                       rules live once for both stores)
 src/conv.{c,h}       conversations/ backend: one directory per
                       conversation (meta.json + append-only
-                      records.jsonl), the store behind the
-                      Conversations page
-src/scan.{c,h}       the project scan agent: researcher seeds, the
-                      web tools proxy config (llmkit builtin-mcp,
-                      curated via mcp-proxy), the llmkit runner
-                      child, the write-back tools (POST /scan/mcp)
-                      and the conversation capture
+                      records.jsonl, the `interactive` flag on the
+                      planner's), whole-tree delete, the store behind
+                      the Conversations page
+src/researchers.{c,h} the researcher agents both engines orchestrate
+                      (defs, agent-as-tool seeds, the web tools proxy
+                      config) + the shared runner plumbing (record
+                      helpers, spawn with an optional held-open stdin)
+src/scan.{c,h}       the project scan agent: the runner child, the
+                      write-back tools (POST /scan/mcp) and the
+                      conversation capture
+src/plan.{c,h}       the task planner: the interactive runner child
+                      (replies feed its stdin), the write-back tools
+                      (POST /plan/mcp: set_task_title, add_action,
+                      clear_actions), the plan research surface and
+                      its conversation capture
 src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
 src/fs.{c,h}          local-filesystem tools: read_file (1-based
                       offset/length line ranges), list_files (the
@@ -602,8 +652,10 @@ tests/smoke.sh        end-to-end smoke tests (make check)
 tests/selftest.c      offline checks: prompt templating, the fs tools
                       (fixtures in tests/fixtures)
 tests/fakellmkit.py   a scripted llmkit runner stand-in: plays a scan
-                      conversation (researcher round + write-back) so
-                      the conversation pipeline is testable end to end
+                      conversation (researcher round + write-back) or,
+                      for a plan, an interactive planner turn plus one
+                      refinement turn per reply, so the conversation
+                      pipeline is testable end to end
 tests/e2e/            playwright browser tests (firefox; config in
                       playwright.config.ts, server on :8120 with .e2e-config
                       and tests/fakellmkit.py as its llmkit)
@@ -671,11 +723,43 @@ tests/e2e/            playwright browser tests (firefox; config in
 |                   |              | (set_project_details,                 |
 |                   |              | add_context_item; works only while a  |
 |                   |              | scan runs)                            |
+| `/api/plan`       | GET/HEAD     | plan status: running,              |
+|                   |              | awaiting_reply (the turn is over,  |
+|                   |              | a reply starts the next), done,    |
+|                   |              | ok, error, project, llm, task,     |
+|                   |              | started, ended, writes,            |
+|                   |              | conversation                       |
+| `/api/plan`       | POST         | body {"project": id, "llm": name,  |
+|                   |              | "prompt": text}: create the task   |
+|                   |              | and start the interactive task     |
+|                   |              | planner; 200 {ok, task,            |
+|                   |              | conversation}; 409 one already     |
+|                   |              | runs; 422 bad references/prompt;   |
+|                   |              | 500 spawn failure                  |
+| `/api/plan/stop`  | POST         | ask the running plan to stop (a    |
+|                   |              | second call forces); 409 none runs |
+| `/plan/mcp`       | POST         | the planner's write-back mcp tools  |
+|                   |              | (set_task_title, add_action,        |
+|                   |              | clear_actions; apply to the running |
+|                   |              | plan's task)                        |
+| `/plan/research/mcp` | POST      | the fs research tools grounded in   |
+|                   |              | the plan's project, folded into its |
+|                   |              | open researcher sub-conversation;   |
+|                   |              | 404 while no plan runs              |
 | `/api/conversations` | GET/HEAD  | conversation metas (newest first, at  |
 |                   |              | most 256), running ones badged by     |
-|                   |              | state                                 |
+|                   |              | state; interactive ones flagged       |
 | `/api/conversations/{id}` | GET/HEAD | one conversation: meta + records   |
 |                   |              | array; 404 unknown/bad id             |
+| `/api/conversations/{id}` | DELETE | delete it and every sub-agent     |
+|                   |              | conversation below it; 404 unknown;  |
+|                   |              | 409 while anything in the tree runs  |
+| `/api/conversations/{id}/reply` | POST | body {"text": …}: the user's   |
+|                   |              | next turn in the running interactive |
+|                   |              | conversation; recorded, then replayed|
+|                   |              | into a fresh planner turn; 404       |
+|                   |              | unknown id; 409 not running or still |
+|                   |              | answering; 422 bad text              |
 | `/api/conversations/stream` | GET | `text/event-stream`; unnamed clock   |
 |                   |              | ticks plus a named `conv` event each  |
 |                   |              | time the store version moves          |
@@ -778,13 +862,25 @@ served automatically with the right MIME type. Dotfiles are skipped.
   the event loop. Fine for the runner's rare, serial calls; revisit
   if tools get chatty. (The web fetches moved into the researcher's
   own llmkit children and no longer block flower's loop at all.)
-- One scan at a time; sub-agent transcripts are reconstructed from
-  the runner's records and flower's own `/mcp` surface — the
-  researchers' internal thinking is not captured (it never reaches
-  flower), and the online researcher's web tool calls are not
-  either (they run inside its llmkit children). Record texts are
-  capped at 8 KiB; at most 256 newest conversations are listed,
-  older directories stay on disk.
+- One scan at a time, and one plan at a time (a plan is interactive
+  and can wait for a reply for hours — stop its conversation to free
+  the slot). The two engines run side by side. A plan's turns share
+  no process: each reply replays the whole transcript into a new
+  runner child (llmkit's continuation contract), so the endpoint sees
+  the same growing conversation but a turn cannot steer a running
+  one — a reply while the model answers is refused, not queued. The
+  replay is capped at 4 MiB per plan. Sub-agent
+  transcripts are reconstructed from the runner's records and
+  flower's own surfaces — the researchers' internal thinking is not
+  captured (it never reaches flower), and the online researcher's
+  web tool calls are not either (they run inside its llmkit
+  children). Record texts are capped at 8 KiB; at most 256 newest
+  conversations are listed, older directories stay on disk.
+- The planner writes the task server-side while the main page holds
+  its own copy; the page adopts the server's version on every poll
+  unless a local edit is still saving — a save racing a write-back
+  can briefly overwrite planned actions (the plan's next write
+  restores them), the same trade-off the scan's project writes make.
 - Scans need llmkit ≥ 1.2.0 (`builtin-mcp`, `mcp-proxy`); with an
   older binary the online researcher's tool server is required, so
   its conversation fails loudly instead of silently losing tools.
@@ -857,6 +953,16 @@ served automatically with the right MIME type. Dotfiles are skipped.
             transient scan state), and a note turns the next scan
             into a follow-up seeded with the previous run's
             transcript ({{previous_run}} / {{request}})
+      - [x] task planner (part 4e): "New task auto" — a modal prompt
+            starts the task_planner agent (the two researchers as
+            sub-agents) whose write-back tools (POST /plan/mcp:
+            set_task_title, add_action with pending state,
+            clear_actions) fill the new task; the conversation is
+            interactive (one runner child per turn — a reply replays
+            the transcript into the next turn), the Conversations
+            page lists conversations as a collapsed sub-agent tree
+            with an interactive badge, a reply box and a delete
+            (whole tree, refused while running)
       - [ ] drive `llmkit runner` conversations from a task (renders
             the selected agent's prompt with the project's context)
 - [ ] idle connection timeouts

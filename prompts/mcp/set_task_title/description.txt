@@ -1,0 +1,1 @@
+Set the planned task's title: one short line naming the outcome (e.g. "Fix the login redirect loop"). It replaces the stored title at any time; the title starts as the first line of the user's request.

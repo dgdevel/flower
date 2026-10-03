@@ -45,6 +45,10 @@
         <div class="task-topbar">
           <button type="button" class="btn btn-accent" id="new-task"
                   data-action="task-new">New task</button>
+          <button type="button" class="btn btn-ghost" id="new-task-auto"
+                  data-action="task-auto" hidden>New task auto</button>
+          <a class="btn btn-ghost plan-open" id="plan-open" hidden
+             title="The planning conversation is running — open it to reply or stop it"></a>
         </div>
         <div class="task-list" id="task-list" aria-label="Tasks"></div>
       </div>
@@ -79,6 +83,29 @@
   </main>
 
   <nav class="deck-dots" id="deck-dots" aria-label="Move between columns"></nav>
+
+  <div class="modal-backdrop" id="plan-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true"
+         aria-labelledby="plan-modal-title">
+      <h3 id="plan-modal-title">New task, planned by the llm</h3>
+      <p class="muted">
+        Describe the task: the planning agent researches the project and
+        the web, then fills the task's title and its action tree. The
+        conversation stays open — you can reply to refine the plan.
+      </p>
+      <div class="plan-row" id="plan-llm-row"><!-- the llm select --></div>
+      <textarea id="plan-prompt" class="plan-prompt" rows="5"
+        placeholder="What should this task achieve? e.g. 'make the settings page persist its form'"
+        aria-label="What the task should achieve"></textarea>
+      <p class="field-error" id="err-plan-prompt" role="alert"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-accent" id="plan-start"
+                data-action="plan-start">Start planning</button>
+        <button type="button" class="btn btn-ghost" id="plan-cancel"
+                data-action="plan-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <script src="theme.js"></script>
   <script src="emoji.js"></script>

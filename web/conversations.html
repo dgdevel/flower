@@ -21,9 +21,11 @@
     <h1>Conversations</h1>
     <p class="muted">
       Every llm conversation flower runs is recorded and stays readable
-      here — running ones update live. A sub-agent spawned mid-conversation
-      (a researcher invoked by the project scan) gets its own entry,
-      linked both ways with the conversation that spawned it.
+      here — running ones update live. Sub-agent conversations (the
+      researchers a scan or a task plan invokes) sit collapsed under the
+      conversation that spawned them: expand a row's arrow to see them.
+      A conversation flagged interactive (a task plan) takes your replies
+      while it runs.
     </p>
 
     <div class="conv-list" id="conv-list" aria-label="Conversations"></div>

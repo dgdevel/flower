@@ -136,7 +136,7 @@ static cJSON *handle_tools_list(const mcp_table_t *t)
         const mcp_tool_t *one = &t->tools[i];
         cJSON *props = cJSON_CreateObject();
         cJSON *required = cJSON_CreateArray();
-        for (size_t a = 0; one->args[a].name; a++) {
+        for (size_t a = 0; one->args && one->args[a].name; a++) {
             cJSON *p = cJSON_CreateObject();
             cJSON_AddStringToObject(p, "type", one->args[a].type);
             char *d = arg_description(one, one->args[a].name);

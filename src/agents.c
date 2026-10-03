@@ -925,6 +925,16 @@ static agent_t BUILTIN_AGENTS[] = {
         },
         .tool_count = 1,
     },
+    {
+        /* the task-planning orchestrator (src/plan.c): like the
+         * scanner it carries no stored tool server — its write-back
+         * surface (/plan/mcp) and the two researcher servers are
+         * attached when the runner is spawned, and unlike the scan
+         * its conversation stays open for the user's replies */
+        .name = "task_planner",
+        .llm = "",
+        .system_prompt = "",
+    },
 };
 #define BUILTIN_N (sizeof BUILTIN_AGENTS / sizeof BUILTIN_AGENTS[0])
 

@@ -26,12 +26,18 @@
  * spawning conversation's id in `parent` — the Conversations page
  * links both ways.
  *
- * Server-owned store (no PUT API): records are only appended by the
- * conversation runner (the project scan today), meta.json is
- * rewritten atomically on state changes. Loading is lenient like
+ * Server-owned store (no PUT API): records are appended by the
+ * conversation runners (the project scan, the task planner), and by
+ * the user of an interactive conversation (the reply API); meta.json
+ * is rewritten atomically on state changes. Loading is lenient like
  * every store: broken metas are skipped, unparsable record lines
  * dropped. A restart closes conversations still marked running
  * (conv_boot) so the list never shows zombies.
+ *
+ * An interactive conversation (the task planner's) carries
+ * "interactive":true — the user may keep replying while it runs, so
+ * it ends only when its runner exits or the user stops it. It can be
+ * deleted, like any conversation, once nothing in its tree runs.
  */
 
 #include "agents.h"    /* CFG_NAME_MAX */
@@ -59,10 +65,13 @@ typedef enum {
 void conv_boot(void);
 
 /* Create a running conversation; agent and title required, llm,
- * project id and parent id may be empty. The generated id is copied
- * to id_out (CONV_ID_LEN + 1 bytes). 0 on success. */
+ * project id and parent id may be empty; interactive marks a
+ * conversation the user can reply to while it runs (the task
+ * planner's). The generated id is copied to id_out (CONV_ID_LEN + 1
+ * bytes). 0 on success. */
 int conv_create(const char *agent, const char *llm, const char *project,
-                const char *parent, const char *title, char *id_out);
+                const char *parent, const char *title, int interactive,
+                char *id_out);
 
 /* Append one record (kind one of user, thinking, response, tool_call,
  * tool_result, error; tool may be NULL). Text is truncated on a
@@ -90,11 +99,28 @@ char *conv_list_json(void);
  * unknown or nothing could be read. */
 char *conv_get_json(const char *id);
 
-/* The id of the newest conversation belonging to `project` that is
- * not a sub-agent — a run's main conversation, the project scan — or
- * "" when the project has no recorded run. id_out holds
- * CONV_ID_LEN + 1 bytes. */
-void conv_latest_root_id(const char *project, char *id_out);
+/* The id of the newest root (non sub-agent) conversation of `project`
+ * run by `agent` — a scan's main conversation, a task plan — or ""
+ * when there is none. id_out holds CONV_ID_LEN + 1 bytes. */
+void conv_latest_root_id(const char *project, const char *agent,
+                         char *id_out);
+
+/* A conversation with this id exists on disk? (a reply to a finished
+ * or unknown one is answered before an engine ever sees it) */
+int conv_exists(const char *id);
+
+typedef enum {
+    CONV_DEL_OK = 0,
+    CONV_DEL_MISSING = 1, /* no such conversation */
+    CONV_DEL_RUNNING = 2, /* it or a sub-agent of it still runs */
+    CONV_DEL_IO = 3       /* the directory could not be removed */
+} conv_del_result_t;
+
+/* Delete a conversation and every sub-agent conversation under it
+ * (the whole tree — a sub-agent's transcript has no life without its
+ * parent). Refused while anything in the tree is still running; err
+ * then names it. Bumps the store version either way clients notice. */
+conv_del_result_t conv_delete(const char *id, char *err, size_t err_n);
 
 /* One conversation as plain text, for handing a later run the context
  * of an earlier one: an "kind[tool]: text" line per record, oldest

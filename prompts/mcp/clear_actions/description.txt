@@ -1,0 +1,1 @@
+Drop the planned task's whole action tree (the title stays). Use it to rebuild a plan whose shape turned out wrong; the answer confirms the count.

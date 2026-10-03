@@ -17,6 +17,7 @@
 #include "tasks.h"
 #include "fs.h"
 #include "mcp.h"
+#include "plan.h"
 #include "scan.h"
 
 #include <cJSON.h>
@@ -504,6 +505,157 @@ static void handle_scan_post(server_t *s, conn_t *c, http_request_t *req,
     }
 }
 
+/* POST /api/plan {"project": id, "llm": name, "prompt": text} — the
+ * llm-assisted New Task Auto: create the task, spawn the interactive
+ * task_planner runner. The reply is immediate and carries the ids
+ * (the task to select, the conversation to open); progress arrives
+ * through the conversation store. */
+static void handle_plan_post(server_t *s, conn_t *c, http_request_t *req,
+                             const char *body, size_t body_len, int *status)
+{
+    char err[288] = "";
+    const char *project = NULL, *llm = NULL, *prompt = NULL;
+    cJSON *j = body_len ? cJSON_ParseWithLength(body, body_len) : NULL;
+    if (j) {
+        const cJSON *p = cJSON_GetObjectItemCaseSensitive(j, "project");
+        const cJSON *l = cJSON_GetObjectItemCaseSensitive(j, "llm");
+        const cJSON *q = cJSON_GetObjectItemCaseSensitive(j, "prompt");
+        if (cJSON_IsString(p) && p->valuestring) project = p->valuestring;
+        if (cJSON_IsString(l) && l->valuestring) llm = l->valuestring;
+        if (cJSON_IsString(q) && q->valuestring) prompt = q->valuestring;
+    }
+    if (!project || !llm || !prompt) {
+        cJSON_Delete(j);
+        *status = 422;
+        respond_invalid(s, c, req, 422, "",
+                        "expected {\"project\": id, \"llm\": name,"
+                        " \"prompt\": text}",
+                        "plan request");
+        return;
+    }
+    char task[TASK_ID_LEN + 1], conv[CONV_ID_LEN + 1];
+    plan_start_result_t r = plan_start(project, llm, prompt,
+                                       task, conv, err, sizeof err);
+    cJSON_Delete(j);
+
+    if (r == PLAN_START_OK) {
+        char ok[128];
+        snprintf(ok, sizeof ok,
+                 "{\"ok\":true,\"task\":\"%s\",\"conversation\":\"%s\"}",
+                 task, conv);
+        *status = 200;
+        respond_json(s, c, 200, ok, req->keep_alive);
+        return;
+    }
+    char *eb = theme_error_json(
+        r == PLAN_START_BUSY ? "a plan is already running — stop its "
+                              "conversation first" : err, NULL);
+    *status = r == PLAN_START_BUSY ? 409
+            : r == PLAN_START_REJECT ? 422 : 500;
+    if (eb) {
+        respond_json(s, c, *status, eb, req->keep_alive);
+        free(eb);
+    } else {
+        respond_json(s, c, *status, "{\"error\":\"cannot start the plan\"}",
+                     req->keep_alive);
+    }
+}
+
+/* the running conversation's id out of /api/conversations/{id}/reply */
+static const char *conv_reply_id(const char *path)
+{
+    const char *id = path + sizeof "/api/conversations/" - 1;
+    size_t id_len = strlen(id) - sizeof "/reply" + 1;
+    if (id_len != CONV_ID_LEN) return NULL;
+    static char buf[CONV_ID_LEN + 1];
+    memcpy(buf, id, CONV_ID_LEN);
+    buf[CONV_ID_LEN] = '\0';
+    return buf;
+}
+
+/* POST /api/conversations/{id}/reply {"text": …} — the user's next
+ * turn in an interactive conversation (the task planner's): recorded
+ * in the transcript and fed to the waiting runner. */
+static void handle_conv_reply_post(server_t *s, conn_t *c,
+                                   http_request_t *req, const char *path,
+                                   const char *body, size_t body_len,
+                                   int *status)
+{
+    const char *id = conv_reply_id(path);
+    if (!id || !conv_valid_id(id)) {
+        *status = 404;
+        respond(s, c, 404, "text/plain; charset=utf-8",
+                "not found\n", 10, req->keep_alive, false, NULL);
+        return;
+    }
+    char err[192] = "";
+    const char *text = NULL;
+    cJSON *j = body_len ? cJSON_ParseWithLength(body, body_len) : NULL;
+    if (j) {
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(j, "text");
+        if (cJSON_IsString(t) && t->valuestring) text = t->valuestring;
+    }
+    if (!text) {
+        cJSON_Delete(j);
+        *status = 422;
+        respond_invalid(s, c, req, 422, "",
+                        "expected {\"text\": …}", "reply");
+        return;
+    }
+    plan_reply_result_t r = plan_reply(id, text, err, sizeof err);
+    cJSON_Delete(j);
+
+    if (r == PLAN_REPLY_OK) {
+        *status = 200;
+        respond_json(s, c, 200, "{\"ok\":true}", req->keep_alive);
+        return;
+    }
+    char *eb = theme_error_json(err[0] ? err : "unknown conversation", NULL);
+    *status = r == PLAN_REPLY_MISSING ? 404
+            : r == PLAN_REPLY_IDLE ? 409 : 422;
+    if (eb) {
+        respond_json(s, c, *status, eb, req->keep_alive);
+        free(eb);
+    } else {
+        respond_json(s, c, *status, "{\"error\":\"cannot reply\"}",
+                     req->keep_alive);
+    }
+}
+
+/* DELETE /api/conversations/{id} — the conversation and every
+ * sub-agent conversation under it leave the store. */
+static void handle_conv_delete(server_t *s, conn_t *c, http_request_t *req,
+                               const char *path, int *status)
+{
+    (void)s;
+    const char *id = path + sizeof "/api/conversations/" - 1;
+    char err[192] = "";
+    conv_del_result_t r = conv_valid_id(id)
+        ? conv_delete(id, err, sizeof err) : CONV_DEL_MISSING;
+    if (r == CONV_DEL_OK) {
+        *status = 200;
+        respond_json(s, c, 200, "{\"ok\":true}", req->keep_alive);
+        return;
+    }
+    if (r == CONV_DEL_MISSING) {
+        *status = 404;
+        respond(s, c, 404, "text/plain; charset=utf-8",
+                "not found\n", 10, req->keep_alive, false, NULL);
+        return;
+    }
+    char *eb = theme_error_json(err[0] ? err
+                               : "cannot delete the conversation", NULL);
+    *status = r == CONV_DEL_RUNNING ? 409 : 500;
+    if (eb) {
+        respond_json(s, c, *status, eb, req->keep_alive);
+        free(eb);
+    } else {
+        respond_json(s, c, *status,
+                     "{\"error\":\"cannot delete the conversation\"}",
+                     req->keep_alive);
+    }
+}
+
 /* ---------- GET: the current stores as json ---------- */
 
 static char *theme_json(server_t *s)    { return theme_to_json(&s->theme); }
@@ -512,6 +664,7 @@ static char *llms_json(server_t *s)     { return llms_to_json(&s->llms); }
 static char *agents_json(server_t *s)   { return agents_to_json(&s->agents, &s->llms, 1); }
 static char *tasks_json(server_t *s)    { return tasks_to_json(&s->tasks, 1, &s->projects); }
 static char *scan_json(server_t *s)     { (void)s; return scan_status_json(); }
+static char *plan_json(server_t *s)     { (void)s; return plan_status_json(); }
 static char *convs_json(server_t *s)    { (void)s; return conv_list_json(); }
 
 static const struct {
@@ -524,6 +677,7 @@ static const struct {
     { "/api/agents",        agents_json },
     { "/api/tasks",         tasks_json },
     { "/api/scan",          scan_json },
+    { "/api/plan",          plan_json },
     { "/api/conversations", convs_json },
 };
 
@@ -645,6 +799,23 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         handle_agents_put(s, c, req, body, body_len, &status);
     } else if (put && strcmp(path, "/api/tasks") == 0) {
         handle_tasks_put(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/api/plan") == 0) {
+        handle_plan_post(s, c, req, body, body_len, &status);
+    } else if (post && strcmp(path, "/api/conversations/reply") == 0) {
+        status = 404; /* /api/conversations/{id}/reply, never this */
+        respond(s, c, 404, "text/plain; charset=utf-8",
+                "not found\n", 10, req->keep_alive, false, NULL);
+    } else if (post &&
+               strncmp(path, "/api/conversations/",
+                       sizeof "/api/conversations/" - 1) == 0 &&
+               strcmp(path + strlen(path) - sizeof "/reply" + 1,
+                      "/reply") == 0) {
+        handle_conv_reply_post(s, c, req, path, body, body_len, &status);
+    } else if (strcmp(req->method, "DELETE") == 0 &&
+               strncmp(path, "/api/conversations/",
+                       sizeof "/api/conversations/" - 1) == 0 &&
+               strchr(path + sizeof "/api/conversations/" - 1, '/') == NULL) {
+        handle_conv_delete(s, c, req, path, &status);
     } else if (post && strcmp(path, "/api/scan") == 0) {
         handle_scan_post(s, c, req, body, body_len, &status);
     } else if (post && strcmp(path, "/api/scan/stop") == 0) {
@@ -655,6 +826,45 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
             status = 409;
             respond_json(s, c, 409, "{\"error\":\"no scan is running\"}",
                          req->keep_alive);
+        }
+    } else if (post && strcmp(path, "/api/plan/stop") == 0) {
+        if (plan_running()) {
+            plan_stop();
+            respond_json(s, c, 200, "{\"ok\":true}", req->keep_alive);
+        } else {
+            status = 409;
+            respond_json(s, c, 409, "{\"error\":\"no plan is running\"}",
+                         req->keep_alive);
+        }
+    } else if (post && strcmp(path, "/plan/mcp") == 0) {
+        /* the task planner's write-back surface: same dispatch, the
+         * plan tool set (works only while a plan runs) */
+        int note = 0;
+        char *j = mcp_handle_post(&MCP_PLAN, body, body_len, &note);
+        if (!j) {
+            status = 202;
+            respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
+        } else {
+            respond_json(s, c, 200, j, req->keep_alive);
+            free(j);
+        }
+    } else if (post && strcmp(path, "/plan/research/mcp") == 0) {
+        /* the plan's private research surface: the fs tools grounded
+         * in the planned task's project, folded into the plan's open
+         * researcher sub-conversation (a concurrent scan's transcript
+         * never sees these calls) */
+        int note = 0;
+        char *j = plan_research_post(body, body_len, &note);
+        if (!j && !note) {
+            status = 404; /* no plan running: nothing to ground */
+            respond(s, c, 404, "text/plain; charset=utf-8",
+                    "not found\n", 10, req->keep_alive, false, NULL);
+        } else if (!j) {
+            status = 202;
+            respond(s, c, 202, NULL, "", 0, req->keep_alive, false, NULL);
+        } else {
+            respond_json(s, c, 200, j, req->keep_alive);
+            free(j);
         }
     } else if (post && strcmp(path, "/mcp") == 0) {
         /* flower's own mcp server (streamable-http transport, plain
@@ -703,6 +913,17 @@ static void handle_request(server_t *s, conn_t *c, http_request_t *req,
         respond(s, c, 405, "text/plain; charset=utf-8",
                 "method not allowed\n", 19, false, false,
                 "Allow: GET, HEAD, PUT\r\n");
+    } else if (strcmp(path, "/api/plan") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false,
+                "Allow: GET, HEAD, POST\r\n");
+    } else if (strcmp(path, "/api/plan/stop") == 0 ||
+               strcmp(path, "/plan/mcp") == 0 ||
+               strcmp(path, "/plan/research/mcp") == 0) {
+        status = 405;
+        respond(s, c, 405, "text/plain; charset=utf-8",
+                "method not allowed\n", 19, false, false, "Allow: POST\r\n");
     } else if (post && strcmp(path, "/scan/mcp") == 0) {
         /* the scan's write-back surface: same dispatch, the scan
          * tool set (works only while a scan runs) */
@@ -970,6 +1191,7 @@ int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
     char base[80];
     scan_base_url(bind_addr, port, base, sizeof base);
     scan_attach(epfd, &s.projects, &s.llms, llmkit, base);
+    plan_attach(epfd, &s.projects, &s.llms, &s.tasks, llmkit, base);
 
     logmsg("config: %s (%s, %d project%s, %d llm%s, %d agent%s, "
            "%d task%s)", theme_dir(),
@@ -1001,6 +1223,11 @@ int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
             /* the running scan's runner child: not a connection */
             if (scan_fd() >= 0 && fd == scan_fd()) {
                 scan_on_readable();
+                continue;
+            }
+            /* the running plan's runner child: same shape */
+            if (plan_fd() >= 0 && fd == plan_fd()) {
+                plan_on_readable();
                 continue;
             }
             conn_t *c = (fd >= 0 && fd < s.fd_cap) ? s.by_fd[fd] : NULL;
@@ -1046,6 +1273,7 @@ int server_run(const char *bind_addr, uint16_t port, const char *llmkit)
         if (s.by_fd[fd]) conn_destroy(&s, s.by_fd[fd]);
     free(s.by_fd);
     scan_shutdown(); /* kill and reap a running scan's child */
+    plan_shutdown(); /* …and a running plan's */
     llms_free(&s.llms);
     agents_free(&s.agents);
     tasks_clear(&s.tasks);

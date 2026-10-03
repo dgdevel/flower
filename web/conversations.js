@@ -16,7 +16,7 @@ function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "text") node.textContent = v;
-    else node.setAttribute(k, v);
+    else if (v !== null && v !== undefined) node.setAttribute(k, v);
   }
   for (const c of children) if (c != null) node.append(c);
   return node;
@@ -55,6 +55,8 @@ let projects = {};    // project id -> title
 let selId = null;     // the open conversation's id
 let detail = null;    // its full document (meta fields + records)
 let tickTimer = 0;
+const expanded = new Set(); // conversation ids whose sub-agents show
+let delTimer = 0;     // the delete button's arm window
 
 const listEl = document.getElementById("conv-list");
 const countEl = document.getElementById("conv-count");
@@ -100,6 +102,10 @@ async function openConv(id) {
   if (!id) return;
   selId = id;
   if (history.replaceState) history.replaceState(null, "", "#" + id);
+  /* a sub-agent opens with its ancestors expanded, so its row shows */
+  for (let cur = list.find((c) => c.id === id); cur && cur.parent;
+       cur = list.find((c) => c.id === cur.parent))
+    expanded.add(cur.parent);
   detail = null;
   renderDetail(); // the outline right away, records when they land
   renderList(); // the active row follows the selection
@@ -108,6 +114,49 @@ async function openConv(id) {
 
 /* ---------- rendering: the list ---------- */
 
+const hasKids = (id) => list.some((c) => c.parent === id);
+
+/* one row of the tree: a twistie when sub-agents sit below it, the
+ * state badge (and the interactive flag), the title block, the time.
+ * Children render under an expanded parent, indented by depth */
+function convRow(c, depth) {
+  const kids = hasKids(c.id);
+  const open = expanded.has(c.id);
+  return el("div", {
+    class: "conv-row" + (c.id === selId ? " active" : "") +
+           (depth ? " sub" : ""),
+    "data-id": c.id, role: "button", tabindex: "0",
+    style: depth ? `padding-left:${0.8 + depth * 1.5}rem` : "",
+    title: convTitle(c), "aria-label": convTitle(c),
+  },
+    el("span", {
+      class: "conv-tw" + (kids ? "" : " leaf"),
+      "data-tw": kids ? c.id : null,
+      role: "button", tabindex: "-1",
+      "aria-label": open ? "Hide the sub-agent conversations"
+                         : "Show the sub-agent conversations",
+      text: kids ? (open ? "▾" : "▸") : "",
+    }),
+    el("span", {
+      class: "badge " + (STATE_BADGE[c.state] || "badge-muted"),
+      text: c.state || "?",
+    }),
+    c.interactive
+      ? el("span", { class: "conv-flag", text: "interactive",
+                     title: "You can reply while it runs" })
+      : null,
+    el("div", { class: "conv-main" },
+      el("span", { class: "name", text: convTitle(c) }),
+      el("span", { class: "sub" },
+        (c.parent ? "sub-agent · " : "") + c.agent +
+        (projectTitle(c.project) ? " · " + projectTitle(c.project) : "") +
+        (c.llm ? " · " + c.llm : ""))),
+    el("span", { class: "conv-when ts" },
+      c.state === "running"
+        ? "since " + fmtTime(c.started)
+        : fmtWhen(c.started)));
+}
+
 function renderList() {
   listEl.textContent = "";
   if (!list.length) {
@@ -115,35 +164,18 @@ function renderList() {
       el("p", { class: "placeholder-title", text: "No conversations yet" }),
       el("p", {
         class: "placeholder-text",
-        text: "Start a project scan in the Projects column — its " +
+        text: "Start a project scan or a planned task — the " +
               "conversation (and every sub-agent it spawns) is recorded here.",
       })));
     countEl.textContent = "";
     return;
   }
-  for (const c of list) {
-    const row = el("div", {
-      class: "conv-row" + (c.id === selId ? " active" : "") +
-             (c.parent ? " sub" : ""),
-      "data-id": c.id, role: "button", tabindex: "0",
-      title: convTitle(c), "aria-label": convTitle(c),
-    },
-      el("span", {
-        class: "badge " + (STATE_BADGE[c.state] || "badge-muted"),
-        text: c.state || "?",
-      }),
-      el("div", { class: "conv-main" },
-        el("span", { class: "name", text: convTitle(c) }),
-        el("span", { class: "sub" },
-          (c.parent ? "sub-agent · " : "") + c.agent +
-          (projectTitle(c.project) ? " · " + projectTitle(c.project) : "") +
-          (c.llm ? " · " + c.llm : ""))),
-      el("span", { class: "conv-when ts" },
-        c.state === "running"
-          ? "since " + fmtTime(c.started)
-          : fmtWhen(c.started)));
-    listEl.append(row);
-  }
+  const walk = (c, depth) => {
+    listEl.append(convRow(c, depth));
+    if (expanded.has(c.id))
+      for (const kid of childrenOf(c.id)) walk(kid, depth + 1);
+  };
+  for (const c of list) if (!c.parent) walk(c, 0);
   const running = list.filter((c) => c.state === "running").length;
   countEl.textContent = running
     ? `${list.length} conversation${list.length === 1 ? "" : "s"}, ` +
@@ -197,12 +229,24 @@ function renderDetail() {
       class: "badge " + (STATE_BADGE[c.state] || "badge-muted"),
       text: c.state,
     }),
+    c.interactive
+      ? el("span", { class: "conv-flag", text: "interactive",
+                     title: "You can reply while it runs" })
+      : null,
     el("h2", { text: convTitle(c) }),
     running ? el("button", {
       type: "button", class: "btn btn-ghost conv-stop",
-      id: "conv-stop", title: "Ask the scan to stop (click again to force)",
+      id: "conv-stop",
+      title: "Ask the runner to stop (click again to force)",
       text: "Stop",
-    }) : null);
+    }) : null,
+    el("button", {
+      type: "button", class: "btn btn-danger conv-delete",
+      id: "conv-delete", disabled: running ? "" : null,
+      title: running ? "Stop the conversation before deleting it"
+                     : "Delete this conversation and its sub-agents",
+      text: "Delete",
+    }));
   detailEl.append(head);
 
   const meta = el("div", { class: "conv-meta" },
@@ -256,6 +300,63 @@ function renderDetail() {
     log.append(el("p", { class: "muted", text: "no records yet" }));
   detailEl.append(log);
   log.scrollTop = log.scrollHeight; /* live: follow the newest record */
+
+  /* an interactive conversation takes replies while it runs: the
+   * user's turn goes to the transcript and to the waiting planner */
+  if (c.interactive && running) {
+    detailEl.append(el("div", { class: "conv-reply" },
+      el("textarea", {
+        id: "conv-reply-text", rows: "3",
+        placeholder: "Reply to refine the plan — the agent adjusts " +
+                     "the task title and its action tree",
+        "aria-label": "Reply to the planner",
+      }),
+      el("div", { class: "conv-reply-row" },
+        el("button", {
+          type: "button", class: "btn btn-accent",
+          id: "conv-reply-send", text: "Send",
+        }),
+        el("span", { class: "muted", id: "conv-reply-err", role: "status" }))));
+    const ta = document.getElementById("conv-reply-text");
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        sendReply();
+      }
+    });
+  }
+}
+
+async function sendReply() {
+  const ta = document.getElementById("conv-reply-text");
+  const err = document.getElementById("conv-reply-err");
+  const btn = document.getElementById("conv-reply-send");
+  const text = (ta && ta.value || "").trim();
+  if (!ta || !text || !selId) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("api/conversations/" +
+                          encodeURIComponent(selId) + "/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      let msg = `reply failed (${r.status})`;
+      try { msg = (await r.json()).error || msg; } catch (_) {}
+      if (err) err.textContent = msg;
+      return;
+    }
+    if (err) err.textContent = "";
+    ta.value = "";
+    await refresh(); // the user record (and the model's turn) follow
+  } catch (_) {
+    if (err) err.textContent = "network error — the reply was not sent";
+  } finally {
+    if (btn) btn.disabled = false;
+    const again = document.getElementById("conv-reply-text");
+    if (again) again.focus();
+  }
 }
 
 /* ---------- live updates ---------- */
@@ -306,6 +407,13 @@ window.addEventListener("focus", refresh);
 /* ---------- events ---------- */
 
 listEl.addEventListener("click", (e) => {
+  const tw = e.target.closest("[data-tw]");
+  if (tw) { // expand/collapse the sub-agents, not open the row
+    if (expanded.has(tw.dataset.tw)) expanded.delete(tw.dataset.tw);
+    else expanded.add(tw.dataset.tw);
+    renderList();
+    return;
+  }
   const row = e.target.closest(".conv-row[data-id]");
   if (row) openConv(row.dataset.id);
 });
@@ -318,10 +426,51 @@ listEl.addEventListener("keydown", (e) => {
 });
 
 detailEl.addEventListener("click", async (e) => {
+  const send = e.target.closest("#conv-reply-send");
+  if (send) {
+    sendReply();
+    return;
+  }
   const stop = e.target.closest("#conv-stop");
   if (stop) {
-    try { await fetch("api/scan/stop", { method: "POST" }); } catch (_) {}
+    /* interactive conversations stop through their engine; the scan
+     * keeps its own endpoint */
+    const url = detail && detail.interactive
+      ? "api/plan/stop" : "api/scan/stop";
+    try { await fetch(url, { method: "POST" }); } catch (_) {}
     setTimeout(refresh, 800); /* the version bump usually arrives first */
+    return;
+  }
+  const del = e.target.closest("#conv-delete");
+  if (del) {
+    if (del.classList.contains("armed")) {
+      clearTimeout(delTimer);
+      try {
+        const r = await fetch("api/conversations/" +
+                              encodeURIComponent(selId), { method: "DELETE" });
+        if (!r.ok) {
+          let msg = `delete failed (${r.status})`;
+          try { msg = (await r.json()).error || msg; } catch (_) {}
+          del.textContent = "Delete";
+          del.title = msg;
+          return;
+        }
+      } catch (_) { del.textContent = "Delete"; return; }
+      selId = null;
+      detail = null;
+      if (history.replaceState) history.replaceState(null, "", "#");
+      await refresh();
+      renderDetail();
+      return;
+    }
+    /* ask twice, like every destructive button here */
+    clearTimeout(delTimer);
+    del.classList.add("armed");
+    del.textContent = "sure?";
+    delTimer = setTimeout(() => {
+      del.classList.remove("armed");
+      del.textContent = "Delete";
+    }, 2500);
     return;
   }
   const link = e.target.closest("[data-id]");
