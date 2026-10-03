@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""fakellmkit — a scripted `llmkit runner` stand-in for tests.
+"""fakellmkit — a scripted `llmkit` stand-in for tests.
 
-flower hands the runner its records on stdin (llm, tools, system,
-user, flush) and reads the conversation back from stdout as jsonl
-records. This script plays a short, deterministic project-scan
-conversation that exercises flower's whole capture pipeline:
+Two modes, picked like the real binary picks its subcommand:
+
+  llmkit runner                the project-scan stand-in (below)
+  llmkit agent-as-tool SEED    the researcher-debug stand-in: a stdio
+                               mcp server whose single invoke tool
+                               reports what the seed carries
+
+The runner mode: flower hands the runner its records on stdin (llm,
+tools, system, user, flush) and reads the conversation back from
+stdout as jsonl records. This script plays a short, deterministic
+project-scan conversation that exercises flower's whole capture
+pipeline:
 
   - streamed thinking/response blocks (partials folded server-side)
   - a filesystem_researcher.invoke round, with the researcher's own
@@ -105,7 +113,80 @@ def rpc(base, path, method, params):
         return json.loads(r.read())
 
 
+def agent_mode(seed_path):
+    """the `llmkit agent-as-tool SEED` stand-in: flower's `researcher`
+    subcommand execs it, so tests drive the real seed through a real
+    mcp handshake. The single invoke tool answers with what the seed
+    carries (the llm's model and the invoke input); a copy of the
+    seed goes to $FAKE_AGENT_SEED_OUT when set, for assertions."""
+    model, servers = "?", []
+    try:
+        with open(seed_path) as f:
+            recs = [json.loads(l) for l in f if l.strip()]
+        for r in recs:
+            if r.get("type") == "llm":
+                model = r.get("model") or r.get("api_base") or "?"
+            if r.get("type") == "tools":
+                servers = [s.get("name", "?") for s in r.get("tools", [])]
+        sys.stderr.write("fakellmkit: agent seed %s: %d records, model %s,"
+                         " servers %s\n" % (seed_path, len(recs), model,
+                                            servers))
+        out = os.environ.get("FAKE_AGENT_SEED_OUT")
+        if out:
+            with open(out, "w") as f:
+                f.write(json.dumps({"model": model, "servers": servers}))
+    except OSError as exc:
+        sys.stderr.write("fakellmkit: cannot read the seed: %s\n" % exc)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict) or "id" not in msg:
+            continue  # a notification: no reply
+        i, m = msg["id"], msg.get("method")
+        if m == "initialize":
+            emit({"jsonrpc": "2.0", "id": i,
+                  "result": {"protocolVersion": "2025-11-25",
+                             "capabilities": {"tools": {}},
+                             "serverInfo": {"name": "fake-agent-as-tool"}}})
+        elif m == "tools/list":
+            emit({"jsonrpc": "2.0", "id": i,
+                  "result": {"tools": [
+                      {"name": "invoke",
+                       "description": "tools: %s" % ",".join(servers),
+                       "inputSchema": {
+                           "type": "object",
+                           "properties": {"input": {"type": "string"}},
+                           "required": ["input"]}}]}})
+        elif m == "tools/call":
+            params = msg.get("params") or {}
+            if params.get("name") != "invoke":
+                emit({"jsonrpc": "2.0", "id": i,
+                      "error": {"code": -32602,
+                                "message": "unknown tool"}})
+                continue
+            inp = (params.get("arguments") or {}).get("input", "")
+            emit({"jsonrpc": "2.0", "id": i,
+                  "result": {"content": [
+                      {"type": "text",
+                       "text": "fake researcher (%s) ran: %s"
+                               % (model, inp)}]}})
+        elif m == "ping":
+            emit({"jsonrpc": "2.0", "id": i, "result": {}})
+        else:
+            emit({"jsonrpc": "2.0", "id": i,
+                  "error": {"code": -32601, "message": "method not found"}})
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "agent-as-tool":
+        return agent_mode(sys.argv[2] if len(sys.argv) > 2 else "")
     recs = read_records()
     base = base_url(recs)
     surface = project_mcp(base, recs)

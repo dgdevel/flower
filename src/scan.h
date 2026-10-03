@@ -94,4 +94,19 @@ char *scan_status_json(void);
 /* Kill and reap the child at server exit. */
 void scan_shutdown(void);
 
+/*
+ * The `flower researcher <agent> --project <id> [--llm <name>]` debug
+ * subcommand: run one of the scan's two researcher agents standalone,
+ * as the stdio mcp server exposing its invoke tool. Without --llm the
+ * config's own pick runs (the only endpoint there is, else the first
+ * of the name-sorted list — the scan dialog's fallback). Writes the
+ * same seed a scan would (under a debug- tag, so a concurrent scan's
+ * scratch seeds are untouched) and execs `llmkit agent-as-tool` over
+ * it — the process becomes the server, so this never returns on
+ * success. argv[0] is "researcher"; usage errors return 2, setup
+ * failures 1, a failed exec 127. For pointing `llmkit mcp-repl
+ * --stdio` (or an mcp-proxy config) at one researcher in isolation.
+ */
+int researcher_main(int argc, char **argv);
+
 #endif

@@ -442,6 +442,18 @@ static void seed_path(const char *file, char *buf, size_t n)
     snprintf(buf, n, "%s/scan/%s", theme_dir(), file);
 }
 
+/* the seed's stable home: {config}/scan/<tag><agent>.jsonl. Scans use
+ * a bare tag (their seeds are scratch, unlinked at the end); the
+ * researcher subcommand prefixes debug- so its seeds never collide
+ * with a concurrent scan's */
+static void researcher_seed_path(const char *tag, const char *agent,
+                                 char *buf, size_t n)
+{
+    char file[96];
+    snprintf(file, sizeof file, "%s%s.jsonl", tag, agent);
+    seed_path(file, buf, n);
+}
+
 /* sh-safe: 'foo' with embedded quotes escaped */
 static void shell_quote(const char *in, char *out, size_t n)
 {
@@ -608,13 +620,15 @@ static int add_web_tools_server(cJSON *servers, const char *cfg)
 /* the seed for one researcher: header, the chosen llm, the research
  * tools (flower /mcp, or llmkit's builtin web tools for the online
  * researcher), the rendered system prompt and the agent-as-tool
- * presentation of its single invoke tool */
+ * presentation of its single invoke tool. `tag` namespaces the seed
+ * (and the web tools config beside it) — "" for scans, "debug-" for
+ * the researcher subcommand */
 static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
-                                 const project_t *proj, const char *file,
+                                 const project_t *proj, const char *tag,
                                  char *err, size_t err_n)
 {
     char path[4352], dpath[4352];
-    seed_path(file, path, sizeof path);
+    researcher_seed_path(tag, researcher->name, path, sizeof path);
     snprintf(dpath, sizeof dpath, "%s/scan", theme_dir());
     mkdir(dpath, 0700);
 
@@ -637,8 +651,9 @@ static int write_researcher_seed(const agent_t *researcher, const llm_t *llm,
         /* the online researcher reads the web instead: llmkit's
          * builtin web tools, curated by the proxy config written
          * beside this seed */
-        char cfg[4352];
-        seed_path("web-tools.jsonl", cfg, sizeof cfg);
+        char wname[96], cfg[4352];
+        snprintf(wname, sizeof wname, "%sweb-tools.jsonl", tag);
+        seed_path(wname, cfg, sizeof cfg);
         if (write_web_tools_config(cfg, err, err_n) != 0) {
             cJSON_Delete(servers);
             free(b.data);
@@ -711,10 +726,9 @@ static int add_researcher_servers(cJSON *servers, const llm_t *llm,
             snprintf(err, err_n, "builtin agent %s is missing", name);
             return -1;
         }
-        char file[64], seed[4352];
-        snprintf(file, sizeof file, "%s.jsonl", name);
-        seed_path(file, seed, sizeof seed);
-        if (write_researcher_seed(ag, llm, proj, file, err, err_n) != 0)
+        char seed[4352];
+        researcher_seed_path("", name, seed, sizeof seed);
+        if (write_researcher_seed(ag, llm, proj, "", err, err_n) != 0)
             return -1;
 
         char q_llmkit[1100], q_seed[4400];
@@ -1241,4 +1255,175 @@ void scan_shutdown(void)
     S.out.data = NULL;
     S.out.len = S.out.cap = 0;
     unlink_seeds();
+}
+
+/* ---------- the `flower researcher` subcommand ---------- */
+
+/* One of the two researchers, run on its own — the debug path. The
+ * same seed a scan writes (same prompts, same tools, same project
+ * grounding) goes to {config}/scan/debug-<agent>.jsonl and llmkit
+ * agent-as-tool is exec'd over it, so this process becomes the same
+ * stdio mcp server the scanner's runner talks to: one tool, invoke.
+ * No flower surface is involved in serving it (the researcher's own
+ * tools call out like they always do — the fs researcher back into
+ * the running flower at --base-url, the online one into its own
+ * llmkit children), so nothing here runs through the scan state. */
+
+static void researcher_usage(FILE *out)
+{
+    fprintf(out,
+        "flower researcher — run one of the scan's researcher agents\n"
+        "directly, as the stdio mcp server exposing its invoke tool\n"
+        "\n"
+        "usage: flower researcher <agent> --project <id> [--llm <name>]\n"
+        "                          [--base-url <url>] [-c DIR] [-l BIN]\n"
+        "\n"
+        "  <agent>           filesystem_researcher | online_researcher\n"
+        "  --project <id>    the project to research (ids: GET /api/projects)\n"
+        "  --llm <name>      the llm endpoint to run it with (default:\n"
+        "                    the only one in the config, else the first —\n"
+        "                    the scan dialog's own fallback)\n"
+        "  --base-url <url>  the running flower serving the filesystem\n"
+        "                    researcher's tools (default\n"
+        "                    http://127.0.0.1:8080; the online researcher\n"
+        "                    never calls back)\n"
+        "  -c DIR            config directory (as the server's -c)\n"
+        "  -l BIN            the llmkit binary (as the server's -l)\n"
+        "  -h, --help        show this help\n"
+        "\n"
+        "The seed is written to {config}/scan/debug-<agent>.jsonl and\n"
+        "llmkit agent-as-tool is exec'd over it, so the session speaks\n"
+        "mcp json-rpc on stdin/stdout. Point `llmkit mcp-repl --stdio`\n"
+        "(or an `llmkit mcp-proxy` config, for `llmkit repl\n"
+        "--mcp-proxy`) at this command to debug a researcher in\n"
+        "isolation from the scanner — the seed is the very one a scan\n"
+        "of that project would run.\n");
+}
+
+int researcher_main(int argc, char **argv)
+{
+    const char *agent = NULL, *project = NULL, *llm = NULL;
+    const char *cfg_dir = NULL, *llmkit = NULL, *base_url = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+            researcher_usage(stdout);
+            return 0;
+        } else if (strcmp(a, "--project") == 0 && i + 1 < argc) {
+            project = argv[++i];
+        } else if (strcmp(a, "--llm") == 0 && i + 1 < argc) {
+            llm = argv[++i];
+        } else if (strcmp(a, "--base-url") == 0 && i + 1 < argc) {
+            base_url = argv[++i];
+        } else if (strcmp(a, "-c") == 0 && i + 1 < argc) {
+            cfg_dir = argv[++i];
+        } else if (strcmp(a, "-l") == 0 && i + 1 < argc) {
+            llmkit = argv[++i];
+        } else if (!agent && a[0] != '-') {
+            agent = a;
+        } else {
+            fprintf(stderr, "flower researcher: unknown or incomplete"
+                            " argument '%s'\n", a);
+            researcher_usage(stderr);
+            return 2;
+        }
+    }
+    if (!agent || !project) {
+        fprintf(stderr, "flower researcher: <agent> and --project are"
+                        " required\n");
+        researcher_usage(stderr);
+        return 2;
+    }
+
+    /* only the two researchers run here — the scanner itself has no
+     * life outside a scan */
+    int found = 0;
+    for (size_t i = 0; i < sizeof RESEARCHERS / sizeof RESEARCHERS[0]; i++)
+        if (strcmp(agent, RESEARCHERS[i].agent) == 0) found = 1;
+    if (!found) {
+        fprintf(stderr, "flower researcher: '%s' is not a researcher agent"
+                        " (filesystem_researcher | online_researcher)\n",
+                agent);
+        return 2;
+    }
+
+    if (theme_init(cfg_dir) != 0) {
+        fprintf(stderr,
+                "flower: cannot resolve or create config directory "
+                "(set HOME, XDG_CONFIG_HOME, or use -c DIR)\n");
+        return 1;
+    }
+    if (!llmkit) llmkit = getenv("FLOWER_LLMKIT"); /* may stay NULL */
+
+    projects_t projects;
+    llms_t llms;
+    projects_load(&projects);
+    llms_load(&llms);
+
+    const agent_t *ag = agents_builtin_get(agent);
+    int pi = projects_find_id(&projects, project);
+    if (pi < 0) {
+        fprintf(stderr, "flower researcher: unknown project id '%s'\n",
+                project);
+        return 2;
+    }
+    project_t *p = &projects.items[pi];
+    struct stat st;
+    if (stat(p->dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "flower researcher: the project's working directory"
+                        " is missing on disk\n");
+        return 2;
+    }
+    const llm_t *l = llm ? llms_get(&llms, llm) : NULL;
+    if (llm && !l) {
+        fprintf(stderr, "flower researcher: unknown llm '%s' — add it on"
+                        " the config page first\n", llm);
+        return 2;
+    }
+    if (!l) {
+        /* no --llm: the config's own pick — the only endpoint there
+         * is, else the first of the list (the scan dialog's own
+         * fallback; llms.json loads name-sorted) */
+        if (llms.count == 0) {
+            fprintf(stderr, "flower researcher: no llm endpoints in the"
+                            " config — add one on the config page first,"
+                            " or pass --llm\n");
+            return 2;
+        }
+        l = llms.items[0];
+        fprintf(stderr, "flower researcher: no --llm given — using '%s'"
+                        " (%s)\n", l->name,
+                llms.count == 1 ? "the only llm in the config"
+                               : "first of the config's list");
+    }
+    if (!ag) {
+        fprintf(stderr, "flower researcher: the %s agent is missing\n",
+                agent);
+        return 1;
+    }
+
+    /* write_researcher_seed reads the wiring scan_attach sets for the
+     * server; a debug run needs only these two of it */
+    snprintf(S.llmkit, sizeof S.llmkit, "%s",
+             llmkit && llmkit[0] ? llmkit : "llmkit");
+    snprintf(S.base_url, sizeof S.base_url, "%s",
+             base_url && base_url[0] ? base_url
+                                     : "http://127.0.0.1:8080");
+
+    char err[192] = "";
+    if (write_researcher_seed(ag, l, p, "debug-", err, sizeof err) != 0) {
+        fprintf(stderr, "flower researcher: %s\n", err);
+        return 1;
+    }
+
+    char seed[4352];
+    researcher_seed_path("debug-", agent, seed, sizeof seed);
+    if (strchr(S.llmkit, '/'))
+        execl(S.llmkit, "llmkit", "agent-as-tool", seed, (char *)NULL);
+    else
+        execlp(S.llmkit, "llmkit", "agent-as-tool", seed, (char *)NULL);
+    fprintf(stderr, "flower researcher: cannot run %s: %s\n", S.llmkit,
+            strerror(errno));
+    return 127;
 }

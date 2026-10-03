@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "server.h"
+#include "scan.h"
 #include "theme.h"
 
 #include <getopt.h>
@@ -15,6 +16,10 @@ static void usage(FILE *out, const char *prog)
         "flower — single-binary webapp server\n"
         "\n"
         "usage: %s [-b ADDR] [-p PORT] [-c DIR] [-l BIN] [-h]\n"
+        "       %s researcher <agent> --project <id> [--llm <name>]\n"
+        "                    [--base-url <url>] [-c DIR] [-l BIN]\n"
+        "                    (a scan's researcher agent as a stdio mcp\n"
+        "                    server — 'flower researcher -h' says more)\n"
         "\n"
         "options:\n"
         "  -b ADDR   address to bind (default 0.0.0.0 = all interfaces)\n"
@@ -24,11 +29,16 @@ static void usage(FILE *out, const char *prog)
         "  -l BIN    the llmkit binary the project scan agent runs\n"
         "            (default: $FLOWER_LLMKIT, or llmkit from PATH)\n"
         "  -h        show this help\n",
-        prog);
+        prog, prog);
 }
 
 int main(int argc, char **argv)
 {
+    /* the debug subcommand: one researcher agent as a stdio mcp
+     * server (src/scan.c); it never serves http */
+    if (argc > 1 && strcmp(argv[1], "researcher") == 0)
+        return researcher_main(argc - 1, argv + 1);
+
     const char *addr = NULL; /* NULL = bind all interfaces (0.0.0.0) */
     const char *cfg_dir = NULL;
     const char *llmkit = NULL;

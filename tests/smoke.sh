@@ -735,4 +735,94 @@ assert d["records"] and d["records"][-1]["k"] == "error", d
 assert "interrupted" in d["records"][-1]["text"], d
 ' || fail "conversations: the interrupted one should say so"
 
+echo "== 9c. the researcher debug subcommand =="
+# usage and validation errors
+"$BIN" researcher bogus --project "$PROJ" --llm ollama -c "$CFG" >/dev/null 2>&1
+[ $? -eq 2 ] || fail "researcher: an unknown agent must exit 2"
+"$BIN" researcher filesystem_researcher --llm ollama -c "$CFG" >/dev/null 2>&1
+[ $? -eq 2 ] || fail "researcher: a missing --project must exit 2"
+"$BIN" researcher filesystem_researcher --project deadbeefdeadbeefdeadbeefdeadbeef --llm ollama -c "$CFG" >/dev/null 2>&1
+[ $? -eq 2 ] || fail "researcher: an unknown project must exit 2"
+"$BIN" researcher filesystem_researcher --project "$PROJ" --llm nope -c "$CFG" >/dev/null 2>&1
+[ $? -eq 2 ] || fail "researcher: an unknown llm must exit 2"
+
+# --llm defaults to the config's own pick: the only endpoint there
+# is, else the first of the name-sorted list (the scan dialog's own
+# fallback); an empty config is a clean error
+"$BIN" researcher filesystem_researcher --project "$PROJ" -c "$CFG" -l "$LLMKIT" \
+    >"$CFG/nollm-rpc.out" 2>"$CFG/nollm-rpc.err" </dev/null
+grep -q "using 'ollama' (the only llm" "$CFG/nollm-rpc.err" \
+    || fail "researcher: no --llm should note the single-endpoint default"
+curl -s -X PUT --data '[
+ {"name":"zzz","endpoint_protocol":"openai","api_base":"http://localhost:1/v1","model":"z"},
+ {"name":"ollama","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"m"}]' \
+    "$B/api/llms" >/dev/null
+"$BIN" researcher filesystem_researcher --project "$PROJ" -c "$CFG" -l "$LLMKIT" \
+    >"$CFG/nollm2-rpc.out" 2>"$CFG/nollm2-rpc.err" </dev/null
+grep -q "using 'ollama' (first of the config" "$CFG/nollm2-rpc.err" \
+    || fail "researcher: no --llm with several endpoints should note the first-pick default"
+grep -q '"model":"m"' "$CFG/scan/debug-filesystem_researcher.jsonl" \
+    || fail "researcher: the default llm did not land in the seed"
+curl -s -X PUT --data '[]' "$B/api/llms" >/dev/null
+"$BIN" researcher filesystem_researcher --project "$PROJ" -c "$CFG" -l "$LLMKIT" \
+    >/dev/null 2>"$CFG/empty-rpc.err" </dev/null
+[ $? -eq 2 ] || fail "researcher: an empty llm config must exit 2"
+grep -q "no llm endpoints" "$CFG/empty-rpc.err" \
+    || fail "researcher: an empty llm config should say so"
+curl -s -X PUT --data '[{"name":"ollama","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"m"}]' \
+    "$B/api/llms" >/dev/null
+
+# researcher_rpc <seed-summary-out> <agent>: one full mcp session —
+# flower execs $LLMKIT (the fake, in its agent-as-tool mode) over the
+# debug seed, and the scripted handshake drives it
+researcher_rpc() {
+    FAKE_AGENT_SEED_OUT="$1" bash -c '
+      printf "%s\n" \
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}" \
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}" \
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}" \
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"invoke\",\"arguments\":{\"input\":\"look at the README\"}}}" |
+      exec "$0" researcher "$5" --project "$1" --llm ollama --base-url "$2" -c "$3" -l "$4"' \
+      "$BIN" "$PROJ" "$B" "$CFG" "$LLMKIT" "$2"
+}
+researcher_rpc "$CFG/seen-fs.json" filesystem_researcher >"$CFG/fs-rpc.out" 2>/dev/null \
+    || fail "researcher: the fs debug session did not run"
+grep -q '"name":"invoke"' "$CFG/fs-rpc.out" \
+    || fail "researcher: the fs session listed no invoke tool"
+grep -q 'fake researcher (m) ran: look at the README' "$CFG/fs-rpc.out" \
+    || fail "researcher: the fs invoke call did not answer"
+[ -f "$CFG/scan/debug-filesystem_researcher.jsonl" ] \
+    || fail "researcher: the debug seed was not written"
+[ ! -f "$CFG/scan/filesystem_researcher.jsonl" ] \
+    || fail "researcher: the debug run must not leave a scan-mode seed"
+# the seed is the scan's own shape: the project-grounded mcp url, the
+# chosen llm, the researcher's rendered system prompt
+grep -qF "$B/projects/" "$CFG/scan/debug-filesystem_researcher.jsonl" \
+    || fail "researcher: the fs seed lacks the project mcp url"
+grep -q '"model":"m"' "$CFG/scan/debug-filesystem_researcher.jsonl" \
+    || fail "researcher: the fs seed lacks the chosen llm"
+grep -q "You are filesystem_researcher" "$CFG/scan/debug-filesystem_researcher.jsonl" \
+    || fail "researcher: the fs seed lacks the system prompt"
+python3 - "$CFG/seen-fs.json" <<'EOF' || fail "researcher: the fs seed summary is wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["model"] == "m", d
+assert d["servers"] == ["flower"], d      # flower's own mcp, project-scoped
+EOF
+researcher_rpc "$CFG/seen-online.json" online_researcher >"$CFG/online-rpc.out" 2>/dev/null \
+    || fail "researcher: the online debug session did not run"
+grep -q 'fake researcher (m) ran: look at the README' "$CFG/online-rpc.out" \
+    || fail "researcher: the online invoke call did not answer"
+# the online researcher reads the web: its tool server is the mcp-proxy
+# over llmkit's builtin web tools, under the debug tag
+grep -q "debug-web-tools.jsonl" "$CFG/scan/debug-online_researcher.jsonl" \
+    || fail "researcher: the online seed lacks its web tools server"
+grep -q "builtin-mcp" "$CFG/scan/debug-web-tools.jsonl" \
+    || fail "researcher: the debug web tools config was not written"
+python3 - "$CFG/seen-online.json" <<'EOF' || fail "researcher: the online seed summary is wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["servers"] == ["flower"], d      # the proxy, named flower
+EOF
+
 echo "ALL SMOKE TESTS PASSED"

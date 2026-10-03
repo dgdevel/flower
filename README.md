@@ -426,6 +426,40 @@ it to stop (a second call forces it). The editor does not host the
 chat anymore — it only says that a scan is running in the
 background and links to the conversation.
 
+**Debugging a researcher in isolation:** `flower researcher` runs
+one of the two researchers on its own — as the very stdio mcp
+server the scanner's runner would talk to, single `invoke` tool and
+all:
+
+```sh
+./flower researcher filesystem_researcher \
+    --project <id>                # ids: GET /api/projects; the llm
+                                  # defaults to the only endpoint in
+                                  # the config, else the first (the
+                                  # scan dialog's own fallback);
+                                  # --llm <name> overrides; -c/-l as
+                                  # the server's
+llmkit mcp-repl --stdio './flower researcher filesystem_researcher \
+    --project 0f3a…'             # then: invoke("…"), timed + direct
+```
+
+It writes the seed a scan of that project would carry — same
+prompts, same tools, same project grounding — to
+`{config}/scan/debug-<agent>.jsonl` (namespaced, so a concurrently
+running scan's scratch seeds are untouched) and execs
+`llmkit agent-as-tool` over it. `llmkit mcp-repl --stdio` is the
+front-end for direct, timed calls; an `llmkit mcp-proxy` config
+holding one `tools` record with this command line exposes
+`filesystem_researcher.invoke` to `llmkit repl --mcp-proxy`. The
+filesystem researcher calls back into the running flower
+(`--base-url`, default `http://127.0.0.1:8080`) for its fs tools —
+those requests appear in the server log — while the online
+researcher is self-contained. It is a subcommand rather than an
+extra flower http surface on purpose: an invoke is a whole
+conversation (minutes), and flower's single-threaded loop must stay
+free to serve the filesystem researcher's tool calls in the
+meantime.
+
 **Conversations** (`{config}/conversations/`) make every llm
 exchange flower runs durable and readable. One directory per
 conversation, named by a 32-hex-char id:
