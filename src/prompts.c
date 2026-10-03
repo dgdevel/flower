@@ -90,9 +90,11 @@ static int put_context(sbuf_t *out, const project_t *p)
 }
 
 /* the value of a known variable, rendered into a scratch sbuf the
- * caller resets per use; NULL when the name is not known */
+ * caller resets per use; 0 when the name is known, 1 when it is not
+ * (caller-supplied variables are consulted after the fixed set) */
 static int render_var(sbuf_t *out, const char *name, size_t name_len,
-                      const project_t *p)
+                      const project_t *p, const prompt_var_t *extra,
+                      size_t extra_n)
 {
     if (name_len == 12 && strncmp(name, "project_path", 12) == 0)
         return p ? sb_puts(out, p->dir) : 0;
@@ -102,10 +104,17 @@ static int render_var(sbuf_t *out, const char *name, size_t name_len,
         return put_attributes(out, p);
     if (name_len == 15 && strncmp(name, "project_context", 15) == 0)
         return put_context(out, p);
+    for (size_t i = 0; i < extra_n; i++) {
+        const prompt_var_t *v = &extra[i];
+        if (!v->name || strlen(v->name) != name_len) continue;
+        if (strncmp(v->name, name, name_len) != 0) continue;
+        return sb_puts(out, v->value ? v->value : "");
+    }
     return 1; /* not a known variable */
 }
 
-char *prompt_render(const char *tpl, const project_t *proj)
+char *prompt_render_vars(const char *tpl, const project_t *proj,
+                         const prompt_var_t *extra, size_t extra_n)
 {
     if (!tpl) {
         char *empty = malloc(1);
@@ -132,7 +141,7 @@ char *prompt_render(const char *tpl, const project_t *proj)
 
         /* allow no spaces around the name: "{{ var }}" stays verbatim */
         sbuf_t val = { 0 };
-        int known = render_var(&val, name, name_len, proj);
+        int known = render_var(&val, name, name_len, proj, extra, extra_n);
         if (known == 0) {
             if (sb_putn(&out, val.data ? val.data : "",
                           val.len) != 0) {
@@ -160,4 +169,9 @@ oom:
         char *copy = strdup(tpl);
         return copy; /* out of memory: degrade to the raw template */
     }
+}
+
+char *prompt_render(const char *tpl, const project_t *proj)
+{
+    return prompt_render_vars(tpl, proj, NULL, 0);
 }

@@ -464,13 +464,16 @@ static void handle_scan_post(server_t *s, conn_t *c, http_request_t *req,
                              const char *body, size_t body_len, int *status)
 {
     char err[192] = "";
-    const char *project = NULL, *llm = NULL;
+    const char *project = NULL, *llm = NULL, *note = NULL;
     cJSON *j = body_len ? cJSON_ParseWithLength(body, body_len) : NULL;
     if (j) {
         const cJSON *p = cJSON_GetObjectItemCaseSensitive(j, "project");
         const cJSON *l = cJSON_GetObjectItemCaseSensitive(j, "llm");
+        const cJSON *n = cJSON_GetObjectItemCaseSensitive(j, "note");
         if (cJSON_IsString(p) && p->valuestring) project = p->valuestring;
         if (cJSON_IsString(l) && l->valuestring) llm = l->valuestring;
+        /* optional: a follow-up instruction the run continues from */
+        if (cJSON_IsString(n) && n->valuestring) note = n->valuestring;
     }
     if (!project || !llm) {
         cJSON_Delete(j);
@@ -480,7 +483,7 @@ static void handle_scan_post(server_t *s, conn_t *c, http_request_t *req,
                         "scan request");
         return;
     }
-    scan_start_result_t r = scan_start(project, llm, err, sizeof err);
+    scan_start_result_t r = scan_start(project, llm, note, err, sizeof err);
     cJSON_Delete(j);
 
     if (r == SCAN_START_OK) {

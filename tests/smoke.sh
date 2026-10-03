@@ -825,4 +825,55 @@ d = json.load(open(sys.argv[1]))
 assert d["servers"] == ["flower"], d      # the proxy, named flower
 EOF
 
+echo "== 9d. a follow-up scan continues from the last run =="
+# the note is free text like every other field: control characters and
+# overflow are refused before anything spawns
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"note\":\"nope\\u0007bad\"}" \
+    "$B/api/scan")
+[ "$code" = 422 ] || fail "scan: a control character in the note: expected 422, got $code"
+LONGNOTE=$(python3 -c 'print("x" * 1200)')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"note\":\"$LONGNOTE\"}" \
+    "$B/api/scan")
+[ "$code" = 422 ] || fail "scan: an over-long note: expected 422, got $code"
+curl -s "$B/api/scan" | grep -q '"running":false' \
+    || fail "scan: a rejected note must not start anything"
+
+newest_main() {
+    curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+print([c for c in json.load(sys.stdin)
+       if c["agent"] == "project_scanner"][0]["id"])'
+}
+PREV=$(newest_main)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    --data "{\"project\":\"$PROJ\",\"llm\":\"ollama\",\"note\":\"check the test layout\"}" \
+    "$B/api/scan")
+[ "$code" = 200 ] || fail "scan: a follow-up: expected 200, got $code"
+for _ in $(seq 1 60); do
+    curl -s "$B/api/scan" | grep -q '"done":true' && break
+    sleep 0.25
+done
+NEW=$(newest_main)
+[ "$NEW" != "$PREV" ] || fail "scan: a follow-up should be a new conversation"
+curl -s "$B/api/conversations" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+mine = [c for c in d if c["project"] == "'"$PROJ"'" and not c["parent"]]
+assert len(mine) >= 3, d                      # every run stays linked
+assert mine[0]["id"] == "'"$NEW"'", d         # newest first
+' || fail "conversations: runs should stay linked to their project"
+curl -s "$B/api/conversations/$NEW" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+u = d["records"][0]
+assert u["k"] == "user", d
+assert "Another round on the project \"scan target\"" in u["text"], d
+assert "# Request" in u["text"] and "check the test layout" in u["text"], d
+assert "# Previous Run" in u["text"], d
+# the seed is the last run itself, transcript and all — not a stub
+assert "Scan the project \"scan target\" now." in u["text"], d
+' || fail "scan: the follow-up should carry the previous run and the request"
+
 echo "ALL SMOKE TESTS PASSED"

@@ -1,0 +1,11 @@
+Another round on the project "{{project_name}}".
+
+# Previous Run
+
+{{previous_run}}
+
+# Request
+
+{{request}}
+
+Continue from the previous run. Keep what still holds, correct what Request contradicts, fill what Request asks. Research again with the tools, set data after each round.

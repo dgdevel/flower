@@ -38,6 +38,9 @@ extern long syscall(long number, ...);
 #define SCAN_MAX_ROUNDS      48
 #define SCAN_TOOL_TIMEOUT    600
 
+/* how much of a previous run's transcript a follow-up carries */
+#define SCAN_PREV_MAX        8192
+
 /* the researchers: the agents the scanner orchestrates, the research
  * tools each one uses on flower's /mcp surface (their sets are
  * disjoint — that is what attributes an incoming /mcp call to the
@@ -111,6 +114,11 @@ static struct {
     int writes; /* successful write-back tool calls */
 
     char conv[CONV_ID_LEN + 1]; /* the scan's main conversation */
+
+    /* a follow-up run: the user's instruction and the conversation
+     * it continues (empty for a fresh scan) */
+    char note[SCAN_NOTE_MAX];
+    char prev[CONV_ID_LEN + 1];
 
     /* streamed text blocks arrive as partials: accumulate, record
      * once */
@@ -433,6 +441,44 @@ static char *render_prompt(const char *path, const project_t *proj,
     if (out && *out) return out;
     free(out);
     return strdup(fallback);
+}
+
+/* render_prompt with caller-supplied {{variables}} (the follow-up's
+ * request and previous-run transcript) */
+static char *render_prompt_vars(const char *path, const project_t *proj,
+                                const prompt_var_t *vars, size_t n,
+                                const char *fallback)
+{
+    char *tpl = prompt_text(path);
+    char *out = tpl ? prompt_render_vars(tpl, proj, vars, n) : NULL;
+    free(tpl);
+    if (out && *out) return out;
+    free(out);
+    return strdup(fallback);
+}
+
+/* the opening user record of a run's conversation — and the `user`
+ * record the runner is seeded with. A fresh scan asks for the scan;
+ * a follow-up hands the model the previous run's transcript and the
+ * user's request (S.prev and S.note, captured by scan_start). */
+static char *scan_user_prompt(const project_t *proj)
+{
+    if (!S.note[0])
+        return render_prompt("agents/project_scanner/user_prompt.txt",
+                             proj, "Scan the project now.");
+
+    char *prev = S.prev[0] ? conv_transcript_text(S.prev, SCAN_PREV_MAX)
+                           : NULL;
+    prompt_var_t vars[] = {
+        { "request", S.note },
+        { "previous_run", prev && prev[0] ? prev
+              : "No previous run of this project is recorded." },
+    };
+    char *out = render_prompt_vars(
+        "agents/project_scanner/followup_prompt.txt", proj,
+        vars, sizeof vars / sizeof vars[0], "Continue the project scan.");
+    free(prev);
+    return out;
 }
 
 /* ---------- researcher seeds ---------- */
@@ -799,8 +845,7 @@ static char *build_runner_input(const agent_t *scanner, const llm_t *llm,
     free(system);
     rc |= put_record(&b, rec); cJSON_Delete(rec);
 
-    char *user = render_prompt("agents/project_scanner/user_prompt.txt",
-                               proj, "Scan the project now.");
+    char *user = scan_user_prompt(proj);
     rec = text_record("user", user);
     free(user);
     rc |= put_record(&b, rec); cJSON_Delete(rec);
@@ -1128,9 +1173,17 @@ void scan_attach(int epfd, projects_t *projects, llms_t *llms,
 }
 
 scan_start_result_t scan_start(const char *project_id, const char *llm_name,
-                               char *err, size_t err_n)
+                               const char *note, char *err, size_t err_n)
 {
     if (S.running) return SCAN_START_BUSY;
+    if (note && note[0] &&
+        (strlen(note) >= SCAN_NOTE_MAX ||
+         !valid_utf8_text(note, strlen(note), 1))) {
+        snprintf(err, err_n,
+                 "note: text, max %d bytes, no control characters",
+                 SCAN_NOTE_MAX - 1);
+        return SCAN_START_REJECT;
+    }
 
     int pi = projects_find_id(S.projects, project_id);
     if (pi < 0) {
@@ -1159,6 +1212,12 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
         return SCAN_START_REJECT;
     }
 
+    /* the run this one continues: whatever the project last recorded
+     * (captured before this run's own conversation exists) */
+    snprintf(S.note, sizeof S.note, "%s", note ? note : "");
+    S.prev[0] = '\0';
+    if (S.note[0]) conv_latest_root_id(project_id, S.prev);
+
     /* the conversation this scan is recorded in — created before the
      * child so even a failed spawn leaves a readable trace */
     char title[CONV_TITLE_MAX];
@@ -1169,8 +1228,7 @@ scan_start_result_t scan_start(const char *project_id, const char *llm_name,
         snprintf(err, err_n, "cannot create the conversation record");
         return SCAN_START_SPAWN;
     }
-    char *user = render_prompt("agents/project_scanner/user_prompt.txt",
-                               p, "Scan the project now.");
+    char *user = scan_user_prompt(p);
     conv_add(S.conv, "user", NULL, user, 0);
     free(user);
 

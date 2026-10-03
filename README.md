@@ -262,6 +262,10 @@ served over http):
 ```
 prompts/
   agents/<name>/system_prompt.txt        builtin agents' prompts
+  agents/project_scanner/user_prompt.txt its opening ask ("scan now")
+  agents/project_scanner/followup_prompt.txt
+                                        the follow-up ask — the previous
+                                        run's transcript + the request
   mcp/<tool>/description.txt             tool description (fs tools:
                                         tools/list; web tools: the
                                         mcp-proxy config src/scan.c
@@ -284,7 +288,11 @@ prompt when the runner lands:
 ```
 
 Unknown tokens stay verbatim so typos remain visible; a NULL
-project renders the known variables as empty strings.
+project renders the known variables as empty strings. A caller may
+add variables of its own (`prompt_render_vars`): the scan's
+follow-up prompt carries `{{previous_run}}` (the last run's
+transcript) and `{{request}}` (the note) that way — their values are
+plain text, never re-scanned for tokens.
 
 **flower as an mcp server** — `POST /mcp` speaks mcp's json-rpc
 subset over the streamable-http transport with plain json replies
@@ -425,6 +433,21 @@ One scan runs at a time; `POST /api/scan/stop` asks
 it to stop (a second call forces it). The editor does not host the
 chat anymore — it only says that a scan is running in the
 background and links to the conversation.
+
+**A project's runs stay linked to it, and the next one can continue
+them.** The editor's scan section lists the project's recorded runs
+(newest first, state badged, each a link to its transcript) straight
+from the conversation store, not from the transient scan state — so
+a finished run is still one click away after another project is
+scanned, after a restart, or long after the run ended. The box under
+the LLM pick sends that list's counterpart: a **note** turns the
+button into "Ask the scanner" and starts a **follow-up run** — the
+new conversation opens with the previous run's transcript and the
+note (`{{previous_run}}` / `{{request}}` in
+`prompts/agents/project_scanner/followup_prompt.txt`, the transcript
+capped at 8 KiB from the newest end), so the scanner continues its
+work instead of starting over. A note is optional and validated like
+every other text field (≤ 1023 bytes, UTF-8, no control characters).
 
 **Debugging a researcher in isolation:** `flower researcher` runs
 one of the two researchers on its own — as the very stdio mcp
@@ -635,10 +658,13 @@ tests/e2e/            playwright browser tests (firefox; config in
 | `/api/scan`       | GET/HEAD     | scan status: running, done, ok, error,|
 |                   |              | project, llm, started, ended, writes, |
 |                   |              | conversation (the recorded id)        |
-| `/api/scan`       | POST         | body {"project": id, "llm": name}:    |
-|                   |              | start the scan agent; 200 started;    |
-|                   |              | 409 one already runs; 422 bad         |
-|                   |              | references; 500 spawn failure         |
+| `/api/scan`       | POST         | body {"project": id, "llm": name,     |
+|                   |              | "note": text?}: start the scan agent  |
+|                   |              | — with a note it is a follow-up,      |
+|                   |              | seeded with the project's last run;   |
+|                   |              | 200 started; 409 one already runs;    |
+|                   |              | 422 bad references or note; 500 spawn |
+|                   |              | failure                               |
 | `/api/scan/stop`  | POST         | ask the running scan to stop (force   |
 |                   |              | on a second call); 409 when none runs |
 | `/scan/mcp`       | POST         | the scan's write-back mcp surface     |
@@ -826,6 +852,11 @@ served automatically with the right MIME type. Dotfiles are skipped.
             project's working directory (relative paths, jailed,
             project-relative replies, no absolute path disclosed);
             the scan researchers work in project-relative paths
+      - [x] a project's runs stay linked to it: the editor's scan
+            section lists them from the conversation store (not the
+            transient scan state), and a note turns the next scan
+            into a follow-up seeded with the previous run's
+            transcript ({{previous_run}} / {{request}})
       - [ ] drive `llmkit runner` conversations from a task (renders
             the selected agent's prompt with the project's context)
 - [ ] idle connection timeouts

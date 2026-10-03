@@ -42,4 +42,19 @@ char *prompt_text(const char *name);
  */
 char *prompt_render(const char *tpl, const project_t *proj);
 
+/* One caller-supplied {{name}} the fixed set above does not carry
+ * (the scan's follow-up prompt: the user's request and the previous
+ * run's transcript). A NULL value renders empty. Names are matched
+ * exactly — no spaces around them. */
+typedef struct {
+    const char *name;
+    const char *value;
+} prompt_var_t;
+
+/* prompt_render with `extra_n` caller-supplied variables consulted
+ * after the fixed set; a later variable shadows an earlier one of the
+ * same name. */
+char *prompt_render_vars(const char *tpl, const project_t *proj,
+                         const prompt_var_t *extra, size_t extra_n);
+
 #endif

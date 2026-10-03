@@ -90,4 +90,17 @@ char *conv_list_json(void);
  * unknown or nothing could be read. */
 char *conv_get_json(const char *id);
 
+/* The id of the newest conversation belonging to `project` that is
+ * not a sub-agent — a run's main conversation, the project scan — or
+ * "" when the project has no recorded run. id_out holds
+ * CONV_ID_LEN + 1 bytes. */
+void conv_latest_root_id(const char *project, char *id_out);
+
+/* One conversation as plain text, for handing a later run the context
+ * of an earlier one: an "kind[tool]: text" line per record, oldest
+ * first, with the newest lines kept when the whole exceeds max_bytes
+ * (the cut is marked). malloc'd, "" when the id is unknown or nothing
+ * could be read. */
+char *conv_transcript_text(const char *id, size_t max_bytes);
+
 #endif

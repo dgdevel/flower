@@ -72,6 +72,25 @@ static void test_prompts(void)
     out = prompt_render("a={{project_path}}b={{project_name}}c", NULL);
     check(out && strcmp(out, "a=b=c") == 0, "tpl: NULL project empties vars");
     free(out);
+
+    /* caller-supplied variables (the scan follow-up's {{request}} and
+     * {{previous_run}}): consulted after the fixed set, made of plain
+     * text, never re-scanned for tokens */
+    prompt_var_t vars[] = {
+        { "request", "find the tests {{project_name}}" },
+        { "previous_run", NULL },
+        { "project_name", "shadowed" },
+    };
+    out = prompt_render_vars(
+        "req={{request}} prev=[{{previous_run}}] "
+        "name={{project_name}} keep={{spaced }}", &proj,
+        vars, sizeof vars / sizeof vars[0]);
+    check_contains(out, "req=find the tests {{project_name}}",
+                   "tpl: extra var value verbatim");
+    check_contains(out, "prev=[]", "tpl: NULL extra var renders empty");
+    check_contains(out, "name=flower", "tpl: fixed set wins over extras");
+    check_contains(out, "{{spaced }}", "tpl: unknown stays after extras");
+    free(out);
 }
 
 /* ---------- filesystem tools ---------- */

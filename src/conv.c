@@ -437,3 +437,89 @@ char *conv_get_json(const char *id)
     cJSON_Delete(o);
     return s;
 }
+
+void conv_latest_root_id(const char *project, char *id_out)
+{
+    id_out[0] = '\0';
+    if (!project || !project[0]) return;
+    size_t n;
+    conv_meta_t *all = load_metas(&n); /* newest first */
+    if (!all) return;
+    for (size_t i = 0; i < n; i++) {
+        if (all[i].parent[0]) continue; /* a sub-agent, not a run */
+        if (strcmp(all[i].project, project) != 0) continue;
+        snprintf(id_out, CONV_ID_LEN + 1, "%s", all[i].id);
+        break;
+    }
+    free(all);
+}
+
+/* one record object -> "kind[tool]: text" + newline (the timestamp is
+ * left out: the transcript is context, not a log) */
+static int put_record_line(sbuf_t *out, const cJSON *r)
+{
+    const cJSON *k = cJSON_GetObjectItemCaseSensitive(r, "k");
+    const cJSON *tool = cJSON_GetObjectItemCaseSensitive(r, "tool");
+    const cJSON *text = cJSON_GetObjectItemCaseSensitive(r, "text");
+    if (!cJSON_IsString(k) || !k->valuestring) return 0;
+    if (sb_puts(out, k->valuestring) != 0) return -1;
+    if (cJSON_IsString(tool) && tool->valuestring &&
+        (sb_putc(out, '[') != 0 || sb_puts(out, tool->valuestring) != 0 ||
+         sb_putc(out, ']') != 0))
+        return -1;
+    if (cJSON_IsString(text) && text->valuestring &&
+        (sb_puts(out, ": ") != 0 || sb_puts(out, text->valuestring) != 0))
+        return -1;
+    return sb_putc(out, '\n');
+}
+
+char *conv_transcript_text(const char *id, size_t max_bytes)
+{
+    char *out = malloc(1);
+    if (!out) return NULL;
+    out[0] = '\0';
+    if (!conv_valid_id(id)) return out;
+
+    char path[4352 + 80];
+    conv_path(id, "records.jsonl", path, sizeof path);
+    char *buf = read_whole_file(path, 64 * 1024 * 1024);
+    if (!buf) return out;
+
+    sbuf_t t = { 0 };
+    int trimmed = 0;
+    size_t start = 0;
+    for (size_t i = 0; buf[i]; i++) {
+        if (buf[i] != '\n') continue;
+        buf[i] = '\0';
+        cJSON *r = record_to_cjson(buf + start);
+        start = i + 1;
+        if (!r) continue;
+        if (put_record_line(&t, r) != 0) { cJSON_Delete(r); break; }
+        cJSON_Delete(r);
+        /* a run's transcript can be long: keep the newest max_bytes */
+        while (t.len > max_bytes) {
+            char *nl = memchr(t.data, '\n', t.len);
+            size_t cut = nl ? (size_t)(nl - t.data) + 1 : t.len;
+            memmove(t.data, t.data + cut, t.len - cut);
+            t.len -= cut;
+            t.data[t.len] = '\0';
+            trimmed = 1;
+        }
+    }
+    free(buf);
+
+    if (!t.data) return out;
+    free(out);
+    out = t.data;
+    if (trimmed) { /* the window rolled: say so */
+        sbuf_t head = { 0 };
+        if (sb_puts(&head, "… earlier records omitted\n") == 0 &&
+            sb_putn(&head, out, t.len) == 0) {
+            free(out);
+            out = head.data;
+        } else {
+            free(head.data);
+        }
+    }
+    return out;
+}

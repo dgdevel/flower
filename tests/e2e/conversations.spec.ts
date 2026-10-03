@@ -108,3 +108,49 @@ test("conversations: a scan is recorded live, sub-agents linked", async ({ page,
   await page.locator(".conv-parent").click();
   await expect(page.locator("#conv-detail h2")).toContainText("Project scan");
 });
+
+test("a finished run stays linked to its project and can be continued", async ({ page, request }) => {
+  mkdirSync(`${WORK}/followup`, { recursive: true });
+  writeFileSync(`${WORK}/followup/README.md`, "follow-up fixture\n");
+
+  await request.put("/api/llms", {
+    data: [{ name: "ollama", endpoint_protocol: "openai",
+             api_base: "http://localhost:11434/v1", model: "m" }],
+  });
+  await request.put("/api/projects", {
+    data: [{ dir: `${WORK}/followup`, title: "follow-up garden" }],
+  });
+  const projects = await (await request.get("/api/projects")).json();
+  await waitScanIdle(request);
+  const started = await request.post("/api/scan", {
+    data: { project: projects[0].id, llm: "ollama" },
+  });
+  expect(started.ok()).toBeTruthy();
+  await waitScanIdle(request);
+
+  // the finished run is still listed under its project, one click away
+  await page.goto("/");
+  const runs = page.locator("#scan-section .scan-run");
+  await expect(runs).toHaveCount(1);
+  await expect(runs.first()).toContainText("completed");
+  await expect(runs.first()).toContainText("Project scan — follow-up garden");
+  await expect(runs.first()).toHaveAttribute(
+    "href", /^conversations\.html#[0-9a-f]{32}$/);
+
+  // …and the follow-up box asks for another round on top of it
+  await page.locator("#scan-note").fill("now cover the tests");
+  await expect(page.locator("#scan-start")).toHaveText("Ask the scanner");
+  await page.locator("#scan-start").click();
+  await expect(runs).toHaveCount(2, { timeout: 10000 });
+  await expect(runs.first()).toContainText("completed", { timeout: 15000 });
+
+  // the new transcript carries the previous run and the request
+  await runs.first().click();
+  const log = page.locator(".conv-log");
+  await expect(log).toContainText("Another round on the project");
+  await expect(log).toContainText("# Previous Run");
+  await expect(log).toContainText("# Request");
+  await expect(log).toContainText("now cover the tests");
+  await expect(log).toContainText(
+    'Scan the project "follow-up garden" now.');
+});

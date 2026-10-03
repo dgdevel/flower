@@ -63,14 +63,23 @@ typedef enum {
     SCAN_START_SPAWN = 3   /* spawn or seed failure (500) — err says why */
 } scan_start_result_t;
 
+/* the longest follow-up instruction a scan accepts, NUL included */
+#define SCAN_NOTE_MAX 1024
+
 /*
  * Start scanning project `project_id` with endpoint `llm_name`.
  * Writes the researcher seeds, spawns the runner, feeds it the
  * records and closes its stdin (the conversation then runs to its
  * end on its own; progress arrives through scan_on_readable()).
+ *
+ * `note` — NULL or "" for a fresh scan; otherwise a follow-up
+ * instruction: the new run is seeded with the project's previous
+ * run's transcript and told to continue from it (the Conversations
+ * page keeps every run, so "previous" is whatever the project last
+ * recorded).
  */
 scan_start_result_t scan_start(const char *project_id, const char *llm_name,
-                               char *err, size_t err_n);
+                               const char *note, char *err, size_t err_n);
 
 /* Ask the running scan to stop: SIGINT to the runner's process group
  * first (llmkit stops orderly), SIGKILL when called again. */

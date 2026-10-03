@@ -292,6 +292,8 @@ let llms = [];           // [{name, …}] — names for the scan pick
 let scanState = null;    // the last GET api/scan answer
 let scanSeenWrites = 0;  // writes at the last refresh from the server
 let scanTimer = 0;
+let convs = [];          // every conversation meta — the scan history
+const scanNotes = {};    // project id -> the follow-up text not yet sent
 
 const scanEl = () => document.getElementById("scan-section");
 
@@ -302,10 +304,31 @@ async function loadLlms() {
   } catch (_) { /* the select shows the empty hint */ }
 }
 
+/* the scan history is the durable conversation store, filtered by
+ * project — so a run stays linked to its project long after it ends */
+async function loadConvs() {
+  try {
+    const r = await fetch("api/conversations");
+    if (r.ok) convs = await r.json();
+  } catch (_) { /* keep what we have */ }
+}
+
 function scanLlName() {
   const sel = document.getElementById("scan-llm");
   return sel && sel.value ? sel.value : "";
 }
+
+/* the follow-up text in the box, trimmed — "" means a fresh scan */
+function scanNoteText() {
+  const n = document.getElementById("scan-note");
+  return n ? n.value.trim() : "";
+}
+
+const CONV_BADGES = {
+  running: "badge-accent", completed: "badge-success",
+  failed: "badge-warning", stopped: "badge-muted",
+};
+const fmtWhen = (t) => (t ? new Date(t * 1000).toLocaleString() : "");
 
 function scanLlmSelect() {
   const sel = el("select", {
@@ -333,6 +356,14 @@ function scanLlmSelect() {
 /* the scan block, refreshed in place by updateScanUI() while the
  * agent runs (no re-render: it would steal focus from the fields) */
 function scanSection() {
+  const p = projects[selected];
+  const note = el("textarea", {
+    id: "scan-note", class: "scan-note", rows: "2",
+    placeholder: "Optional: ask for another round — the scan continues " +
+                 "from the last run's transcript",
+    "aria-label": "Follow-up instruction for the scan",
+  });
+  if (p && scanNotes[p.id]) note.value = scanNotes[p.id];
   const sec = el("div", { class: "scan-editor", id: "scan-section" },
     el("div", { class: "ctx-head" },
       el("h3", { text: "Project scan" })),
@@ -343,12 +374,45 @@ function scanSection() {
         id: "scan-start", "data-action": "scan-start",
         text: "Scan project",
       })),
+    note,
     el("p", { id: "scan-status", class: "muted", role: "status" }),
     el("a", {
       id: "scan-open", class: "btn btn-ghost scan-open", hidden: "",
       title: "Open the recorded conversation",
-    }));
+    }),
+    el("div", { class: "scan-history", id: "scan-history", hidden: "",
+                "aria-label": "Previous scan runs" }));
   return sec;
+}
+
+/* the project's recorded runs, newest first — the durable half of the
+ * section, so a finished run stays one click away (and the next run
+ * can continue from it) */
+function renderScanHistory() {
+  const box = document.getElementById("scan-history");
+  if (!box) return;
+  const p = projects[selected];
+  const runs = p ? convs.filter((c) => !c.parent && c.project === p.id) : [];
+  box.textContent = "";
+  box.hidden = !runs.length;
+  if (!runs.length) return;
+  box.append(el("h4", { text: "Runs" }));
+  for (const c of runs)
+    box.append(el("a", {
+      class: "scan-run", href: "conversations.html#" + c.id,
+      title: "Open the recorded conversation",
+    },
+      el("span", {
+        class: "badge " + (CONV_BADGES[c.state] || "badge-muted"),
+        text: c.state || "?",
+      }),
+      el("span", { class: "scan-run-main" },
+        el("span", {
+          class: "scan-run-title",
+          text: (c.title || "").trim() || c.agent || "Conversation",
+        }),
+        el("span", { class: "scan-run-when ts",
+                     text: fmtWhen(c.started) }))));
 }
 
 function updateScanUI() {
@@ -361,6 +425,7 @@ function updateScanUI() {
   const st = scanState;
   const running = !!st && !!st.running;
   const p = projects[selected];
+  const followup = !!scanNoteText();
   /* the scan (or its result) belongs here only while it is this
    * project's — the conversation page keeps every project's history */
   const mine = !!st && !!p && st.project === p.id;
@@ -369,9 +434,13 @@ function updateScanUI() {
     const can = !running && !draft && llms.length > 0 &&
                  !!p && p.exists !== false;
     start.toggleAttribute("disabled", !can);
-    start.textContent = running ? "Scanning…" : "Scan project";
+    start.textContent = running ? "Scanning…"
+      : followup ? "Ask the scanner" : "Scan project";
     start.title = can
-      ? "Run the scan agent on this project's directory"
+      ? followup
+        ? "Run the scan agent again, continuing from this project's " +
+          "last run"
+        : "Run the scan agent on this project's directory"
       : llms.length ? "" : "add an llm endpoint on the Config page first";
   }
   if (sel) sel.toggleAttribute("disabled", running);
@@ -405,6 +474,7 @@ function updateScanUI() {
         ? "Watch the conversation →" : "View the conversation →";
     }
   }
+  renderScanHistory();
 }
 
 /* the scan writes through the server; adopt its version of the
@@ -431,25 +501,28 @@ async function pollScan() {
     scanSeenWrites = scanState.writes;
     refreshScanWrites();
   }
-  updateScanUI();
-  if (scanState && scanState.running)
+  if (scanState && scanState.running) {
+    updateScanUI();
     scanTimer = setTimeout(pollScan, 1200);
-  else {
-    scanSeenWrites = 0;
-    refreshScanWrites(); /* the final state, whatever it was */
+    return;
   }
+  scanSeenWrites = 0;
+  refreshScanWrites(); /* the final state, whatever it was */
+  await loadConvs();   /* …and the finished run is in the history */
+  updateScanUI();
 }
 
 async function startScan() {
   const p = projects[selected];
   const name = scanLlName();
+  const note = scanNoteText();
   const status = document.getElementById("scan-status");
   if (!p || !name || p.exists === false) return;
   try {
     const r = await fetch("api/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project: p.id, llm: name }),
+      body: JSON.stringify({ project: p.id, llm: name, note }),
     });
     if (!r.ok) {
       let msg = `scan failed (${r.status})`;
@@ -458,6 +531,7 @@ async function startScan() {
       return;
     }
     localStorage.setItem("flower.scan.llm", name);
+    await loadConvs(); /* the new run's row, while it is still running */
     pollScan();
   } catch (_) {
     if (status) {
@@ -975,6 +1049,14 @@ railEl.addEventListener("click", (e) => {
 });
 
 editorEl.addEventListener("input", (e) => {
+  /* the scan's follow-up box: remember it per project, and let the
+   * start button follow (it becomes "Ask the scanner") */
+  if (e.target.id === "scan-note") {
+    const p = projects[selected];
+    if (p) scanNotes[p.id] = e.target.value;
+    updateScanUI();
+    return;
+  }
   /* context item text: live state + live errors, autosave below */
   if (onCtxInput(e, () => draft || projects[selected],
                  () => { if (!draft) scheduleSave(); }))
@@ -1854,6 +1936,7 @@ actionListEl.addEventListener("input", (e) => {
   await loadProjects();
   await loadTasks();
   await loadLlms(); // the scan agent's llm pick
+  await loadConvs(); // …and its history, for the scan section
   const remembered = localStorage.getItem("flower.selected");
   const i = projects.findIndex((p) => p.dir === remembered);
   selected = i >= 0 ? i : projects.length ? 0 : -1;

@@ -69,13 +69,14 @@ def base_url(recs):
 
 
 def project_name(recs):
-    """the scanned project's title, from the user record."""
+    """the scanned project's title, from the user record — the fresh
+    scan's own prompt or a follow-up's opening line."""
     for r in recs:
         if r.get("type") != "user":
             continue
         for block in r.get("content", []):
-            m = re.search(r'Scan the project "(.*?)" now',
-                          block.get("text", ""))
+            m = re.search(r'(?:Scan the project|Another round on the project)'
+                          r' "(.*?)"', block.get("text", ""))
             if m:
                 return m.group(1)
     return None
