@@ -7,6 +7,7 @@
 #define _DEFAULT_SOURCE /* DT_DIR & friends */
 
 #include "fs.h"
+#include "analyze.h"
 #include "util.h"
 
 #include <dirent.h>
@@ -754,6 +755,22 @@ char *fs_tool_grep(const cJSON *args, char *err, size_t err_n)
     char *out = fs_grep(glob, pj->valuestring, err, err_n);
     free(glob);
     if (out) unroot_text(out); /* "path:line:text" stays relative */
+    else unroot_text(err);
+    return out;
+}
+
+char *fs_tool_analyze(const cJSON *args, char *err, size_t err_n)
+{
+    const cJSON *p = cJSON_GetObjectItemCaseSensitive(args, "path");
+    if (!cJSON_IsString(p) || !p->valuestring[0]) {
+        snprintf(err, err_n, "missing required string argument 'path'");
+        return NULL;
+    }
+    char *path = resolve_input(p->valuestring, err, err_n);
+    if (!path) return NULL;
+    char *out = analyze_file(path, err, err_n);
+    free(path);
+    if (out) unroot_text(out); /* the header speaks the display path */
     else unroot_text(err);
     return out;
 }

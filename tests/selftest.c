@@ -6,6 +6,7 @@
 #define _DEFAULT_SOURCE /* mkdtemp */
 
 #include "fs.h"
+#include "analyze.h"
 #include "prompts.h"
 
 #include <stdio.h>
@@ -311,6 +312,120 @@ static void test_fs(void)
         free(r);
     }
 
+    /* analyze: the structure of a known-type file */
+    snprintf(p, sizeof p, "%s/doc.md", root);
+    mkfile(p, "# Title\n## A\n```sh\n# no heading in fences\n```\n"
+               "### B ###\nplain\n");
+    r = analyze_file(p, err, sizeof err);
+    check_contains(r, "  [markdown]  7 lines\n", "analyze: markdown header");
+    check_contains(r, "    1  Title\n", "analyze: h1 node");
+    check_contains(r, "    2    A\n", "analyze: h2 nests under h1");
+    check_contains(r, "    6      B\n", "analyze: trailing #'s stripped");
+    check(r && !strstr(r, "fences"), "analyze: fenced content skipped");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/prog.py", root);
+    mkfile(p, "class Foo:\n"
+              "    def __init__(self):\n"
+              "        pass\n"
+              "\n"
+              "    async def run(self):\n"
+              "        pass\n"
+              "\n"
+              "def top():\n"
+              "    pass\n"
+              "\n"
+              "class Sub(Foo):\n"
+              "    def helper(self, a=1):\n"
+              "        return a\n");
+    r = analyze_file(p, err, sizeof err);
+    check_contains(r, "  [python]  13 lines\n", "analyze: python header");
+    check_contains(r, "    1  class Foo\n", "analyze: python class");
+    check_contains(r, "    2    def __init__(self)\n",
+                   "analyze: python method signature nests");
+    check_contains(r, "    5    async def run(self)\n",
+                   "analyze: python async def signature");
+    check_contains(r, "    8  def top()\n",
+                   "analyze: dedent back to the top level");
+    check_contains(r, "   11  class Sub(Foo)\n",
+                   "analyze: python class bases");
+    check_contains(r, "   12    def helper(self, a=1)\n",
+                   "analyze: python default parameter");
+    check(r && !strstr(r, "pass") && !strstr(r, "return"),
+          "analyze: plain lines are not nodes");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/code.c", root);
+    mkfile(p, "/* struct fake { */\n"
+              "typedef unsigned long u64;\n"
+              "struct point {\n"
+              "    int x; /* member */\n"
+              "    char *name;\n"
+              "    struct point *next;\n"
+              "    int axes[3];\n"
+              "    unsigned bits : 4;\n"
+              "};\n"
+              "static int helper(int a) { return a; }\n"
+              "char *s = \"struct fake { int x; }\";\n");
+    r = analyze_file(p, err, sizeof err);
+    check_contains(r, "  [c]  11 lines\n", "analyze: c header");
+    check_contains(r, "    2  typedef unsigned long u64\n",
+                   "analyze: typedef keeps its type");
+    check_contains(r, "    3  struct point\n", "analyze: c struct");
+    check_contains(r, "    4    int x\n", "analyze: struct member nests");
+    check_contains(r, "    5    char *name\n",
+                   "analyze: member keeps its type");
+    check_contains(r, "    6    struct point *next\n",
+                   "analyze: self-referential member type");
+    check_contains(r, "    7    int axes[3]\n",
+                   "analyze: array member keeps its size");
+    check_contains(r, "    8    unsigned bits : 4\n",
+                   "analyze: bitfield member keeps its width");
+    check_contains(r, "   10  static int helper(int a)\n",
+                   "analyze: c function signature");
+    check(r && !strstr(r, "fake"), "analyze: comments and strings skipped");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/web.js", root);
+    mkfile(p, "function greet(name) {\n"
+              "  return el(\"div\",\n"
+              "    el(\"b\", { text: name }),\n"
+              "    input,\n"
+              "    el(\"i\", { text: \"hi\" }));\n"
+              "}\n");
+    r = analyze_file(p, err, sizeof err);
+    check_contains(r, "  [c]  6 lines\n", "analyze: js header");
+    check_contains(r, "    1  function greet(name)\n",
+                   "analyze: js function signature");
+    check_contains(r, "    3  el()\n",
+                   "analyze: js call artifact keeps the bare name");
+    free(r);
+
+    snprintf(p, sizeof p, "%s/empty.md", root);
+    mkfile(p, "");
+    r = analyze_file(p, err, sizeof err);
+    check_contains(r, "(nothing found)", "analyze: no nodes reported");
+    free(r);
+
+    /* refusals */
+    snprintf(p, sizeof p, "%s/notes.txt", root);
+    r = analyze_file(p, err, sizeof err);
+    check(!r && strstr(err, "unknown file type"),
+          "analyze: unknown type reported");
+    check(!r && strstr(err, "markdown") && strstr(err, ".py"),
+          "analyze: unknown type lists the known ones");
+    snprintf(p, sizeof p, "%s/null.c", root);
+    {
+        FILE *f = fopen(p, "wb");
+        if (f) { fwrite("int x;\0y\n", 1, 9, f); fclose(f); }
+    }
+    r = analyze_file(p, err, sizeof err);
+    check(!r && strstr(err, "binary"), "analyze: binary content refused");
+    r = analyze_file(root, err, sizeof err);
+    check(!r && strstr(err, "directory"), "analyze: directory refused");
+    r = analyze_file("/nonexistent-file-xyz.c", err, sizeof err);
+    check(!r && err[0], "analyze: missing file errors");
+
     /* the per-project surface: relative paths under a root, a jail,
      * project-relative replies (the mcp dispatchers resolve) */
     fs_set_root(root);
@@ -342,6 +457,19 @@ static void test_fs(void)
     check_contains(r, "src/deep/edge.c:1:deep",
                    "fs: rooted grep takes . as the project root");
     free(r);
+
+    r = fs_tool_ss(fs_tool_analyze, "path", "src/main.c",
+                   NULL, NULL, err, sizeof err);
+    check_contains(r, "src/main.c  [c]  1 lines",
+                   "fs: rooted analyze is project-relative");
+    check_contains(r, "int main()",
+                   "fs: rooted analyze shows the signature");
+    check(r && !strstr(r, root), "fs: rooted analyze hides the root path");
+    free(r);
+    r = fs_tool_ss(fs_tool_analyze, "path", "notes.txt",
+                   NULL, NULL, err, sizeof err);
+    check(!r && strstr(err, "unknown file type") && !strstr(err, root),
+          "fs: rooted analyze unknown type stays project-relative");
 
     r = fs_tool_ss(fs_tool_read_file, "path", "/etc/hostname",
                    NULL, NULL, err, sizeof err);
@@ -382,6 +510,12 @@ static void test_fs(void)
     snprintf(p, sizeof p, "%s/utf8.txt", root); remove(p);
     snprintf(p, sizeof p, "%s/src", root); rmdir(p);
     snprintf(p, sizeof p, "%s/notes.txt", root); remove(p);
+    snprintf(p, sizeof p, "%s/doc.md", root); remove(p);
+    snprintf(p, sizeof p, "%s/prog.py", root); remove(p);
+    snprintf(p, sizeof p, "%s/code.c", root); remove(p);
+    snprintf(p, sizeof p, "%s/web.js", root); remove(p);
+    snprintf(p, sizeof p, "%s/null.c", root); remove(p);
+    snprintf(p, sizeof p, "%s/empty.md", root); remove(p);
     snprintf(p, sizeof p, "%s/Makefile", root); remove(p);
     snprintf(p, sizeof p, "%s/photo.png", root); remove(p);
     snprintf(p, sizeof p, "%s/binary.bin", root); remove(p);

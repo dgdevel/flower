@@ -1,0 +1,10 @@
+Show the structure of a local text file of a known type without reading it whole.
+The type comes from the extension: markdown files (.md) come back as their heading
+tree, c-family sources (.c .h .cpp .hpp .java .cs .js .ts ...) as their structs
+with typed members (like "char *name"), full function signatures (like
+"static int helper(int a)") and typedefs with their types, python files (.py) as
+their classes and defs with parameter lists.
+One line per element: its line number, an indent per nesting level, then the
+element. A file of a type analyze does not know is refused with the list of known
+types; binary files are refused too. Cheaper than read_file when only the shape of
+a file matters.

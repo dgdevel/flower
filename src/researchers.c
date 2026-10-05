@@ -33,7 +33,7 @@ extern long syscall(long number, ...);
  * flower, so they land in no transcript */
 static const researcher_def_t RESEARCHER_DEFS[] = {
     { "filesystem_researcher",
-      { "read_file", "list_files", "grep", NULL } },
+      { "read_file", "list_files", "grep", "analyze", NULL } },
     { "online_researcher",
       { NULL } },
 };

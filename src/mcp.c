@@ -37,6 +37,10 @@ static const mcp_arg_t ARGS_GREP[] = {
     { "pattern", "string", 1 },
     { NULL }
 };
+static const mcp_arg_t ARGS_ANALYZE[] = {
+    { "path", "string", 1 },
+    { NULL }
+};
 
 /* the research surface behind POST /mcp: flower's filesystem
  * readers. The web tools the model used to reach here are llmkit's
@@ -46,6 +50,7 @@ static const mcp_tool_t RESEARCH_TOOLS[] = {
     { "read_file",  ARGS_READ_FILE,  fs_tool_read_file },
     { "list_files", ARGS_LIST_FILES, fs_tool_list_files },
     { "grep",       ARGS_GREP,       fs_tool_grep },
+    { "analyze",    ARGS_ANALYZE,    fs_tool_analyze },
 };
 mcp_table_t MCP_RESEARCH = {
     RESEARCH_TOOLS, sizeof RESEARCH_TOOLS / sizeof RESEARCH_TOOLS[0], NULL

@@ -455,7 +455,7 @@ rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 tools = {t["name"]: t for t in d["result"]["tools"]}
-assert set(tools) == {"read_file", "list_files", "grep"}, d  # web tools live in llmkit now
+assert set(tools) == {"read_file", "list_files", "grep", "analyze"}, d  # web tools live in llmkit now
 rf = tools["read_file"]["inputSchema"]
 assert rf["required"] == ["path"], d
 assert rf["properties"]["offset"]["type"] == "number", d   # optional numbers
@@ -464,6 +464,8 @@ assert "**/*" in tools["list_files"]["inputSchema"]["properties"]["glob"]["descr
 assert tools["grep"]["inputSchema"]["required"] == ["glob", "pattern"], d
 assert "grep -E" in tools["grep"]["description"], d
 assert "**" in tools["grep"]["inputSchema"]["properties"]["glob"]["description"], d
+assert tools["analyze"]["inputSchema"]["required"] == ["path"], d
+assert "structure" in tools["analyze"]["description"], d
 ' || fail "mcp: tools/list with prompt-file descriptions"
 rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{}}}' | python3 -c '
 import json, sys
@@ -511,6 +513,20 @@ t = d["result"]["content"][0]["text"]
 assert "notes.txt:2:line two" in t, d
 assert "[1 match in 1 of 1 file]" in t, d
 ' || fail "mcp: grep a single file with anchors"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"analyze\",\"arguments\":{\"path\":\"$CFG/fstree/sub/main.c\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["result"]["content"][0]["text"]
+assert "sub/main.c  [c]  1 lines" in t and "int main()" in t, d
+assert d["result"]["isError"] is False, d
+' || fail "mcp: analyze a c file"
+rpc "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"analyze\",\"arguments\":{\"path\":\"$CFG/fstree/notes.txt\"}}}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["result"]["isError"] is True, d
+assert "unknown file type" in d["result"]["content"][0]["text"], d
+assert "markdown" in d["result"]["content"][0]["text"], d
+' || fail "mcp: analyze reports an unknown file type"
 rpc "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"grep\",\"arguments\":{\"glob\":\"$CFG/fstree/**/*\",\"pattern\":\"(unclosed[\"}}}" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -552,7 +568,7 @@ prpc '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 names = {t["name"] for t in d["result"]["tools"]}
-assert names == {"read_file", "list_files", "grep"}, d  # web tools live in llmkit now
+assert names == {"read_file", "list_files", "grep", "analyze"}, d  # web tools live in llmkit now
 ' || fail "project mcp: tools/list shows the research set"
 prpc '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"}}}' | python3 -c '
 import json, sys

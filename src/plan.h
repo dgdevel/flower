@@ -13,8 +13,9 @@
  *   flower ── stdin: llm + tools + system + transcript + flush
  *        └─ llmkit runner (task_planner)    one child per turn
  *             ├─ filesystem_researcher.invoke   (stdio, agent-as-tool)
- *             │    └─ flower /plan/research/mcp: read_file, list_files,
- *             │       grep — grounded in the plan's project directory
+ *             │    └─ flower /plan/research/mcp: read_file,
+ *             │       list_files, grep, analyze — grounded in the
+ *             │       plan's project directory
  *             ├─ online_researcher.invoke       (stdio, agent-as-tool)
  *             │    └─ llmkit mcp-proxy → builtin-mcp: web_search,
  *             │       web_fetch (inside the researcher's own children)

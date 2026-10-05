@@ -24,7 +24,8 @@ has landed: flower offers its own **mcp server** at `POST /mcp`
 from tweakable, template-capable **prompt files** under `prompts/`,
 and **`online_researcher`** (web) and **`filesystem_researcher`**
 (local files — `read_file`, `list_files` with a small glob
-language, `grep` over file contents) are built on the tools and
+language, `grep` over file contents, `analyze` for a file's
+structure) are built on the tools and
 ship compiled in. The **project scan agent** drives the whole
 stack: a scan of a project's directory runs the `project_scanner`
 agent as an `llmkit runner` child that orchestrates the two
@@ -304,7 +305,7 @@ subset over the streamable-http transport with plain json replies
 (revision `2025-11-25`, matching what llmkit's client speaks):
 `initialize`, `notifications/*` (answered `202`), `tools/list`,
 `tools/call`, `ping`. The tools are flower's own filesystem
-readers (`src/fs.c`):
+readers (`src/fs.c`, the analyzers in `src/analyze.c`):
 
 - **`read_file`** — a line range of a local file (`path`, optional
   1-based `offset` and line-count `length`, default and clamp 2000
@@ -324,6 +325,20 @@ readers (`src/fs.c`):
   MiB files are skipped, long lines cut, the reply capped at 200
   matches and closed with a `[N matches in K of M files]` tally
   (`no files match …` when the glob selects nothing).
+- **`analyze`** — the structure of one local file (`path`), picked
+  by extension from the analyzer registry in `src/analyze.c`:
+  markdown (`.md …`) as its heading tree, the C family (`.c .h
+  .cpp .java .cs .js .ts …`) as its aggregates with typed members
+  (`char *name`, `int axes[3]`, `unsigned bits : 4`), function
+  signatures (`static int helper(int a)`) and typedefs with their
+  types, python (`.py`) as its classes and defs with their
+  parameter lists. One line per element — line number, an indent
+  per nesting level, the element — under a `path  [kind]  N lines`
+  header, capped at 1000 nodes (`(nothing found)` when the file
+  has none). A file whose type no analyzer owns is refused with
+  `unknown file type` plus the list of known ones (so the caller
+  knows to reach for `read_file` instead); so are binary and
+  over-8 MiB files.
 
 The **web tools** (`web_search` on DuckDuckGo, `web_fetch` with a
 readability-lite markdown reduction) used to live here; they are
@@ -351,7 +366,7 @@ gives a model (or the mcp inspector) a project-scoped toolset.
 Any mcp client can use the fs tools — the llmkit runner included —
 by registering `{"type":"http","name":"flower","url":"http://host:port/mcp"}`
 as a tool server; the model then sees `flower.read_file`,
-`flower.list_files` and `flower.grep`.
+`flower.list_files`, `flower.grep` and `flower.analyze`.
 
 `tasks/` — one directory per **task**, named by its
 server-generated 32-hex-char id, holding `task.json` with the
@@ -625,7 +640,11 @@ src/prompts.{c,h}     prompt-file lookup + the {{project_*}} template renderer
 src/fs.{c,h}          local-filesystem tools: read_file (1-based
                       offset/length line ranges), list_files (the
                       ** glob language), grep (a regex over the
-                      files a filepath glob selects)
+                      files a filepath glob selects), analyze (the
+                      structure of one known-type file)
+src/analyze.{c,h}     the structure analyzers behind analyze: one
+                      registry entry per file type (markdown, the
+                      C family, python), picked by extension
 src/mcp.{c,h}         flower's own mcp server: json-rpc dispatch for POST /mcp
                       and /scan/mcp (per-surface tool tables, optional
                       conversation logging)
@@ -923,7 +942,8 @@ served automatically with the right MIME type. Dotfiles are skipped.
             editors in column one and column two
       - [x] custom-made mcp servers offered by flower itself —
             POST /mcp (streamable-http json-rpc) with the fs tools
-            read_file/list_files/grep (the glob language), prompt
+            read_file/list_files/grep/analyze (the glob language,
+            the structure analyzers), prompt
             files under prompts/mcp/, and the builtin
             online_researcher and filesystem_researcher agents
             using them; the web tools (web_search on DuckDuckGo,

@@ -5,8 +5,9 @@
  * fs — the local-filesystem tools behind the mcp surfaces: read a
  * line range of a file, list a directory through a small glob language
  * (`*`, `*.*`, `*.ext` — each also with the recursive `**` prefix
- * to walk subdirectories), and grep the contents of the files a
- * filepath glob selects.
+ * to walk subdirectories), grep the contents of the files a
+ * filepath glob selects, and analyze the structure of a file of a
+ * known type (the analyzers themselves live in src/analyze.c).
  *
  * Two surfaces share these tools. The bare /mcp is server-wide:
  * paths resolve like the flower process sees them — absolute paths
@@ -59,12 +60,14 @@ char *fs_grep(const char *glob, const char *pattern,
 
 /* mcp tools/call dispatchers (the argument names match the schema):
  * read_file {path, offset?, length?}, list_files {path, glob},
- * grep {glob, pattern}. Same return contract as the web tools.
- * Path arguments are resolved against the surface root set by
- * fs_set_root() — see above. */
+ * grep {glob, pattern}, analyze {path} (the structure analyzers
+ * behind it in src/analyze.c). Same return contract as the web
+ * tools. Path arguments are resolved against the surface root set
+ * by fs_set_root() — see above. */
 char *fs_tool_read_file(const cJSON *args, char *err, size_t err_n);
 char *fs_tool_list_files(const cJSON *args, char *err, size_t err_n);
 char *fs_tool_grep(const cJSON *args, char *err, size_t err_n);
+char *fs_tool_analyze(const cJSON *args, char *err, size_t err_n);
 
 /* Ground the tool dispatchers in `dir` (a project's working
  * directory): relative paths resolve under it and may not escape,

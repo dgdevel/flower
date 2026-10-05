@@ -21,7 +21,7 @@ SELFTEST := tests/selftest
 ASSET_SRCS   := $(shell find web -type f ! -name '.*' 2>/dev/null | LC_ALL=C sort)
 PROMPT_SRCS  := $(shell find prompts -type f ! -name '.*' 2>/dev/null | LC_ALL=C sort)
 SRCS := src/main.c src/server.c src/http.c src/theme.c src/projects.c src/agents.c \
-        src/tasks.c src/context.c src/prompts.c src/fs.c \
+        src/tasks.c src/context.c src/prompts.c src/fs.c src/analyze.c \
         src/conv.c src/mcp.c src/researchers.c src/scan.c src/plan.c \
         src/util.c $(GEN_C) $(GEN_PC)
 OBJS := $(SRCS:.c=.o)
@@ -59,12 +59,12 @@ check: $(BIN) $(SELFTEST)
 	$(SELFTEST)
 	tests/smoke.sh ./$(BIN)
 
-# offline self-test: prompt templating and the fs tools, against
-# tests/fixtures/
-$(SELFTEST): tests/selftest.c src/fs.o src/prompts.o \
+# offline self-test: prompt templating and the fs tools (analyze
+# included), against temporary fixtures
+$(SELFTEST): tests/selftest.c src/fs.o src/analyze.o src/prompts.o \
              src/context.o src/util.o src/prompts_gen.o
 	$(CC) $(WARN) $(CFLAGS) -Isrc $(CJSON_CFLAGS) -o $@ $< \
-	      src/fs.o src/prompts.o src/context.o \
+	      src/fs.o src/analyze.o src/prompts.o src/context.o \
 	      src/util.o src/prompts_gen.o $(CJSON_LIBS)
 
 clean:
