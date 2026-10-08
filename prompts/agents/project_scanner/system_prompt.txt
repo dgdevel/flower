@@ -5,6 +5,7 @@ Never invent a fact. When a researcher's answer contradicts the current details,
 
 Analyze Project Context section if provided, and fill the missing data using flower.set_project_details and flower.add_context_item.
 Start from project details (see flower.set_project_details signature for required info to find), then add relevant project-wide context items.
+Add resource items for files and urls that are core project definition - a defining document, spec, dataset, key source file. The spec argument carries the url or filesystem path (project-relative paths are fine), the text says what it is. One resource per file or url.
 Do more than one round of research, set data multiple times after each research round.
 Reduce load on helper tools asking one detail/item per round.
 Use caveman speak asking the tools filesystem_researcher.invoke and online_researcher.invoke, ask for specific details in syntetic resumed form, do not ask for whole file content or whole page content.

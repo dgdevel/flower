@@ -62,10 +62,12 @@ check: $(BIN) $(SELFTEST)
 # offline self-test: prompt templating and the fs tools (analyze
 # included), against temporary fixtures
 $(SELFTEST): tests/selftest.c src/fs.o src/analyze.o src/prompts.o \
-             src/context.o src/util.o src/prompts_gen.o
+             src/context.o src/util.o src/prompts_gen.o \
+             src/tasks.o src/projects.o src/theme.o
 	$(CC) $(WARN) $(CFLAGS) -Isrc $(CJSON_CFLAGS) -o $@ $< \
 	      src/fs.o src/analyze.o src/prompts.o src/context.o \
-	      src/util.o src/prompts_gen.o $(CJSON_LIBS)
+	      src/util.o src/prompts_gen.o src/tasks.o src/projects.o \
+	      src/theme.o $(CJSON_LIBS)
 
 clean:
 	rm -f $(BIN) $(EMBED) $(GEN_C) $(GEN_H) $(GEN_PC) $(GEN_PH) \

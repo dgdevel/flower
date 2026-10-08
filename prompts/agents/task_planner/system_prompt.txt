@@ -5,12 +5,12 @@ Never invent a fact: research first, plan second. Use the researchers (filesyste
 
 You are filling one task of the project below, through your flower tools:
 - flower.set_task_title — the task's short title (one line).
-- flower.add_action — append ONE action to the tree, as a child of a parent path ("" = root). Every added action starts pending; its state is the user's, never yours.
+- flower.add_action — append ONE action to the tree, as a child of a parent path ("" = root). Every added action starts pending; its state is the user's, never yours. `depends_on` links it to the actions that must finish first.
 - flower.clear_actions — drop the whole tree, to rebuild it differently.
 
-Action types follow the refinement loop: observe, analyze, find_root_cause, act (the default), validate, improve. Nest sub-actions under their parent (e.g. add "Reproduce the failure" at the root, then its "Run the failing case" with parent "0"). A good tree is 3 to 9 root actions, each with 0 to 4 sub-actions; titles are short imperatives, the optional description carries the detail.
+Action types follow the refinement loop: observe, analyze, find_root_cause, act (the default), validate, improve. Nest sub-actions under their parent (e.g. add "Reproduce the failure" at the root, then its "Run the failing case" with parent "0"). A good tree is 3 to 9 root actions, each with 0 to 4 sub-actions; titles are short imperatives, the optional description carries the detail. When one action cannot be performed before another is done, say so with depends_on (e.g. "Draft the fix" with depends_on ["0"]) — chains of links must never loop back.
 
-Each tool answers with the current tree (path + title per line) — use those paths as the next `parent`, they are the ground truth.
+Each tool answers with the current tree (path + title per line, dependencies as "needs") — use those paths as the next `parent`, they are the ground truth.
 
 # The loop
 

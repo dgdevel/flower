@@ -15,7 +15,7 @@
 
 static const char *const CTX_TYPE_NAMES[] = {
     "fact", "pattern", "risk", "success_metric",
-    "failure_sign", "evaluation_method", "rule",
+    "failure_sign", "evaluation_method", "rule", "resource",
 };
 #define TYPE_COUNT (sizeof CTX_TYPE_NAMES / sizeof CTX_TYPE_NAMES[0])
 
@@ -53,7 +53,8 @@ static int parse_item(const cJSON *obj, ctx_item_t *out, int strict,
                       char *ef, size_t efn, char *em, size_t emn,
                       const char *prefix)
 {
-    static const char *const keys[] = { "type", "text", "updated", "id" };
+    static const char *const keys[] =
+        { "type", "text", "spec", "updated", "id" };
     char field[256];
     const cJSON *j;
 
@@ -77,11 +78,51 @@ static int parse_item(const cJSON *obj, ctx_item_t *out, int strict,
             path_add(field, sizeof field, ".type");
             snprintf(ef, efn, "%s", field);
             snprintf(em, emn, "fact, pattern, risk, success_metric, "
-                              "failure_sign, evaluation_method or rule");
+                              "failure_sign, evaluation_method, rule or "
+                              "resource");
             return -1;
         } /* lenient: stays "fact" */
     } else if (j && cJSON_IsString(j)) {
         out->type = ctx_type_from_name(j->valuestring);
+    }
+
+    /* the resource specification: the url or filesystem path a
+     * resource item points at. Required when the type is resource;
+     * an explicit "" is the default and accepted anywhere (the
+     * client state always carries it), any other spec on a
+     * non-resource is rejected. Lenient keeps what it can — a
+     * resource whose spec is unusable survives with an empty one,
+     * a spec on another type is dropped */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "spec");
+    {
+        int usable = cJSON_IsString(j) && j->valuestring &&
+                     j->valuestring[0] &&
+                     strlen(j->valuestring) < sizeof out->spec &&
+                     valid_utf8_text(j->valuestring,
+                                     strlen(j->valuestring), 0);
+        int empty = cJSON_IsString(j) && j->valuestring &&
+                    !j->valuestring[0];
+        if (out->type == CTX_RESOURCE) {
+            if (strict && !usable) {
+                path_set(field, sizeof field, prefix);
+                path_add(field, sizeof field, ".spec");
+                snprintf(ef, efn, "%s", field);
+                snprintf(em, emn, "a resource item needs its spec: a "
+                                  "url or filesystem path, max %d "
+                                  "bytes, no control characters",
+                         CTX_SPEC_MAX - 1);
+                return -1;
+            }
+            if (usable)
+                snprintf(out->spec, sizeof out->spec, "%s",
+                         j->valuestring);
+        } else if (j && strict && !empty) {
+            path_set(field, sizeof field, prefix);
+            path_add(field, sizeof field, ".spec");
+            snprintf(ef, efn, "%s", field);
+            snprintf(em, emn, "only a resource item carries a spec");
+            return -1;
+        }
     }
 
     /* the update time; "created" is the retired name, still honored
@@ -228,6 +269,12 @@ cJSON *context_to_cjson(const ctx_item_t *head, char id_prefix)
         }
         if (p->type != CTX_FACT &&
             !cJSON_AddStringToObject(o, "type", ctx_type_name(p->type))) {
+            cJSON_Delete(o);
+            cJSON_Delete(arr);
+            return NULL;
+        }
+        if (p->spec[0] &&
+            !cJSON_AddStringToObject(o, "spec", p->spec)) {
             cJSON_Delete(o);
             cJSON_Delete(arr);
             return NULL;

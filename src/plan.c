@@ -146,26 +146,50 @@ static task_t *plan_task(char *err, size_t err_n)
     return &P.tasks->items[i];
 }
 
-/* one level of the task's action tree as "path title" lines — the
- * model's ground truth for parent paths and what it has built */
+/* append `s` at line[n..), returning the new length; a string that
+ * does not fit whole is cut and marked with an ellipsis */
+static size_t line_add(char *dst, size_t size, size_t n, const char *s)
+{
+    if (n >= size - 1) return n;
+    size_t len = strlen(s), room = size - 1 - n;
+    if (len > room) {
+        size_t cut = room >= 3 ? room - 3 : room;
+        memcpy(dst + n, s, cut);
+        if (room >= 3) memcpy(dst + n + cut, "…", 3);
+        n += cut + (room >= 3 ? 3 : 0);
+    } else {
+        memcpy(dst + n, s, len);
+        n += len;
+    }
+    dst[n] = '\0';
+    return n;
+}
+
+/* one level of the task's action tree as "path title — needs …"
+ * lines — the model's ground truth for parent paths, dependency
+ * links and what it has built */
 static void tree_lines(const action_t *list, size_t depth, size_t *idx,
                        sbuf_t *b)
 {
-    char line[ACTION_TITLE_MAX + 6 * ACTION_DEPTH_MAX + 16];
+    char line[ACTION_TITLE_MAX + 6 * ACTION_DEPTH_MAX +
+              (ACTION_DEP_PATH_MAX + 2) * ACTION_DEPS_MAX + 32];
+    char piece[ACTION_DEP_PATH_MAX + 8];
     for (size_t i = 0; list; list = list->next_sibling, i++) {
         idx[depth] = i;
         size_t n = 0;
+        line[0] = '\0';
         for (size_t d = 0; d <= depth; d++) {
-            int w = snprintf(line + n, sizeof line - n,
-                             d ? ".%zu" : "%zu", idx[d]);
-            if (w < 0 || (size_t)w >= sizeof line - n) {
-                n = sizeof line - 1;
-                break;
-            }
-            n += (size_t)w;
+            snprintf(piece, sizeof piece, d ? ".%zu" : "%zu", idx[d]);
+            n = line_add(line, sizeof line, n, piece);
         }
-        if (n < sizeof line)
-            snprintf(line + n, sizeof line - n, " %s\n", list->title);
+        snprintf(piece, sizeof piece, " %s", list->title);
+        n = line_add(line, sizeof line, n, piece);
+        for (int k = 0; k < list->dep_count; k++) {
+            snprintf(piece, sizeof piece, "%s%s",
+                     k ? ", " : " — needs ", list->depends_on[k]);
+            n = line_add(line, sizeof line, n, piece);
+        }
+        n = line_add(line, sizeof line, n, "\n");
         sb_puts(b, line);
         if (list->first_child && depth + 1 < ACTION_DEPTH_MAX)
             tree_lines(list->first_child, depth + 1, idx, b);
@@ -298,6 +322,43 @@ static char *fn_add_action(const cJSON *args, char *err, size_t err_n)
         return NULL;
     }
 
+    /* dependency links: paths of actions this one waits for, the
+     * same paths the tree listings print. Each must name an action
+     * that already exists — checked before the append, so a path
+     * equal to the new action's own future path fails as "names
+     * nothing" (self-reference included). Links to existing
+     * actions cannot form a circle: nothing depends on the new
+     * action yet */
+    char deps[ACTION_DEPS_MAX][ACTION_DEP_PATH_MAX];
+    int dep_count = 0;
+    j = cJSON_GetObjectItemCaseSensitive(args, "depends_on");
+    if (j && !cJSON_IsArray(j)) {
+        snprintf(err, err_n, "depends_on: an array of action paths, "
+                             "like [\"0\", \"1.2\"]");
+        return NULL;
+    }
+    const cJSON *dep = NULL;
+    cJSON_ArrayForEach(dep, j) {
+        if (!cJSON_IsString(dep) || !dep->valuestring ||
+            !action_dep_path_ok(dep->valuestring)) {
+            snprintf(err, err_n, "depends_on: dot-separated action "
+                                 "indexes from the tree listing, like "
+                                 "\"0\" or \"1.2\"");
+            return NULL;
+        }
+        if (dep_count >= ACTION_DEPS_MAX) {
+            snprintf(err, err_n, "depends_on: at most %d links",
+                     ACTION_DEPS_MAX);
+            return NULL;
+        }
+        int dup = 0;
+        for (int k = 0; k < dep_count; k++)
+            if (strcmp(deps[k], dep->valuestring) == 0) dup = 1;
+        if (dup) continue; /* one copy is enough */
+        snprintf(deps[dep_count++], ACTION_DEP_PATH_MAX, "%s",
+                 dep->valuestring);
+    }
+
     if (task_count_actions(t) >= PLAN_ACTIONS_MAX) {
         snprintf(err, err_n, "the task already holds %d actions",
                  PLAN_ACTIONS_MAX);
@@ -319,6 +380,14 @@ static char *fn_add_action(const cJSON *args, char *err, size_t err_n)
         }
         return NULL;
     }
+    for (int k = 0; k < dep_count; k++)
+        if (!actions_resolve(t->actions, deps[k])) {
+            /* a dependency path names nothing: the tree follows,
+             * like a bad parent path */
+            snprintf(err, err_n, "depends_on: no action at path \"%s\" "
+                                 "— the tree follows", deps[k]);
+            return plan_result(err, t);
+        }
     while (*list) list = &(*list)->next_sibling; /* append at the tail */
 
     action_t *a = calloc(1, sizeof *a);
@@ -330,6 +399,8 @@ static char *fn_add_action(const cJSON *args, char *err, size_t err_n)
     snprintf(a->description, sizeof a->description, "%s", desc);
     a->type = type;
     a->state = ACTION_PENDING; /* the states are the user's */
+    a->dep_count = dep_count;
+    memcpy(a->depends_on, deps, (size_t)dep_count * ACTION_DEP_PATH_MAX);
     *list = a;
 
     if (tasks_save(P.tasks) != 0) {
@@ -371,6 +442,7 @@ static const mcp_arg_t ARGS_ADD_ACTION[] = {
     { "description", "string", 0 },
     { "type",        "string", 0 },
     { "parent",      "string", 0 },
+    { "depends_on",  "array",  0 },
     { NULL }
 };
 static const mcp_tool_t PLAN_TOOLS[] = {

@@ -75,6 +75,12 @@ static int put_context(sbuf_t *out, const project_t *p)
         if (sb_puts(out, "- [") != 0) return -1;
         if (sb_puts(out, ctx_type_name(it->type)) != 0) return -1;
         if (sb_puts(out, "] ") != 0) return -1;
+        /* a resource leads with its spec — the location is the
+         * item's identity, the text only annotates it */
+        if (it->type == CTX_RESOURCE && it->spec[0]) {
+            if (sb_puts(out, it->spec) != 0) return -1;
+            if (sb_puts(out, " — ") != 0) return -1;
+        }
         /* indent continuation lines of multi-line item text */
         for (const char *c = it->text; *c; c++) {
             if (*c == '\n') {

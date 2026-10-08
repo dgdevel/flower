@@ -140,6 +140,8 @@ same lenient/strict contract, one file per concern:
     "context": [
       { "type": "risk", "text": "one dev, many evenings",
         "updated": 1790529738 },
+      { "type": "resource", "spec": "docs/part4.md",
+        "text": "the part 4 design notes" },
       { "text": "single binary = one file to ship" }
     ]
   }
@@ -166,12 +168,19 @@ the project context the llm side will draw on later.
 The **context items** are the structured half of that context, shared
 with tasks (`src/context.c`): each item is a `type` — `fact`,
 `pattern`, `risk`, `success_metric`, `failure_sign`,
-`evaluation_method` or `rule` (the `fact` default is omitted on the
-wire) — a free `text` (required, multi-line, ≤ 4095 bytes, valid
-UTF-8) and its update time (`updated`, unix seconds — the client
-restamps an item on every edit; the server fills it in when
-missing, and loads pre-update files that still say `created`).
-`GET` also gives every item a generated **id**: `P1`, `P2`, … in a
+`evaluation_method`, `rule` or `resource` (the `fact` default is
+omitted on the wire) — a free `text` (required, multi-line, ≤ 4095
+bytes, valid UTF-8) and its update time (`updated`, unix seconds —
+the client restamps an item on every edit; the server fills it in
+when missing, and loads pre-update files that still say `created`).
+A `resource` — a file or url that is core project definition —
+carries one more field, `spec`: the url or filesystem path it
+points at (single line, ≤ 1023 bytes; project-relative paths are
+fine, the fs tools ground them in the project's directory). The
+spec is required on a `resource` and rejected on every other type;
+an explicit `""` is accepted as the default and omitted on the
+wire like one. `GET` also gives every item a generated **id**: `P1`,
+`P2`, … in a
 project's list, `T1`, `T2`, … in a task's — numbered by position,
 regenerated on every read (a delete renumbers the rest) and never
 persisted; a PUT may echo ids back, the server ignores them. They
@@ -290,7 +299,9 @@ prompt when the runner lands:
                         do not disclose it)
 {{project_name}}        the project's title
 {{project_attributes}}  its detail fields, "Field: text" per line
-{{project_context}}     its typed context items, "- [type] text" per line
+{{project_context}}     its typed context items, "- [type] text" per
+                        line; a resource leads with its spec,
+                        "- [resource] <spec> — <text>"
 ```
 
 Unknown tokens stay verbatim so typos remain visible; a NULL
@@ -387,7 +398,7 @@ title — below; the selected task is the scope for column three):
       "state": "completed",
       "children": [{ "title": "ask the archive" }]
     },
-    { "title": "draft", "state": "in_progress" }
+    { "title": "draft", "state": "in_progress", "depends_on": ["0"] }
   ],
   "context": [
     { "id": "T1", "type": "success_metric", "text": "shipped by friday",
@@ -404,12 +415,26 @@ wire), `in_progress`, `completed`, `partial` (completed partially)
 or `failed` (completed unsuccessfully) — and a `type` saying where
 it sits in the refinement loop: `observe`, `analyze`,
 `find_root_cause`, `act` (the default, omitted on the wire),
-`validate` or `improve`. Column three edits the selected task's
-tree: the top half lists the actions — a type and a state select,
-an inline title/description editor, add-sub-action and remove per
-row — with children indented; the lower half stays reserved. The
-task's own typed context items (same shape as a project's, edited
-in the task details) complete the picture. The whole task list is
+`validate` or `improve`. On top of the nesting, an action can
+carry `depends_on`: the tree paths (the same `"0.2"` its rows are
+addressed by) of the actions that must be **completed** before it
+can be performed. A satisfied dependency is a completed one —
+anything else leaves the dependent action *blocked*: the UI dims
+its title, locks its state select and lists the links as "needs"
+chips under the row (unmet chips warn, met ones fade; clicking a
+chip jumps to its action). The links live in the inline editor as
+a checkbox per other action of the task — a candidate that would
+close a circle is offered but disabled — and deleting an action
+drops the links into its subtree and shifts the ones after it.
+PUT rejects a link that dangles, points at itself, is listed
+twice or closes a circle (strict, like every other field); the
+lenient loader drops or breaks it instead. Column three edits the
+selected task's tree: the top half lists the actions — a type and
+a state select, an inline title/description/dependencies editor,
+add-sub-action and remove per row — with children indented; the
+lower half stays reserved. The task's own typed context items
+(same shape as a project's, edited in the task details) complete
+the picture. The whole task list is
 PUT after every edit, so the tree autosaves like the rest of the UI.
 
 The main screen is a hierarchy: a task belongs to one `project`
@@ -440,7 +465,9 @@ from seed files under `{config}/scan/`, and writes its findings back
 through flower's second mcp surface, `POST /scan/mcp`
 (`set_project_details`, `add_context_item` — they apply to the
 scanned project and save immediately; the editor picks the writes up
-as they land). The filesystem researcher's seed points its tool
+as they land; `add_context_item` grows `resource` items too, the
+`spec` argument holding the defining file's path or url). The
+filesystem researcher's seed points its tool
 server at the scanned project's own surface,
 `/projects/{seq}/mcp`, so it works in project-relative paths
 ("." is the project root); the prompts no longer mention the
@@ -561,8 +588,10 @@ prompt's first line, an empty action tree — and runs the compiled-in
 scanner it orchestrates the two researchers as `invoke` tools
 (seeds under `{config}/scan/plan-*`) and writes back through its own
 mcp surface, `POST /plan/mcp`: `set_task_title`, `add_action`
-(append one action under a `parent` path — the answer lists the
-whole tree so the paths are grounded; **every added action starts
+(append one action under a `parent` path, optionally with
+`depends_on` links to the actions it waits on — the answer lists
+the whole tree, dependencies as "needs" markers, so the paths are
+grounded; **every added action starts
 pending**, states belong to the user) and `clear_actions` (rebuild a
 misshapen plan). The filesystem researcher works through the plan's
 private surface `POST /plan/research/mcp` — the same fs tools
@@ -934,12 +963,15 @@ served automatically with the right MIME type. Dotfiles are skipped.
             stable identities
       - [x] action trees: column three edits the selected task's
             actions (add/edit/remove, sub-actions, five states, six
-            types); the agent/llm task binding was removed — how a
-            task reaches a model is decided when the runner lands
+            types, dependency links between actions — a blocked
+            action waits for its links to complete); the agent/llm
+            task binding was removed — how a task reaches a model
+            is decided when the runner lands
       - [x] typed context items on projects and tasks (fact,
             pattern, risk, success_metric, failure_sign,
-            evaluation_method, rule — text + creation time), with
-            editors in column one and column two
+            evaluation_method, rule, resource — text + update time,
+            a resource carrying a url/path spec), with editors in
+            column one and column two
       - [x] custom-made mcp servers offered by flower itself —
             POST /mcp (streamable-http json-rpc) with the fs tools
             read_file/list_files/grep/analyze (the glob language,

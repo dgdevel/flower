@@ -129,6 +129,26 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
     .poll(async () => (await (await request.get("/api/projects")).json())[0].title)
     .toBe("Beekeeping 2");
 
+  // a resource item carries a spec: the field appears with the type
+  await ctx.locator('[data-action="ctx-add"]').click();
+  const resRow = ctx.locator(".ctx-item").nth(2);
+  await expect(resRow.locator(".ctx-spec")).toBeHidden();
+  await resRow.locator(".ctx-type").selectOption("resource");
+  await expect(resRow.locator(".ctx-spec")).toBeVisible();
+  await resRow.locator('[data-cf="spec"]').fill("docs/beekeeping.md");
+  await resRow.locator('[data-cf="text"]').fill("The canonical beekeeping guide");
+  await expect
+    .poll(async () => {
+      const [p] = await (await request.get("/api/projects")).json();
+      return (p?.context ?? []).map((c) =>
+        `${c.type || "fact"}:${c.spec || "-"}:${c.text}`);
+    })
+    .toEqual([
+      "risk:-:The server room floods in spring",
+      "fact:-:Two developers, one queen",
+      "resource:docs/beekeeping.md:The canonical beekeeping guide",
+    ]);
+
   // everything persisted
   await page.reload();
   const chipAfter = page.locator(".chip[data-idx='0']");
@@ -137,10 +157,15 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   await expect(page.locator('[data-f="description"]'))
     .toHaveValue("A home for bees\nand their honey.");
   await expect(page.locator('[data-f="stakeholders"]')).toHaveValue("the queen");
-  await expect(page.locator(".ctx-item")).toHaveCount(2);
+  await expect(page.locator(".ctx-item")).toHaveCount(3);
   await expect(page.locator(".ctx-item .ctx-type").first())
     .toHaveValue("risk");
-  await expect(page.locator(".ctx-item .ctx-id")).toHaveText(["P1", "P2"]);
+  await expect(page.locator(".ctx-item .ctx-id")).toHaveText(["P1", "P2", "P3"]);
+  // the resource row keeps its spec; other rows show none
+  await expect(page.locator(".ctx-spec").nth(0)).toBeHidden();
+  await expect(page.locator(".ctx-spec").nth(2)).toBeVisible();
+  await expect(page.locator(".ctx-item [data-cf=\"spec\"]").nth(2))
+    .toHaveValue("docs/beekeeping.md");
   await expect(page.locator(".ctx-item [data-cf=\"text\"]").first())
     .toHaveValue("The server room floods in spring");
 
@@ -189,12 +214,12 @@ test("tasks: per-project scoping — create, action tree, switch resets", async 
   // column three: the selected task's action tree
   await expect(pane3).toContainText("No actions yet");
   await pane3.locator("#new-action").click();
-  await pane3.locator(".action-editor input").fill("Plan the hive");
+  await pane3.locator('.action-editor input[data-af="title"]').fill("Plan the hive");
   await pane3.locator("#new-action").click();
-  await pane3.locator(".action-editor input").fill("Stock frames");
+  await pane3.locator('.action-editor input[data-af="title"]').fill("Stock frames");
   // a sub-action under the first, with a description
   await pane3.locator('.action[data-path="0"] > .action-row [data-action="action-sub"]').click();
-  await pane3.locator(".action-editor input").fill("Pick a spot");
+  await pane3.locator('.action-editor input[data-af="title"]').fill("Pick a spot");
   await pane3.locator(".action-editor textarea").fill("somewhere sunny");
   // states: in progress on the parent, completed on the sub-action;
   // types: observe on the parent, validate on the sub-action (the
@@ -259,7 +284,7 @@ test("tasks: per-project scoping — create, action tree, switch resets", async 
   await pane3b.locator('.action[data-path="0.0"] > .action-row .action-title').click();
   // typing across an autosave must not lose the field: a mid-edit
   // re-render of the pane would swallow the keystrokes after the pause
-  const editor = pane3b.locator(".action-editor input");
+  const editor = pane3b.locator('.action-editor input[data-af="title"]');
   await editor.fill(""); // retype from scratch
   await editor.pressSequentially("Pick a sunnier ", { delay: 40 });
   await page.waitForTimeout(900); // the debounced save fires mid-edit
@@ -270,20 +295,43 @@ test("tasks: per-project scoping — create, action tree, switch resets", async 
     .poll(async () => (await (await request.get("/api/tasks")).json())[0].actions[0].children[0].title)
     .toBe("Pick a sunnier spot");
 
-  // removing drops the action and its sub-actions, and the row's
-  // action count updates at once
-  await pane3b.locator('.action[data-path="1"] > .action-row [data-action="action-del"]').click();
-  await expect(pane3b.locator(".action")).toHaveCount(2);
-  await expect(pane2b.locator(".task-row").first()).toContainText("2 actions");
+  // dependencies: the editor's picker links "Stock frames" to
+  // "Plan the hive" — the chip renders, the row blocks, the state
+  // select locks until the link is satisfied
+  await pane3b.locator('.action[data-path="1"] > .action-row .action-title').click();
+  const pick = pane3b.locator('.action[data-path="1"] .dep-picker');
+  await expect(pick.locator("label.dep-cand")).toHaveCount(2); // itself is not a candidate
+  await pick.locator('input[data-dep="0"]').check();
+  await expect(pane3b.locator('.action[data-path="1"] .dep-chip.unmet')).toHaveText("0");
+  await expect(pane3b.locator('.action[data-path="1"]')).toHaveAttribute("data-blocked", "true");
+  await expect(pane3b.locator('.action[data-path="1"] > .action-row .action-state')).toBeDisabled();
+  await expect
+    .poll(async () => (await (await request.get("/api/tasks")).json())[0].actions[1].depends_on)
+    .toEqual(["0"]);
+
+  // completing the dependency satisfies the link: the chip fades
+  // to met, the row unblocks and the select unlocks
+  await pane3b.locator('.action[data-path="0"] > .action-row .action-state').selectOption("completed");
+  await expect(pane3b.locator('.action[data-path="1"]')).toHaveAttribute("data-blocked", "false");
+  await expect(pane3b.locator('.action[data-path="1"] > .action-row .action-state')).toBeEnabled();
+  await expect(pane3b.locator('.action[data-path="1"] .dep-chip.met')).toHaveText("0");
+
+  // removing the *dependency* drops the action and its sub-actions,
+  // the link goes with it, and the dependent row slides up to "0"
+  await pane3b.locator('.action[data-path="0"] > .action-row [data-action="action-del"]').click();
+  await expect(pane3b.locator(".action")).toHaveCount(1);
+  await expect(pane2b.locator(".task-row").first()).toContainText("1 action");
+  await expect(pane3b.locator('.action[data-path="0"] > .action-row .action-title')).toHaveText("Stock frames");
+  await expect(pane3b.locator(".dep-chip")).toHaveCount(0);
   await expect
     .poll(async () => (await (await request.get("/api/tasks")).json())[0].actions)
-    .toHaveLength(1);
+    .toEqual([{ title: "Stock frames" }]);
 
   // New Task empties the column-three scope while drafting
   await pane2b.locator("#new-task").click();
   await expect(pane3b).toContainText("No task selected");
   await pane2b.locator('[data-action="task-cancel"]').click();
-  await expect(pane3b.locator(".action")).toHaveCount(2);
+  await expect(pane3b.locator(".action")).toHaveCount(1);
 
   // switching project resets column two and three
   await page.click("#add-project");
@@ -302,7 +350,7 @@ test("tasks: per-project scoping — create, action tree, switch resets", async 
   await page.locator(`.chip[title="${bees.title}"]`).click();
   await expect(pane2b.locator(".task-row").first()).toContainText("Bee talk");
   await pane2b.locator(".task-row").first().click(); // a fresh project scope starts unselected
-  await expect(page.locator('.pane[data-pane="2"] .action')).toHaveCount(2);
+  await expect(page.locator('.pane[data-pane="2"] .action')).toHaveCount(1);
 
   // drafting a New project empties columns two and three
   await page.click("#add-project");

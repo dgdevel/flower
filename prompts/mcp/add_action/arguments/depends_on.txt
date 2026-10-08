@@ -1,0 +1,1 @@
+Optional paths of actions that must be completed before this one can be performed: an array taken from the last tree listing, like ["0", "1.2"]. The listing repeats them as "needs" markers. Omit it when nothing blocks the action; the paths must name actions that already exist.

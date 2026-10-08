@@ -1,0 +1,1 @@
+the resource specification: the url or filesystem path (project-relative paths are fine) the item points at. Required when type is resource, rejected on every other type

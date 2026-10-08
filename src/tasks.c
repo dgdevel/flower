@@ -108,6 +108,142 @@ static const char *type_name(int t)
                : ACTION_TYPE_NAMES[ACTION_ACT];
 }
 
+/* ---------- dependencies ---------- */
+
+/* a dependency path: dot-separated decimal indexes into the task's
+ * action tree, like "0" or "2.1" — non-empty segments, each an
+ * index of sane magnitude, the whole under ACTION_DEP_PATH_MAX */
+int action_dep_path_ok(const char *s)
+{
+    if (!s || !s[0] || strlen(s) >= ACTION_DEP_PATH_MAX) return 0;
+    size_t run = 0;
+    for (const char *p = s; ; p++) {
+        if (*p == '\0' || *p == '.') {
+            if (run == 0 || run > 10) return 0; /* empty or absurd */
+            if (*p == '\0') return 1;
+            run = 0;
+        } else if (*p >= '0' && *p <= '9') run++;
+        else return 0;
+    }
+}
+
+/* the action `path` names, walking sibling lists by index — the
+ * path "2.1" is actions[2]->children[1]. NULL when any index walks
+ * past its list (the same walk the planner's find_parent_list does
+ * for parent paths, stopping on the action itself) */
+action_t *actions_resolve(action_t *actions, const char *path)
+{
+    if (!action_dep_path_ok(path)) return NULL;
+    action_t *list = actions;
+    const char *p = path;
+    for (;;) {
+        size_t idx = 0;
+        while (*p >= '0' && *p <= '9') idx = idx * 10 + (size_t)(*p++ - '0');
+        action_t *a = NULL;
+        size_t k = 0;
+        for (a = list; a; a = a->next_sibling, k++)
+            if (k == idx) break;
+        if (!a) return NULL;
+        if (*p == '\0') return a;
+        p++; /* skip the dot; the format check guarantees a digit */
+        list = a->first_child;
+    }
+}
+
+/* does following depends_on edges from `from` reach `target` (one
+ * edge or more)? The budget caps the walk: a cycle stored by
+ * another writer would recurse forever, so past it the answer is
+ * "yes" — a dependency chain that deep is broken either way */
+static int deps_reach(action_t *root, action_t *from,
+                      const action_t *target, int budget)
+{
+    if (budget <= 0) return 1;
+    for (int k = 0; k < from->dep_count; k++) {
+        action_t *d = actions_resolve(root, from->depends_on[k]);
+        if (d && (d == target || deps_reach(root, d, target, budget - 1)))
+            return 1;
+    }
+    return 0;
+}
+
+/* drop the k-th dependency (kept dense: a memmove of the tails) */
+static void drop_dep(action_t *a, int k)
+{
+    if (k < 0 || k >= a->dep_count) return;
+    memmove(a->depends_on[k], a->depends_on[k + 1],
+            (size_t)(a->dep_count - k - 1) * ACTION_DEP_PATH_MAX);
+    a->dep_count--;
+}
+
+/*
+ * Cross-check every action's dependencies against the whole tree:
+ * each path must name another action of this task, and the links
+ * must not form a circle. Strict mode reports the first offender
+ * into err_field/err_msg (prefix like "tasks[0].actions") and
+ * returns -1; lenient mode repairs in place — a dangling or
+ * self reference drops, a circle breaks at this action's first
+ * edge into it. `root` is the tree the paths resolve in.
+ */
+static int deps_walk(action_t *list, action_t *root, const char *prefix,
+                     int strict, char *ef, size_t efn,
+                     char *em, size_t emn)
+{
+    int i = 0;
+    for (action_t *a = list; a; a = a->next_sibling, i++) {
+        char aprefix[1024];
+        path_set(aprefix, sizeof aprefix, prefix);
+        path_add_index(aprefix, sizeof aprefix, (size_t)i);
+        for (int k = 0; k < a->dep_count; k++) {
+            action_t *d = actions_resolve(root, a->depends_on[k]);
+            if (!d) {
+                if (strict) {
+                    snprintf(ef, efn, "%s.depends_on[%d]", aprefix, k);
+                    snprintf(em, emn,
+                             "no action at path \"%s\" in this task",
+                             a->depends_on[k]);
+                    return -1;
+                }
+                drop_dep(a, k--); /* lenient: the reference dangles */
+                continue;
+            }
+            if (d == a) {
+                if (strict) {
+                    snprintf(ef, efn, "%s.depends_on[%d]", aprefix, k);
+                    snprintf(em, emn, "an action cannot depend on itself");
+                    return -1;
+                }
+                drop_dep(a, k--); /* lenient: self reference */
+                continue;
+            }
+        }
+        if (deps_reach(root, a, a, 256)) {
+            if (strict) {
+                snprintf(ef, efn, "%s.depends_on", aprefix);
+                snprintf(em, emn, "circular dependency");
+                return -1;
+            }
+            /* lenient: cut this action's first edge into the circle */
+            for (int k = 0; k < a->dep_count; k++) {
+                action_t *d = actions_resolve(root, a->depends_on[k]);
+                if (d && deps_reach(root, d, a, 255)) {
+                    drop_dep(a, k--);
+                    break;
+                }
+            }
+        }
+        if (a->first_child) {
+            char cprefix[1024];
+            path_set(cprefix, sizeof cprefix, aprefix);
+            path_add(cprefix, sizeof cprefix, ".children");
+            if (deps_walk(a->first_child, root, cprefix, strict,
+                          ef, efn, em, emn) != 0)
+                return -1; /* strict only: lenient never fails */
+        }
+    }
+    return 0;
+}
+
+
 static void actions_free(action_t *a)
 {
     while (a) {
@@ -135,7 +271,7 @@ static int parse_action(const cJSON *obj, action_t *out, int depth,
                         char *em, size_t emn, const char *prefix)
 {
     static const char *const keys[] = {
-        "title", "description", "state", "type", "children",
+        "title", "description", "state", "type", "depends_on", "children",
     };
     char field[256], child_prefix[1024];
     const cJSON *j;
@@ -200,6 +336,69 @@ static int parse_action(const cJSON *obj, action_t *out, int depth,
         }
     } else if (j && cJSON_IsString(j)) {
         out->type = type_from_name(j->valuestring);
+    }
+
+    /* the dependency links: tree paths of the actions this one
+     * waits for. Format, count and duplicates are checked here;
+     * whether a path actually names a sibling elsewhere in the
+     * tree (and no circle forms) is checked once the whole task
+     * is parsed, in deps_walk */
+    j = cJSON_GetObjectItemCaseSensitive(obj, "depends_on");
+    if (j) {
+        char dfield[1024];
+        path_set(dfield, sizeof dfield, prefix);
+        path_add(dfield, sizeof dfield, ".depends_on");
+        if (!cJSON_IsArray(j)) {
+            if (strict) {
+                snprintf(ef, efn, "%s", dfield);
+                snprintf(em, emn, "must be an array of action paths");
+                return -1;
+            }
+        } else {
+            int di = 0;
+            const cJSON *d = NULL;
+            cJSON_ArrayForEach(d, j) {
+                if (!cJSON_IsString(d) || !d->valuestring ||
+                    !action_dep_path_ok(d->valuestring)) {
+                    if (strict) {
+                        snprintf(ef, efn, "%s[%d]", dfield, di);
+                        snprintf(em, emn, "dot-separated action indexes, "
+                                         "like \"0\" or \"2.1\", max %d "
+                                         "bytes", ACTION_DEP_PATH_MAX - 1);
+                        return -1;
+                    }
+                    di++;
+                    continue; /* lenient: skip the broken link */
+                }
+                if (out->dep_count >= ACTION_DEPS_MAX) {
+                    if (strict) {
+                        snprintf(ef, efn, "%s[%d]", dfield, di);
+                        snprintf(em, emn, "too many dependencies (max %d)",
+                                 ACTION_DEPS_MAX);
+                        return -1;
+                    }
+                    break; /* lenient: keep the first ACTION_DEPS_MAX */
+                }
+                int dup = 0;
+                for (int k = 0; k < out->dep_count; k++)
+                    if (strcmp(out->depends_on[k], d->valuestring) == 0)
+                        dup = 1;
+                if (dup) {
+                    if (strict) {
+                        snprintf(ef, efn, "%s[%d]", dfield, di);
+                        snprintf(em, emn,
+                                 "the same dependency is listed twice");
+                        return -1;
+                    }
+                    di++;
+                    continue; /* lenient: one copy is enough */
+                }
+                snprintf(out->depends_on[out->dep_count],
+                         ACTION_DEP_PATH_MAX, "%s", d->valuestring);
+                out->dep_count++;
+                di++;
+            }
+        }
     }
 
     j = cJSON_GetObjectItemCaseSensitive(obj, "children");
@@ -326,6 +525,18 @@ static cJSON *actions_to_cjson(const action_t *a)
             cJSON_Delete(o);
             cJSON_Delete(arr);
             return NULL;
+        }
+        if (p->dep_count > 0) {
+            const char *deps[ACTION_DEPS_MAX];
+            for (int k = 0; k < p->dep_count; k++)
+                deps[k] = p->depends_on[k];
+            cJSON *da = cJSON_CreateStringArray(deps, p->dep_count);
+            if (!da) {
+                cJSON_Delete(o);
+                cJSON_Delete(arr);
+                return NULL;
+            }
+            cJSON_AddItemToObject(o, "depends_on", da);
         }
         if (p->first_child) {
             cJSON *kids = actions_to_cjson(p->first_child);
@@ -460,6 +671,22 @@ static int parse_task(const cJSON *obj, size_t index, task_t *out,
                                      err_msg, err_msg_n,
                                      aprefix) != 0 && strict) {
             return -1; /* the built list is freed by parse_action_list */
+        }
+    }
+
+    /* dependency links cross-reference the tree built above, so
+     * they are checked once it is whole: strict rejects the first
+     * bad link (freeing the tree here, like the context failure
+     * below), lenient repairs in place */
+    if (out->actions) {
+        char vprefix[64];
+        snprintf(vprefix, sizeof vprefix, "%s.actions", prefix);
+        if (deps_walk(out->actions, out->actions, vprefix, strict,
+                      err_field, err_field_n, err_msg, err_msg_n) != 0 &&
+            strict) {
+            actions_free(out->actions);
+            out->actions = NULL;
+            return -1;
         }
     }
 

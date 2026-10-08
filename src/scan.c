@@ -205,7 +205,25 @@ static char *fn_add_context_item(const cJSON *args, char *err, size_t err_n)
     if (type < 0) {
         snprintf(err, err_n,
                  "type must be one of fact, pattern, risk, success_metric, "
-                 "failure_sign, evaluation_method, rule");
+                 "failure_sign, evaluation_method, rule, resource");
+        return NULL;
+    }
+    /* the resource specification: required on a resource, invalid
+     * on anything else */
+    const cJSON *sj = cJSON_GetObjectItemCaseSensitive(args, "spec");
+    const char *spec =
+        cJSON_IsString(sj) && sj->valuestring ? sj->valuestring : "";
+    if (type == CTX_RESOURCE) {
+        if (!spec[0] || strlen(spec) >= CTX_SPEC_MAX ||
+            !valid_utf8_text(spec, strlen(spec), 0)) {
+            snprintf(err, err_n,
+                     "spec: required on a resource item — a url or "
+                     "filesystem path, max %d bytes, no control characters",
+                     CTX_SPEC_MAX - 1);
+            return NULL;
+        }
+    } else if (spec[0]) {
+        snprintf(err, err_n, "spec is only valid on a resource item");
         return NULL;
     }
     const cJSON *xj = cJSON_GetObjectItemCaseSensitive(args, "text");
@@ -218,10 +236,12 @@ static char *fn_add_context_item(const cJSON *args, char *err, size_t err_n)
     }
 
     /* count + duplicate check: a re-added item is rejected, the model
-     * should not pad the list with what is already there */
+     * should not pad the list with what is already there (a resource
+     * is its spec — the same text on two paths is two resources) */
     size_t count = 0;
     for (ctx_item_t *it = p->context; it; it = it->next, count++) {
-        if (it->type == type && strcmp(it->text, xj->valuestring) == 0) {
+        if (it->type == type && strcmp(it->text, xj->valuestring) == 0 &&
+            strcmp(it->spec, spec) == 0) {
             snprintf(err, err_n,
                      "this %s item is already on the project",
                      ctx_type_name(type));
@@ -242,6 +262,7 @@ static char *fn_add_context_item(const cJSON *args, char *err, size_t err_n)
     item->type = type;
     item->updated = (long long)time(NULL);
     snprintf(item->text, sizeof item->text, "%s", xj->valuestring);
+    if (spec[0]) snprintf(item->spec, sizeof item->spec, "%s", spec);
     /* append at the tail: the generated ids (P1, P2, …) follow the
      * list order, and a scan's additions read better in order */
     ctx_item_t **tail = &p->context;
@@ -255,10 +276,16 @@ static char *fn_add_context_item(const cJSON *args, char *err, size_t err_n)
         return NULL;
     }
     S.writes++;
-    size_t n = 80 + strlen(item->text);
+    size_t n = 80 + strlen(item->text) + strlen(item->spec);
     char *out = malloc(n);
-    if (out)
-        snprintf(out, n, "added [%s] %s", ctx_type_name(type), item->text);
+    if (out) {
+        if (item->spec[0]) /* a resource reads best as spec — text */
+            snprintf(out, n, "added [%s] %s — %s", ctx_type_name(type),
+                     item->spec, item->text);
+        else
+            snprintf(out, n, "added [%s] %s", ctx_type_name(type),
+                     item->text);
+    }
     return out ? out : strdup("added");
 }
 
@@ -272,6 +299,7 @@ static const mcp_arg_t ARGS_SET_DETAILS[] = {
 static const mcp_arg_t ARGS_ADD_CONTEXT[] = {
     { "type", "string", 0 },
     { "text", "string", 1 },
+    { "spec", "string", 0 },
     { NULL }
 };
 static const mcp_tool_t SCAN_TOOLS[] = {

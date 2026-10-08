@@ -8,6 +8,8 @@
 #include "fs.h"
 #include "analyze.h"
 #include "prompts.h"
+#include "tasks.h"
+#include "theme.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +50,10 @@ static void test_prompts(void)
     strcpy(proj.objectives, "Ship part 4\nKeep it small");
     ctx_item_t risk = { .type = CTX_RISK, .text = "DDG markup may change" };
     ctx_item_t fact = { .type = CTX_FACT, .text = "cJSON parses json" };
-    risk.next = NULL;
+    ctx_item_t res = { .type = CTX_RESOURCE, .text = "the project schema" };
+    strcpy(res.spec, "docs/schema.md");
+    res.next = NULL;
+    risk.next = &res;
     fact.next = &risk;
     proj.context = &fact;
 
@@ -64,6 +69,8 @@ static void test_prompts(void)
                    "tpl: multi-line indent");
     check_contains(out, "- [fact] cJSON parses json\n", "tpl: context item");
     check_contains(out, "- [risk] DDG markup may change\n", "tpl: typed item");
+    check_contains(out, "- [resource] docs/schema.md — the project schema\n",
+                   "tpl: resource item leads with its spec");
     check_contains(out, "{{unknown_var}}", "tpl: unknown kept verbatim");
     check_contains(out, "{{ spaced }}", "tpl: spaced token kept verbatim");
     check(!strstr(out, "Scope:"), "tpl: empty field omitted");
@@ -524,10 +531,108 @@ static void test_fs(void)
     rmdir(root);
 }
 
+/* ---------- action dependencies ---------- */
+
+/* the strict/lenient contract for depends_on: links round-trip,
+ * bad ones reject a PUT, and the lenient loader repairs a file
+ * another writer could have left behind */
+static void test_task_deps(void)
+{
+    tasks_t t;
+    char ef[256], em[256];
+
+    /* strict: good links parse, store and re-emit in order */
+    const char *good =
+        "[{\"project\":\"9f2c4a1b0d7e6358\",\"title\":\"t\",\"actions\":["
+        "{\"title\":\"a\"},"
+        "{\"title\":\"b\",\"depends_on\":[\"0\"]},"
+        "{\"title\":\"c\",\"depends_on\":[\"0\",\"1\"]}]}]";
+    check(tasks_from_json(good, strlen(good), &t,
+                          ef, sizeof ef, em, sizeof em) == TASKS_OK,
+          "deps: strict parse accepts links");
+    check(t.count == 1 && t.items[0].actions &&
+          t.items[0].actions->next_sibling->dep_count == 1 &&
+          strcmp(t.items[0].actions->next_sibling->depends_on[0], "0") == 0,
+          "deps: the link is stored");
+    char *j = tasks_to_json(&t, 0, NULL);
+    check_contains(j, "\"depends_on\":[\"0\",\"1\"]",
+                   "deps: emitted on the wire, in order");
+    int n = 0; /* the two linked actions emit it, the plain one doesn't */
+    for (const char *p = j; (p = strstr(p, "\"depends_on\"")); p += 12) n++;
+    check(n == 2, "deps: only when set");
+    free(j);
+    tasks_clear(&t);
+
+    /* strict: every way a link can be wrong */
+    static const struct { const char *body; const char *what; } bad[] = {
+        { "[{\"project\":\"9f2c4a1b0d7e6358\",\"actions\":["
+          "{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"7\"]}]}]",
+          "deps: dangling link rejected" },
+        { "[{\"project\":\"9f2c4a1b0d7e6358\",\"actions\":["
+          "{\"title\":\"a\",\"depends_on\":[\"0\"]}]}]",
+          "deps: self link rejected" },
+        { "[{\"project\":\"9f2c4a1b0d7e6358\",\"actions\":["
+          "{\"title\":\"a\",\"depends_on\":[\"1\"]},"
+          "{\"title\":\"b\",\"depends_on\":[\"0\"]}]}]",
+          "deps: a two-action circle rejected" },
+        { "[{\"project\":\"9f2c4a1b0d7e6358\",\"actions\":["
+          "{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"0.x\"]}]}]",
+          "deps: malformed path rejected" },
+        { "[{\"project\":\"9f2c4a1b0d7e6358\",\"actions\":["
+          "{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"0\",\"0\"]}]}]",
+          "deps: duplicate link rejected" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        check(tasks_from_json(bad[i].body, strlen(bad[i].body), &t,
+                              ef, sizeof ef, em, sizeof em) == TASKS_E_FIELD,
+              bad[i].what);
+        tasks_clear(&t);
+    }
+
+    /* lenient load: a self link and a dangling one drop, a circle
+     * breaks at its first edge — the file stays usable */
+    char dir[] = "/tmp/flower-deptest-XXXXXX";
+    check(mkdtemp(dir) != NULL, "deps: temp config dir");
+    check(theme_init(dir) == 0, "deps: config dir resolved");
+    char tdir[256], idir[320], path[384];
+    snprintf(tdir, sizeof tdir, "%s/tasks", dir);
+    snprintf(idir, sizeof idir, "%s/00000000000000000000000000000000", tdir);
+    mkdir(tdir, 0700);
+    mkdir(idir, 0700);
+    snprintf(path, sizeof path, "%s/task.json", idir);
+    mkfile(path,
+           "{\"project\":\"9f2c4a1b0d7e6358\",\"title\":\"t\",\"actions\":["
+           "{\"title\":\"a\",\"depends_on\":[\"0\"]},"
+           "{\"title\":\"b\",\"depends_on\":[\"3\"]},"
+           "{\"title\":\"c\",\"depends_on\":[\"3\"]},"
+           "{\"title\":\"d\",\"depends_on\":[\"2\"]}]}]");
+    check(tasks_load(&t) == 0 && t.count == 1,
+          "deps: lenient load keeps the task");
+    const action_t *a = t.items[0].actions;
+    check(a && a->dep_count == 0, "deps: self link dropped");
+    check(a && a->next_sibling && a->next_sibling->dep_count == 0,
+          "deps: dangling link dropped");
+    check(a && a->next_sibling && a->next_sibling->next_sibling &&
+          a->next_sibling->next_sibling->dep_count == 0,
+          "deps: the circle broke at its first edge");
+    check(a && a->next_sibling && a->next_sibling->next_sibling &&
+          a->next_sibling->next_sibling->next_sibling &&
+          a->next_sibling->next_sibling->next_sibling->dep_count == 1 &&
+          strcmp(a->next_sibling->next_sibling->next_sibling->depends_on[0],
+                 "2") == 0,
+          "deps: the edge outside the circle stays");
+    tasks_clear(&t);
+    remove(path);
+    rmdir(idir);
+    rmdir(tdir);
+    rmdir(dir);
+}
+
 int main(void)
 {
     test_prompts();
     test_fs();
+    test_task_deps();
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
         return 1;

@@ -45,6 +45,7 @@ const CONTEXT_TYPES = [
   ["failure_sign", "Failure sign"],
   ["evaluation_method", "Evaluation method"],
   ["rule", "Rule"],
+  ["resource", "Resource"],
 ];
 const CTX_PLACEHOLDER = {
   fact: "Something known to be true",
@@ -54,28 +55,40 @@ const CTX_PLACEHOLDER = {
   failure_sign: "How failure shows up",
   evaluation_method: "How to evaluate the outcome",
   rule: "A constraint that must hold",
+  resource: "What this core file or url means for the project",
 };
 const CTX_TEXT_MAX = 4096; // mirrors CTX_TEXT_MAX-1 in src/context.c
+const CTX_SPEC_MAX = 1024; // mirrors CTX_SPEC_MAX-1 in src/context.c
 const CTX_MAX = 64;        // mirrors CONTEXT_MAX in src/context.c
 
 const ctxTextOk = (v) =>
   bytes(v || "") <= CTX_TEXT_MAX - 1 && noControlsMulti(v || "");
+// a spec is a url or filesystem path: single line, no control chars
+const ctxSpecOk = (v) =>
+  bytes(v || "") <= CTX_SPEC_MAX - 1 && noControls(v || "");
 const nowSec = () => Math.floor(Date.now() / 1000);
-const newContextItem = () => ({ type: "fact", text: "", updated: nowSec() });
+const newContextItem = () => ({ type: "fact", text: "", spec: "", updated: nowSec() });
 
 /* the wire omits defaults ("fact", and the server always fills
  * updated); the client state is always complete. The server's
  * generated ids are dropped — rows derive them from position */
 function normContext(list) {
-  return (list || []).map((c) => ({
-    type: CONTEXT_TYPES.some(([v]) => v === c.type) ? c.type : "fact",
-    text: c.text || "",
-    updated: c.updated || nowSec(),
-  }));
+  return (list || []).map((c) => {
+    const type = CONTEXT_TYPES.some(([v]) => v === c.type) ? c.type : "fact";
+    return {
+      type,
+      text: c.text || "",
+      spec: type === "resource" && typeof c.spec === "string" ? c.spec : "",
+      updated: c.updated || nowSec(),
+    };
+  });
 }
 
 function contextValid(list) {
-  return (list || []).every((c) => (c.text || "").trim() && ctxTextOk(c.text));
+  return (list || []).every((c) =>
+    (c.text || "").trim() && ctxTextOk(c.text) &&
+    // a resource is its spec: required, single line
+    (c.type !== "resource" || ((c.spec || "").trim() && ctxSpecOk(c.spec))));
 }
 
 const railEl = document.getElementById("rail");
@@ -206,6 +219,15 @@ function showCtxErrors(c, row) {
     : "required";
   if (err) err.textContent = msg;
   if (ta) ta.classList.toggle("invalid", !!msg);
+  const serr = row.querySelector(".err-spec");
+  const si = row.querySelector('[data-cf="spec"]');
+  const smsg = c.type === "resource"
+    ? ((c.spec || "").trim()
+        ? (ctxSpecOk(c.spec) ? "" : `too long (${CTX_SPEC_MAX - 1} bytes at most)`)
+        : "required — the url or filesystem path")
+    : "";
+  if (serr) serr.textContent = smsg;
+  if (si) si.classList.toggle("invalid", !!smsg);
 }
 
 /* any edit — text or type — restamps the item as updated; the
@@ -228,6 +250,17 @@ function ctxItemRow(c, i, prefix) {
     if (v === type) o.selected = true;
     sel.appendChild(o);
   }
+  /* the resource spec: shown only on resource items — the type
+   * change handler toggles it in place, without a re-render */
+  const spec = el("input", {
+    type: "text", "data-ci": i, "data-cf": "spec", spellcheck: "false",
+    placeholder: "url or filesystem path",
+    "aria-label": "Resource specification (url or filesystem path)",
+  });
+  spec.value = type === "resource" ? (c.spec || "") : "";
+  const specWrap = el("div", { class: "ctx-spec" }, spec,
+    el("span", { class: "field-error err-spec" }));
+  specWrap.hidden = type !== "resource";
   const ta = el("textarea", {
     "data-ci": i, "data-cf": "text", rows: "2", spellcheck: "false",
     placeholder: CTX_PLACEHOLDER[type],
@@ -249,6 +282,7 @@ function ctxItemRow(c, i, prefix) {
         "data-ci": i, title: "Remove context item",
         "aria-label": "Remove context item", text: "✕",
       })),
+    specWrap,
     ta,
     el("span", { class: "field-error err-text" }));
 }
@@ -270,7 +304,7 @@ function contextEditor(list = [], prefix = "P") {
   if (!list.length)
     sec.append(el("p", {
       class: "ctx-none muted",
-      text: "No context items yet — facts, patterns, risks, rules…",
+      text: "No context items yet — facts, patterns, risks, rules, resources…",
     }));
   list.forEach((c, i) => sec.append(ctxItemRow(c, i, prefix)));
   return sec;
@@ -717,11 +751,13 @@ function autoButtonUpdate() {
  * helper returns true when the event was a context-item event. */
 function onCtxInput(e, owner, save) {
   const ci = e.target.dataset.ci;
-  if (ci == null || e.target.dataset.cf !== "text") return false;
+  const cf = e.target.dataset.cf;
+  if (ci == null || (cf !== "text" && cf !== "spec")) return false;
   const t = owner();
   const c = t && t.context && t.context[+ci];
   if (!c) return true;
-  c.text = e.target.value;
+  if (cf === "text") c.text = e.target.value;
+  else c.spec = e.target.value;
   const row = e.target.closest(".ctx-item");
   showCtxErrors(c, row);
   touchCtxItem(c, row);
@@ -738,6 +774,13 @@ function onCtxTypeChange(e, owner, save) {
   const row = e.target.closest(".ctx-item");
   const ta = row?.querySelector('[data-cf="text"]');
   if (ta) ta.placeholder = CTX_PLACEHOLDER[c.type] || "";
+  /* the spec lives only on resource items: show the field for them,
+   * and drop the value when the item stops being one (the server
+   * rejects a spec on any other type) */
+  const wrap = row?.querySelector(".ctx-spec");
+  if (wrap) wrap.hidden = c.type !== "resource";
+  if (c.type !== "resource") c.spec = "";
+  if (row) showCtxErrors(c, row);
   touchCtxItem(c, row);
   save();
   return true;
@@ -1558,6 +1601,8 @@ function normActions(list) {
     description: a.description || "",
     state: a.state || "pending",
     type: a.type || "act",
+    depends_on: Array.isArray(a.depends_on)
+      ? a.depends_on.filter((d) => typeof d === "string") : [],
     children: normActions(a.children),
   }));
 }
@@ -1613,12 +1658,19 @@ async function putTasks(list, seq, netMsg) {
 
 /* every action and context item in every task must be valid before a
  * PUT (mirrors the server: one broken item would reject the list) */
-function actionsValid(list) {
-  for (const a of list || []) {
+function actionsValid(list, root, path) {
+  const top = root || list;
+  for (let i = 0; i < (list || []).length; i++) {
+    const a = list[i];
+    const key = pathKey(path ? [...path, i] : [i]);
     if (!(a.title || "").trim() || !actionTitleOk(a.title) ||
         !actionDescOk(a.description))
       return false;
-    if (!actionsValid(a.children)) return false;
+    /* links must resolve to another action of the same task */
+    for (const d of a.depends_on || [])
+      if (d === key || !resolveIn(top, d)) return false;
+    if (!actionsValid(a.children, top, path ? [...path, i] : [i]))
+      return false;
   }
   return true;
 }
@@ -1855,10 +1907,18 @@ taskDetailsEl.addEventListener("click", (e) => {
  * The selected task's action tree: one row per action (a state
  * select, the title, add-sub-action and remove buttons), children
  * indented under their parent. Clicking a title opens the inline
- * editor (title + description). Actions are addressed by their path
- * — the child indexes from the task's root list ("0.2.1"); typing
- * mutates the in-memory tree and autosaves the whole task list,
- * structural changes (add/remove/state) re-render the pane. */
+ * editor (title + description + dependencies). Actions are
+ * addressed by their path — the child indexes from the task's root
+ * list ("0.2.1"); typing mutates the in-memory tree and autosaves
+ * the whole task list, structural changes (add/remove/state)
+ * re-render the pane.
+ *
+ * A dependency link says the action can only be performed once
+ * another one is completed. Links show as "needs" chips under the
+ * row — unmet chips warn, met ones fade — and a row with unmet
+ * dependencies is blocked: the title dims and the state select
+ * locks until its dependencies complete (removing a link is the
+ * explicit override). */
 
 const ACTION_STATES = [
   ["pending", "Pending"],
@@ -1879,6 +1939,7 @@ const ACTION_TYPES = [
 ];
 const ACTION_TITLE_MAX = 96;   // mirrors ACTION_TITLE_MAX in src/tasks.c
 const ACTION_DESC_MAX = 4096;  // mirrors ACTION_DESC_MAX in src/tasks.c
+const ACTION_DEPS_MAX = 16;    // mirrors ACTION_DEPS_MAX in src/tasks.c
 
 const actionListEl = document.getElementById("action-list");
 const actionCountEl = document.getElementById("action-count");
@@ -1890,7 +1951,7 @@ const actionDescOk = (v) =>
   bytes(v || "") <= ACTION_DESC_MAX - 1 && noControlsMulti(v || "");
 
 const newAction = () =>
-  ({ title: "", description: "", state: "pending", type: "act", children: [] });
+  ({ title: "", description: "", state: "pending", type: "act", depends_on: [], children: [] });
 
 function countActions(list) {
   let n = 0;
@@ -1914,6 +1975,70 @@ function actionParentList(path) {
 function actionByPath(path) {
   const list = actionParentList(path);
   return list ? list[path[path.length - 1]] : undefined;
+}
+
+/* the action a dependency path ("0.2") names inside `root`, or
+ * undefined — the client twin of actions_resolve in src/tasks.c */
+function resolveIn(root, dep) {
+  let list = root, a;
+  for (const seg of String(dep).split(".")) {
+    a = list && list[Number(seg)];
+    if (!a) return undefined;
+    list = a.children;
+  }
+  return a;
+}
+
+/* every action of a tree in document order, with its path key */
+function flattenActions(list, path = [], out = []) {
+  (list || []).forEach((a, i) => {
+    out.push({ a, key: pathKey([...path, i]) });
+    flattenActions(a.children, [...path, i], out);
+  });
+  return out;
+}
+
+/* the dependency paths reachable from `deps` (one edge or more,
+ * cycles tolerated) — the picker's circularity guard */
+function depClosure(root, deps) {
+  const seen = new Set();
+  const stack = [...(deps || [])];
+  while (stack.length) {
+    const d = stack.pop();
+    if (seen.has(d)) continue;
+    seen.add(d);
+    const t = resolveIn(root, d);
+    if (t) stack.push(...(t.depends_on || []));
+  }
+  return seen;
+}
+
+/* deleting an action shifts the paths after it: links into the
+ * deleted subtree drop, references to later siblings slide down
+ * one index (the server re-validates either way) */
+function remapDeps(task, delPath) {
+  if (!task) return;
+  const k = delPath.length;
+  const parent = delPath.slice(0, -1).join(".");
+  const gone = pathKey(delPath);
+  const fix = (d) => {
+    const seg = d.split(".");
+    if (seg.length >= k &&
+        seg.slice(0, k - 1).join(".") === parent &&
+        Number(seg[k - 1]) > delPath[k - 1]) {
+      seg[k - 1] = String(Number(seg[k - 1]) - 1);
+      return seg.join(".");
+    }
+    return d;
+  };
+  const walk = (list) => (list || []).forEach((a) => {
+    if (a.depends_on && a.depends_on.length)
+      a.depends_on = a.depends_on
+        .filter((d) => d !== gone && !d.startsWith(gone + "."))
+        .map(fix);
+    walk(a.children);
+  });
+  walk(task.actions);
 }
 
 function pathKey(path) { return path.join("."); }
@@ -1944,18 +2069,51 @@ function renderActions() {
       class: "task-none muted",
       text: "No actions yet — add the first thing to be done.",
     }));
-  renderActionList(actionListEl, c.actions, []);
+  renderActionList(actionListEl, c.actions, [], c.actions);
 }
 
-function renderActionList(container, actions, path) {
-  actions.forEach((a, i) => container.append(actionRow(a, [...path, i])));
+function renderActionList(container, actions, path, root) {
+  actions.forEach((a, i) =>
+    container.append(actionRow(a, [...path, i], root)));
 }
 
-function actionRow(a, path) {
+/* one entry per dependency link: the path, its target and whether
+ * it is satisfied — a completed dependency is met, any other
+ * state keeps the dependent action blocked */
+function depChips(a, root) {
+  return (a.depends_on || []).map((d) => {
+    const t = resolveIn(root, d);
+    return { d, t, met: !!t && t.state === "completed" };
+  });
+}
+
+const stateLabel = (s) =>
+  (ACTION_STATES.find(([v]) => v === s) || [, s])[1];
+
+/* the "needs" chips under a row: unmet chips carry the warning
+ * color, met ones fade; clicking a chip jumps to its action */
+function needsRow(chips) {
+  const wrap = el("div", { class: "action-needs" },
+    el("span", { class: "needs-label", text: "needs" }));
+  for (const { d, t, met } of chips)
+    wrap.append(el("button", {
+      type: "button", class: "dep-chip " + (met ? "met" : "unmet"),
+      "data-dep": d, text: d,
+      title: t
+        ? `${t.title.trim() || "(untitled)"} — ${stateLabel(t.state)}`
+        : `no action at ${d}`,
+      "aria-label": `Dependency ${d}`,
+    }));
+  return wrap;
+}
+
+function actionRow(a, path, root) {
   const key = pathKey(path);
   const editing = editingPath && pathKey(editingPath) === key;
   const state = a.state || "pending";
   const type = a.type || "act";
+  const chips = depChips(a, root);
+  const blocked = chips.some((c) => !c.met);
 
   const tsel = el("select", {
     class: "action-type", "data-path": key, "aria-label": "Type",
@@ -1974,9 +2132,14 @@ function actionRow(a, path) {
     if (v === state) o.selected = true;
     sel.appendChild(o);
   }
+  if (blocked) { /* a blocked action cannot be performed */
+    sel.disabled = true;
+    sel.title = "Blocked — complete what it needs first";
+  }
 
   const row = el("div", {
-    class: "action", "data-path": key, "data-state": state, "data-type": type,
+    class: "action", "data-path": key, "data-state": state,
+    "data-type": type, "data-blocked": String(blocked),
   },
     el("div", { class: "action-row" },
       tsel,
@@ -1997,14 +2160,77 @@ function actionRow(a, path) {
         "aria-label": "Remove action", text: "✕",
       })));
 
-  if (editing) row.append(actionEditor(a));
+  if (chips.length) row.append(needsRow(chips));
+  if (editing) row.append(actionEditor(a, path, root));
   if (a.children.length)
     row.append(el("div", { class: "action-children" },
-      ...a.children.map((_, i) => actionRow(a.children[i], [...path, i]))));
+      ...a.children.map((_, i) =>
+        actionRow(a.children[i], [...path, i], root))));
   return row;
 }
 
-function actionEditor(a) {
+/* after a dependency toggles inside an open editor: refresh that
+ * row's chips and blocked styling in place — a re-render would
+ * rebuild the editor and steal the focus mid-ticking */
+function refreshRowDeps(row, a, root) {
+  const chips = depChips(a, root);
+  const blocked = chips.some((c) => !c.met);
+  row.dataset.blocked = String(blocked);
+  const sel = row.querySelector(":scope > .action-row .action-state");
+  if (sel) {
+    sel.disabled = blocked;
+    sel.title = blocked ? "Blocked — complete what it needs first" : "";
+  }
+  const needs = row.querySelector(":scope > .action-needs");
+  if (chips.length) {
+    const fresh = needsRow(chips);
+    if (needs) needs.replaceWith(fresh);
+    else row.querySelector(":scope > .action-row").after(fresh);
+  } else if (needs) needs.remove();
+}
+
+/* the dependency picker: every other action of the task as path +
+ * title with a checkbox. A candidate that already (transitively)
+ * waits on this action would close a circle — offered but
+ * disabled; so are fresh links once the cap is reached */
+function depPicker(a, path, root) {
+  const myKey = pathKey(path);
+  const wrap = el("div", { class: "field dep-field" },
+    el("label", { text: "Depends on" }));
+  const listEl = el("div", {
+    class: "dep-picker", role: "group", "aria-label": "Dependencies",
+  });
+  const others = flattenActions(root).filter((c) => c.key !== myKey);
+  const capped = (a.depends_on || []).length >= ACTION_DEPS_MAX;
+  for (const cand of others) {
+    const cycles = depClosure(root, cand.a.depends_on).has(myKey);
+    const checked = (a.depends_on || []).includes(cand.key);
+    const box = el("input", { type: "checkbox", "data-dep": cand.key });
+    box.checked = checked;
+    if (cycles || (capped && !checked)) {
+      box.disabled = true;
+      box.title = cycles
+        ? "would close a circle: it already needs this action"
+        : `at most ${ACTION_DEPS_MAX} dependencies`;
+    }
+    listEl.append(el("label", { class: "dep-cand" },
+      box,
+      el("span", { class: "mono", text: cand.key }),
+      el("span", {
+        class: "dep-cand-title",
+        text: cand.a.title.trim() || "(untitled)",
+      })));
+  }
+  if (!others.length)
+    listEl.append(el("p", {
+      class: "muted dep-none",
+      text: "No other actions yet — add some first.",
+    }));
+  wrap.append(listEl);
+  return wrap;
+}
+
+function actionEditor(a, path, root) {
   const wrap = el("div", { class: "action-editor" });
   const tf = el("div", { class: "field" },
     el("label", { text: "Title" }),
@@ -2014,7 +2240,21 @@ function actionEditor(a) {
     el("label", { text: "Description" }),
     el("textarea", { "data-af": "description", rows: "3", spellcheck: "false" }),
     el("span", { class: "field-error err-desc" }));
-  wrap.append(tf, df);
+  /* ticking links, unticking unlinks — the row's chips and blocked
+   * styling refresh in place so the editor keeps the focus */
+  const dp = depPicker(a, path, root);
+  dp.addEventListener("change", (e) => {
+    const box = e.target;
+    if (box.type !== "checkbox" || !box.dataset.dep) return;
+    const deps = a.depends_on || (a.depends_on = []);
+    const at = deps.indexOf(box.dataset.dep);
+    if (box.checked && at < 0) deps.push(box.dataset.dep);
+    else if (!box.checked && at >= 0) deps.splice(at, 1);
+    const row = box.closest(".action");
+    if (row) refreshRowDeps(row, a, root);
+    scheduleTaskSave();
+  });
+  wrap.append(tf, df, dp);
   tf.querySelector("input").value = a.title;
   df.querySelector("textarea").value = a.description;
   return wrap;
@@ -2064,6 +2304,7 @@ actionListEl.addEventListener("click", (e) => {
       if (!list) return;
       const key = pathKey(path);
       list.splice(path[path.length - 1], 1);
+      remapDeps(currentTask(), path); // links follow the shifted paths
       if (editingPath &&
           (pathKey(editingPath) === key ||
            pathKey(editingPath).startsWith(key + ".")))
@@ -2071,6 +2312,20 @@ actionListEl.addEventListener("click", (e) => {
       renderActions();
       renderTaskList(); // the row's action count changed
       scheduleTaskSave();
+    }
+    return;
+  }
+  /* a dependency chip: jump to the action it names and flash it */
+  const chip = e.target.closest(".dep-chip");
+  if (chip) {
+    const target =
+      actionListEl.querySelector(`.action[data-path="${chip.dataset.dep}"]`);
+    if (target) {
+      target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      target.classList.remove("dep-flash");
+      void target.offsetWidth; /* restart the flash animation */
+      target.classList.add("dep-flash");
+      setTimeout(() => target.classList.remove("dep-flash"), 1400);
     }
     return;
   }

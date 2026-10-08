@@ -11,7 +11,13 @@
  * fixed depth limit (a recursion-depth cap protects the parser);
  * each carries a title, a description, a state and a type — where
  * it sits in the refinement loop (observe, analyze, find_root_
- * cause, act, validate, improve).
+ * cause, act, validate, improve) — and dependency links: the tree
+ * paths of the actions that must be completed before it can be
+ * performed. Dependencies must resolve to another action of the
+ * same task and stay acyclic; a completed dependency is satisfied,
+ * any other state keeps the dependent action blocked (the UI keeps
+ * blocked actions unperformable; the store only keeps the
+ * references honest).
  *
  * Same contract as projects.c/agents.c: lenient load (broken entries
  * are skipped, their directories stay on disk), strict validated
@@ -40,6 +46,9 @@
 #define ACTION_DESC_MAX  4096
 #define ACTION_DEPTH_MAX 64  /* nesting cap: protects the recursive
                               * parser, far past anything sensible */
+#define ACTION_DEPS_MAX      16  /* dependency links per action */
+#define ACTION_DEP_PATH_MAX  128 /* bytes per dependency path
+                                  * ("0.2.1" — dot-separated indexes) */
 
 typedef enum {
     ACTION_ACT = 0,             /* "act" — the default */
@@ -65,6 +74,14 @@ typedef struct action {
     char description[ACTION_DESC_MAX];
     int type;                     /* action_type_t */
     int state;                    /* action_state_t */
+    /* the actions that must be completed before this one can be
+     * performed, as tree paths into the same task ("0.2") — the
+     * same paths the UI rows and the planner's tree listings
+     * carry. Path references shift with edits, so every structural
+     * change rewrites them (the client) or drops the stale ones
+     * (the lenient loader) */
+    char depends_on[ACTION_DEPS_MAX][ACTION_DEP_PATH_MAX];
+    int dep_count;
     struct action *first_child;   /* sub-actions */
     struct action *next_sibling;  /* rest of this list */
 } action_t;
@@ -135,5 +152,15 @@ size_t task_count_actions(const task_t *t);
  * -1 when the name is not one of them */
 int action_type_from_name(const char *name);
 const char *action_type_name(int type);
+
+/* the action a tree path names — dot-separated indexes from the
+ * root, like "0" or "2.1", the same paths the UI rows and the
+ * planner's tree listings carry — or NULL when it names nothing */
+action_t *actions_resolve(action_t *actions, const char *path);
+
+/* is `path` a well-formed dependency reference (see
+ * actions_resolve)? Shared by the store's parser and the
+ * planner's add_action */
+int action_dep_path_ok(const char *path);
 
 #endif

@@ -302,6 +302,78 @@ body.app {
   border-radius: 6px;
 }
 .action-editor textarea { width: 100%; resize: vertical; }
+
+/* dependency links: "needs" chips under the row. Unmet chips warn,
+ * met ones fade; a row with unmet links is blocked — its title
+ * dims and the state select locks until they complete */
+.action-needs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem;
+  margin: 0 .45rem .2rem;
+}
+.needs-label {
+  font-size: var(--size-secondary);
+  color: var(--fg-secondary);
+}
+.dep-chip {
+  font-family: var(--font-secondary);
+  font-size: var(--size-secondary);
+  line-height: 1.4;
+  padding: 0 .45rem;
+  border-radius: 999px;
+  border: 1px solid var(--bg-tertiary);
+  background: var(--bg-secondary);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+.dep-chip:hover { background: var(--bg-tertiary); }
+.dep-chip.unmet { border-color: var(--warning); color: var(--warning); }
+.dep-chip.met { text-decoration: line-through; opacity: .7; }
+.action[data-blocked="true"] > .action-row .action-title {
+  color: var(--fg-secondary);
+}
+.action[data-blocked="true"] > .action-row .action-state:disabled {
+  cursor: not-allowed;
+}
+@keyframes dep-flash {
+  from { outline-color: var(--accent); }
+  to { outline-color: transparent; }
+}
+.action.dep-flash > .action-row {
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  animation: dep-flash 1.2s ease-out;
+}
+
+/* the editor's dependency picker: one checkbox row per candidate */
+.dep-picker {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  max-height: 11rem;
+  overflow-y: auto;
+  padding-right: .2rem;
+}
+.dep-cand {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: var(--size-secondary);
+  cursor: pointer;
+}
+.dep-cand .mono { color: var(--fg-secondary); flex: none; }
+.dep-cand-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dep-cand:has(input:disabled) { opacity: .55; cursor: default; }
+.dep-none { margin: 0; }
+
 .pane.blocked .task-top,
 .pane.blocked .actions-top,
 .pane.blocked .task-split,
@@ -650,6 +722,12 @@ body.app {
   width: 100%;
   min-height: 2.6rem;
   margin-top: .3rem;
+}
+.ctx-spec { margin-top: .3rem; }
+.ctx-spec input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .92em;
 }
 .editor-actions { display: flex; gap: .7rem; margin-top: 1.2rem; }
 #editor-status { min-height: 1.2em; margin: .2rem 0 0; }

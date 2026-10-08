@@ -373,7 +373,9 @@ echo "== 6f. typed context items (projects + tasks) and action types =="
 PIDX=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary "
  [{\"dir\":\"$CFG/alpha\",\"context\":[
    {\"type\":\"risk\",\"text\":\"server room floods\",\"updated\":123,\"id\":\"P9\"},
-   {\"text\":\"two lines\nof fact\"}]}]" "$B/api/projects" | python3 -c '
+   {\"text\":\"two lines\nof fact\"},
+   {\"type\":\"resource\",\"spec\":\"https://example.com/spec.md\",\"text\":\"the project spec\"},
+   {\"text\":\"explicit empty spec\",\"spec\":\"\"}]}]" "$B/api/projects" | python3 -c '
 import json, sys, time
 d = json.load(sys.stdin)
 c = d[0]["context"]
@@ -383,6 +385,14 @@ assert c[1]["id"] == "P2", c                         # sequential ids
 assert "type" not in c[1], c                       # fact default omitted
 assert c[1]["text"] == "two lines\nof fact", c     # newlines allowed
 assert abs(c[1]["updated"] - time.time()) < 60, c  # missing -> now
+assert "spec" not in c[1], c                       # no spec on plain items
+r = c[2]                                           # a resource round-trips
+assert r["id"] == "P3" and r["type"] == "resource", r
+assert r["spec"] == "https://example.com/spec.md", r
+assert r["text"] == "the project spec", r
+assert abs(r["updated"] - time.time()) < 60, r
+e = c[3]                       # an explicit "" spec is the default: kept, omitted
+assert e["id"] == "P4" and "type" not in e and "spec" not in e, e
 print(d[0]["id"])') || fail "PUT /api/projects did not keep the context items"
 [ -n "$PIDX" ] || fail "projects: no id in the context PUT response"
 grep -q '"context"' "$CFG/projects.json" || fail "context items not persisted to projects.json"
@@ -390,24 +400,31 @@ grep -q '"context"' "$CFG/projects.json" || fail "context items not persisted to
 CIDX=$(curl -s -X PUT -H "Content-Type: application/json" --data-binary "
  [{\"project\":\"$PIDX\",\"title\":\"ctx\",\"context\":[
    {\"type\":\"rule\",\"text\":\"no deploys on fridays\"},
+   {\"type\":\"resource\",\"spec\":\"README.md\",\"text\":\"the readme\"},
    {\"text\":\"a plain fact\"}],
    \"actions\":[
      {\"title\":\"watch logs\",\"type\":\"observe\",\"state\":\"in_progress\"},
-     {\"title\":\"fix it\",\"children\":[
+     {\"title\":\"fix it\",\"depends_on\":[\"0\"],\"children\":[
        {\"title\":\"prove the fix\",\"type\":\"validate\"}]}]}]" "$B/api/tasks" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 c = d[0]["context"]
 assert c[0]["id"] == "T1" and c[0]["type"] == "rule", c  # T ids in tasks
 assert c[0]["text"] == "no deploys on fridays", c
-assert "type" not in c[1] and c[1]["id"] == "T2" and "updated" in c[1], c
+assert c[1]["id"] == "T2" and c[1]["type"] == "resource", c  # task resource
+assert c[1]["spec"] == "README.md" and c[1]["text"] == "the readme", c
+assert "type" not in c[2] and c[2]["id"] == "T3" and "updated" in c[2], c
 a = d[0]["actions"]
 assert a[0]["type"] == "observe" and a[0]["state"] == "in_progress", a
 assert "type" not in a[1] and "state" not in a[1], a          # act/pending defaults
 assert a[1]["children"][0]["type"] == "validate", a
+assert "depends_on" not in a[0], a                    # nothing links from the first
+assert a[1]["depends_on"] == ["0"], a                 # the link round-trips
 print(d[0]["id"])')
 grep -q '"no deploys on fridays"' "$CFG/tasks/$CIDX/task.json" || fail "task context not persisted"
+grep -q '"README.md"' "$CFG/tasks/$CIDX/task.json" || fail "task resource spec not persisted"
 grep -q '"observe"' "$CFG/tasks/$CIDX/task.json" || fail "action type not persisted"
+grep -q '"depends_on"' "$CFG/tasks/$CIDX/task.json" || fail "action dependencies not persisted"
 # validation: every context field and the action type are strict
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"type\":\"bogus\",\"text\":\"x\"}]}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: bad context type: expected 422, got $code"
@@ -421,6 +438,15 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/al
 [ "$code" = 422 ] || fail "projects: bad context updated: expected 422, got $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"x\",\"created\":1}]}]" "$B/api/projects")
 [ "$code" = 422 ] || fail "projects: retired context key created: expected 422, got $code"
+# the resource spec: required on a resource, single-line, nothing on others
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"type\":\"resource\",\"text\":\"x\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: resource without spec: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"type\":\"resource\",\"spec\":\"\",\"text\":\"x\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: resource with empty spec: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"type\":\"resource\",\"spec\":\"a\nb\",\"text\":\"x\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: spec with a newline: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"x\",\"spec\":\"README.md\"}]}]" "$B/api/projects")
+[ "$code" = 422 ] || fail "projects: spec on a non-resource: expected 422, got $code"
 CTXMANY=$(mktemp)
 python3 - "$CFG/alpha" >"$CTXMANY" <<'EOF'
 import json, sys
@@ -436,8 +462,58 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PI
 [ "$code" = 422 ] || fail "tasks: bad action type: expected 422, got $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"x\",\"type\":7}]}]" "$B/api/tasks")
 [ "$code" = 422 ] || fail "tasks: non-string action type: expected 422, got $code"
+# dependency links are strict: dangling, self, circular, malformed, duplicate
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"2\"]}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: dangling dependency: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"a\",\"depends_on\":[\"0\"]}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: self dependency: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"a\",\"depends_on\":[\"1\"]},{\"title\":\"b\",\"depends_on\":[\"0\"]}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: circular dependency: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"0.\"]}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: malformed dependency path: expected 422, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "[{\"project\":\"$PIDX\",\"actions\":[{\"title\":\"a\"},{\"title\":\"b\",\"depends_on\":[\"0\",\"0\"]}]}]" "$B/api/tasks")
+[ "$code" = 422 ] || fail "tasks: duplicate dependency: expected 422, got $code"
 curl -s "$B/api/projects" | grep -q '"server room floods"' || fail "rejected PUTs must not change stored context"
 curl -s "$B/api/tasks" | grep -q '"no deploys on fridays"' || fail "rejected PUTs must not change stored task context"
+# the lenient loader repairs a dependency file another writer left
+# behind: self and dangling links drop, a circle breaks at its
+# first edge — the task stays usable. The store is read at startup,
+# so the server restarts over the crafted file
+REPID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+mkdir -p "$CFG/tasks/$REPID"
+cat >"$CFG/tasks/$REPID/task.json" <<EOF
+{"id":"$REPID","project":"$PIDX","title":"repaired","actions":[
+ {"title":"a","depends_on":["0"]},
+ {"title":"b","depends_on":["5"]},
+ {"title":"c","depends_on":["3"]},
+ {"title":"d","depends_on":["2"]}]}
+EOF
+kill "$PID" 2>/dev/null
+wait "$PID" 2>/dev/null
+"$BIN" -p "$PORT" -c "$CFG" -l "$LLMKIT" >>"$LOG" 2>&1 &
+PID=$!
+for _ in $(seq 1 50); do
+    curl -s -o /dev/null "$B/" 2>/dev/null && break
+    sleep 0.1
+done
+curl -s "$B/api/tasks" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = [x for x in d if x["title"] == "repaired"][0]
+a = t["actions"]
+assert "depends_on" not in a[0], a    # the self reference dropped
+assert "depends_on" not in a[1], a    # the dangling reference dropped
+assert "depends_on" not in a[2], a    # the c->d->c circle broke at c
+assert a[3]["depends_on"] == ["2"], a # the edge outside it stays
+' || fail "tasks: lenient load did not repair dependency links"
+# an accepted explicit "" spec is the default: stored, omitted on the wire
+curl -s -X PUT -H "Content-Type: application/json" --data-binary "
+ [{\"dir\":\"$CFG/alpha\",\"context\":[{\"text\":\"plain\",\"spec\":\"\"}]}]}" "$B/api/projects" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+c = d[0]["context"]
+assert len(c) == 1 and c[0]["text"] == "plain", c
+assert "spec" not in c[0], c' || fail "projects: explicit empty spec should be accepted and omitted"
 
 echo "== 6g. mcp endpoint (flower's own tools) =="
 rpc() { curl -s -X POST -H "Content-Type: application/json" --data "$1" "$B/mcp"; }

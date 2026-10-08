@@ -1,4 +1,5 @@
 Add one typed context item to the scanned project.
-Type is one of fact, pattern, risk, success_metric, failure_sign, evaluation_method, rule.
+Type is one of fact, pattern, risk, success_metric, failure_sign, evaluation_method, rule, resource.
 Text is a short, self-contained statement.
+A resource item points at a file or url that is core project definition: spec carries the url or filesystem path (project-relative paths are fine), text says what it is. Spec is required on a resource and rejected on every other type.
 Only add items worth keeping - an item that is already on the project is rejected.

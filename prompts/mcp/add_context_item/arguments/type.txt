@@ -1,1 +1,1 @@
-fact, pattern, risk, success_metric, failure_sign, evaluation_method or rule (default fact)
+fact, pattern, risk, success_metric, failure_sign, evaluation_method, rule or resource (default fact)
