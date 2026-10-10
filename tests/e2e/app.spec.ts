@@ -84,11 +84,41 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   await expect(page.locator(".emoji-picker")).toHaveCount(0); // closed on pick
   await expect(page.locator("#editor-status")).toContainText("saved");
 
-  // project details: free-text notes below the identity fields
+  // project details: free-text notes below the identity fields. Each
+  // one reads as text under a dotted rule and only becomes a textarea
+  // when opened — Escape puts the stored value back, clicking away
+  // (or Cmd/Ctrl+Enter) commits through the usual autosave
   const details = page.locator(".editor-details");
   await expect(details.locator("> h3")).toHaveText("Project details");
-  await page.fill('[data-f="description"]', "A home for bees\nand their honey.");
-  await page.fill('[data-f="stakeholders"]', "the queen");
+  const note = details.locator('.field-note:has([data-f="description"])');
+  await expect(note.locator("textarea")).toBeHidden();
+  await expect(note.locator(".note-view")).toHaveClass(/is-empty/);
+  await expect(note.locator(".note-view")).toHaveText("What this project is about");
+
+  await note.locator(".note-view").click();
+  await expect(note.locator("textarea")).toBeVisible();
+  await note.locator("textarea").fill("A home for bees\nand their honey.");
+  await note.locator("textarea").press("Escape"); // …reverts
+  await expect(note.locator("textarea")).toBeHidden();
+  await expect(note.locator(".note-view")).toHaveClass(/is-empty/);
+
+  await note.locator(".note-view").click();
+  await note.locator("textarea").fill("A home for bees\nand their honey.");
+  await note.locator("textarea").press("ControlOrMeta+Enter"); // …commits
+  await expect(note.locator("textarea")).toBeHidden();
+  await expect(note.locator(".note-view"))
+    .toHaveText("A home for bees\nand their honey.");
+  await expect(note.locator(".note-view")).not.toHaveClass(/is-empty/);
+
+  // the keyboard path: focus the note, Enter opens its box
+  const stake = details.locator('.field-note:has([data-f="stakeholders"])');
+  await stake.locator(".note-view").focus();
+  await stake.locator(".note-view").press("Enter");
+  await expect(stake.locator("textarea")).toBeVisible();
+  await stake.locator("textarea").fill("the queen");
+  await page.locator("#eh-title").click(); // clicking away commits
+  await expect(stake.locator(".note-view")).toHaveText("the queen");
+
   await expect
     .poll(async () => {
       const [p] = await (await request.get("/api/projects")).json();
@@ -100,9 +130,23 @@ test("projects: create, live edits, persistence, two-step delete", async ({ page
   const ctx = page.locator(".ctx-editor");
   await expect(ctx.locator("h3")).toHaveText("Context");
   await expect(ctx).toContainText("No context items yet");
+  // a context item's text is a note too: adding one opens its box, and
+  // it collapses back to text once the value is committed
   await ctx.locator('[data-action="ctx-add"]').click();
-  await ctx.locator('[data-cf="text"]').fill("The server room floods in spring");
-  await ctx.locator(".ctx-type").selectOption("risk");
+  const item1 = ctx.locator(".ctx-item").first();
+  await expect(item1.locator("textarea")).toBeVisible(); // opened by ctx-add
+  await expect(item1.locator(".note-view"))
+    .toHaveText("Something known to be true"); // the fact hint
+  await item1.locator('[data-cf="text"]').fill("The server room floods in spring");
+  await ctx.locator(".ctx-type").selectOption("risk"); // its own control: stays open
+  await expect(item1.locator("textarea")).toBeVisible();
+  await page.locator("#eh-title").click(); // away: commits and collapses
+  await expect(item1.locator("textarea")).toBeHidden();
+  await expect(item1.locator(".note-view"))
+    .toHaveText("The server room floods in spring");
+  await item1.locator(".note-view").click(); // and it opens again
+  await expect(item1.locator("textarea")).toBeVisible();
+  await page.locator("#eh-title").click();
   await ctx.locator('[data-action="ctx-add"]').click();
   await ctx.locator(".ctx-item").nth(1).locator('[data-cf="text"]')
     .fill("Two developers, one queen");

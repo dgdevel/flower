@@ -69,6 +69,18 @@ const ctxSpecOk = (v) =>
 const nowSec = () => Math.floor(Date.now() / 1000);
 const newContextItem = () => ({ type: "fact", text: "", spec: "", updated: nowSec() });
 
+/* Context items carry a fixed-width, all-digits update stamp
+ * (MM-DD HH:MM, local): the locale string it replaces —
+ * "10/10/2026, 8:46:13 AM" — was wider than the column it had and
+ * ellipsized to nothing. The readable form stays on the title. */
+const stampFull = (sec) => new Date(sec * 1000).toLocaleString();
+function fmtStamp(sec) {
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /* the wire omits defaults ("fact", and the server always fills
  * updated); the client state is always complete. The server's
  * generated ids are dropped — rows derive them from position */
@@ -195,15 +207,173 @@ function emojiField() {
     el("span", { class: "field-error", id: "err-emoji" }));
 }
 
-/* a free-text details field: multi-line textarea */
+/* a free-text details field. It reads as text under a dotted rule and
+ * turns into the textarea when clicked (Esc puts the stored value
+ * back, clicking away keeps what is typed). The textarea stays the
+ * [data-f] control, so the autosave path is the usual one — the
+ * column is just not a wall of form boxes any more. */
 function detailField(name, label, hint) {
   const ta = el("textarea", {
-    id: `f-${name}`, "data-f": name, rows: "3", placeholder: hint,
+    id: `f-${name}`, "data-f": name, rows: "3", placeholder: hint, hidden: true,
   });
-  return el("div", { class: "field" },
+  const view = el("span", {
+    class: "note-view", "data-note": name, role: "button", tabindex: "0",
+    title: "Click to edit",
+  });
+  return el("div", { class: "field field-note" },
     el("label", { for: `f-${name}`, text: label }),
+    view,
     ta,
     el("span", { class: "field-error", id: `err-${name}` }));
+}
+
+const noteBox = (node) => (node ? node.closest(".field-note, .ctx-item") : null);
+const noteArea = (box) => (box ? box.querySelector("textarea") : null);
+const noteView = (box) => (box ? box.querySelector(".note-view") : null);
+
+/* an empty note shows its hint in the dim tone — the field says what
+ * it wants without holding a control open */
+function paintNote(box, value, label) {
+  const view = noteView(box);
+  const ta = noteArea(box);
+  if (!view || !ta) return;
+  const text = (value || "").trim();
+  const shown = text || ta.placeholder;
+  const empty = !text;
+  /* never rewrite what is already on screen: a repaint on every scan
+   * poll would drop a text selection made over the note */
+  if (view.textContent === shown && view.classList.contains("is-empty") === empty)
+    return;
+  const named = label || (box.querySelector("label") || {}).textContent || "Note";
+  view.textContent = shown;
+  view.classList.toggle("is-empty", empty);
+  /* the note is readable text first: keep it as the accessible name
+   * (role=button alone would announce "button" and swallow it) */
+  view.setAttribute("aria-label", `${named}: ${shown}`);
+}
+
+/* the textarea follows its content instead of clipping it: the scan
+ * writes four or five lines into these, which a fixed box hid */
+function growNote(ta) {
+  ta.style.height = "auto";
+  const max = 22 * parseFloat(getComputedStyle(ta).lineHeight || 22);
+  ta.style.height = Math.min(ta.scrollHeight + 2, max) + "px";
+}
+
+function openNote(box) {
+  const ta = noteArea(box);
+  const view = noteView(box);
+  if (!ta || !view || !ta.hidden) return;
+  ta.dataset.was = ta.value; // for Esc
+  box.classList.add("note-open");
+  view.hidden = true;
+  ta.hidden = false;
+  growNote(ta); // after unhiding: a hidden box measures zero
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+/* Esc: put the stored value back, through the owner of the box — a
+ * project detail field, or one typed context item of whichever pane
+ * the box lives in (both panes hold the same item shape). An item that
+ * was added empty in the first place has nothing to put back, so it
+ * goes away again; typing into it may already have reached the server,
+ * and dropping it saves the list without it, leaving both sides in
+ * step. Returns true when the box went with the item. */
+function revertNote(box, ta) {
+  const was = ta.dataset.was;
+  const inTask = !!box.closest(".task-details");
+  const owner = inTask ? currentTask() : draft || projects[selected];
+  const save = inTask ? scheduleTaskSave
+                      : () => { if (!draft) scheduleSave(); };
+  if (!owner) return false;
+  if (ta.dataset.ci == null) {           // a project detail field
+    ta.value = was;
+    owner[ta.dataset.f] = was;
+    save();
+    return false;
+  }
+  const list = owner.context || [];
+  if (!was) {                            // never held anything: cancel it
+    list.splice(+ta.dataset.ci, 1);
+    (inTask ? renderTaskPane : renderEditor)();
+    save();
+    return true;
+  }
+  const c = list[+ta.dataset.ci];
+  if (!c) return false;
+  ta.value = was;
+  c.text = was;
+  showCtxErrors(c, box);
+  touchCtxItem(c, box);
+  save();
+  return false;
+}
+
+/* `revert` is the Esc path. A project field the validators refuse
+ * stays open: the error belongs on the control that has to be fixed. */
+function closeNote(box, revert) {
+  const ta = noteArea(box);
+  const view = noteView(box);
+  if (!ta || !view || ta.hidden) return;
+  const isField = box.classList.contains("field-note");
+  if (revert && ta.dataset.was !== undefined) {
+    if (revertNote(box, ta)) return; // the item and its box are gone
+  }
+  if (isField) {
+    const msg = validators[ta.dataset.f](ta.value);
+    if (msg !== true && msg) { editorValid(); return; } // leave it open
+  }
+  delete ta.dataset.was;
+  box.classList.remove("note-open");
+  ta.style.height = "";
+  ta.hidden = true;
+  view.hidden = false;
+  paintNote(box, ta.value);
+  if (isField) editorValid();
+}
+
+/* The hooks a container wires into its own listeners (the project
+ * editor and the task details both hold notes). Each answers "was this
+ * event the note pattern's?" so the container can stop there. */
+function noteOpenAt(e) {
+  const view = e.target.closest(".note-view");
+  if (!view) return false;
+  openNote(noteBox(view));
+  return true;
+}
+function noteKeyAt(e) {
+  if (e.target.closest(".note-view")) {
+    if (e.key !== "Enter" && e.key !== " ") return false;
+    e.preventDefault(); // Space would scroll the pane
+    openNote(noteBox(e.target));
+    return true;
+  }
+  const box = e.target.tagName === "TEXTAREA" ? noteBox(e.target) : null;
+  if (!box) return false;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeNote(box, true);
+    return true;
+  }
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    e.target.blur();
+    return true;
+  }
+  return false;
+}
+function noteBlurAt(e) {
+  if (e.target.tagName !== "TEXTAREA") return;
+  const box = noteBox(e.target);
+  if (!box) return;
+  /* moving between one item's own controls (its type select, its spec)
+   * is not leaving the note */
+  if (e.relatedTarget && box.contains(e.relatedTarget)) return;
+  closeNote(box, false);
+}
+function noteGrowAt(e) {
+  if (e.target.tagName === "TEXTAREA" && noteBox(e.target)) growNote(e.target);
 }
 
 /* ---------- context editor (shared by project + task) ---------- */
@@ -236,7 +406,10 @@ function showCtxErrors(c, row) {
 function touchCtxItem(c, row) {
   c.updated = nowSec();
   const ts = row && row.querySelector(".ts");
-  if (ts) ts.textContent = new Date(c.updated * 1000).toLocaleString();
+  if (ts) {
+    ts.textContent = fmtStamp(c.updated);
+    ts.title = stampFull(c.updated);
+  }
 }
 
 function ctxItemRow(c, i, prefix) {
@@ -263,10 +436,14 @@ function ctxItemRow(c, i, prefix) {
   specWrap.hidden = type !== "resource";
   const ta = el("textarea", {
     "data-ci": i, "data-cf": "text", rows: "2", spellcheck: "false",
-    placeholder: CTX_PLACEHOLDER[type],
+    placeholder: CTX_PLACEHOLDER[type], hidden: true,
   });
   ta.value = c.text || "";
-  return el("div", { class: "ctx-item", "data-ci": i },
+  const view = el("span", {
+    class: "note-view", role: "button", tabindex: "0",
+    "data-note": i, title: "Click to edit",
+  });
+  const item = el("div", { class: "ctx-item", "data-ci": i },
     el("div", { class: "ctx-row" },
       el("span", {
         class: "ctx-id mono", title: "Context item id",
@@ -274,8 +451,8 @@ function ctxItemRow(c, i, prefix) {
       }),
       sel,
       el("span", {
-        class: "ts", title: "Updated",
-        text: c.updated ? new Date(c.updated * 1000).toLocaleString() : "",
+        class: "ts", title: c.updated ? stampFull(c.updated) : "Updated",
+        text: c.updated ? fmtStamp(c.updated) : "",
       }),
       el("button", {
         type: "button", class: "icon-btn", "data-action": "ctx-del",
@@ -283,8 +460,12 @@ function ctxItemRow(c, i, prefix) {
         "aria-label": "Remove context item", text: "✕",
       })),
     specWrap,
+    view,
     ta,
     el("span", { class: "field-error err-text" }));
+  paintNote(item, c.text, `${prefix}${i + 1} ` +
+    (type === "fact" ? "fact" : type));
+  return item;
 }
 
 /* the typed context list of a project or task: an add button on
@@ -774,6 +955,8 @@ function onCtxTypeChange(e, owner, save) {
   const row = e.target.closest(".ctx-item");
   const ta = row?.querySelector('[data-cf="text"]');
   if (ta) ta.placeholder = CTX_PLACEHOLDER[c.type] || "";
+  if (row) paintNote(row, c.text, `${row.querySelector(".ctx-id")?.textContent} ` +
+    (c.type === "fact" ? "fact" : c.type));
   /* the spec lives only on resource items: show the field for them,
    * and drop the value when the item stops being one (the server
    * rejects a spec on any other type) */
@@ -797,7 +980,7 @@ function onCtxClick(e, container, owner, save, rerender) {
     if (list.length >= CTX_MAX) return true;
     list.push(newContextItem());
     rerender();
-    container.querySelector(".ctx-item:last-of-type [data-cf='text']")?.focus();
+    openNote(container.querySelector(".ctx-item:last-of-type"));
   } else {
     t.context?.splice(+btn.dataset.ci, 1);
     rerender();
@@ -965,6 +1148,9 @@ function syncEditorFields() {
     } else if (control.value !== v) {
       control.value = v;
     }
+    /* a collapsed note shows its value as text (its textarea is the
+     * control, hidden until the note is opened) */
+    if (control.hidden) paintNote(noteBox(control), v);
   }
   updateEditorHead();
 }
@@ -1269,6 +1455,8 @@ editorEl.addEventListener("input", (e) => {
     updateScanUI();
     return;
   }
+  /* an open note grows with what is typed into it */
+  noteGrowAt(e);
   /* context item text: live state + live errors, autosave below */
   if (onCtxInput(e, () => draft || projects[selected],
                  () => { if (!draft) scheduleSave(); }))
@@ -1297,6 +1485,7 @@ editorEl.addEventListener("change", (e) => {
 });
 
 editorEl.addEventListener("click", (e) => {
+  if (noteOpenAt(e)) return; // a note: the text gives way to its box
   if (onCtxClick(e, editorEl, () => draft || projects[selected],
                  () => { if (!draft) scheduleSave(); }, renderEditor))
     return;
@@ -1310,6 +1499,12 @@ editorEl.addEventListener("click", (e) => {
   else if (act === "pick-emoji") openPicker(btn);
   else if (act === "scan-start") startScan();
 });
+
+/* the notes' keyboard half: Enter/Space opens the focused one, Escape
+ * puts the stored value back, Cmd/Ctrl+Enter commits without reaching
+ * for the mouse. focusout is the ordinary commit. */
+editorEl.addEventListener("keydown", (e) => noteKeyAt(e));
+editorEl.addEventListener("focusout", (e) => noteBlurAt(e));
 
 // close the picker when clicking elsewhere or pressing Escape
 document.addEventListener("click", (e) => {
@@ -1611,8 +1806,12 @@ function normActions(list) {
  * replace that field and silently swallow the next keystrokes */
 const editingIn = (root) => {
   const ae = document.activeElement;
-  return !!ae && root.contains(ae) &&
-    ["INPUT", "TEXTAREA", "SELECT"].includes(ae.tagName);
+  if (ae && root.contains(ae) &&
+      ["INPUT", "TEXTAREA", "SELECT"].includes(ae.tagName))
+    return true;
+  /* a note whose box is open but not focused is still mid-edit (the
+   * pointer may be between two clicks, focus already moved on) */
+  return !!root.querySelector(".note-open");
 };
 
 function scheduleTaskSave() {
@@ -1866,6 +2065,7 @@ document.getElementById("plan-prompt").addEventListener("keydown", (e) => {
 });
 
 taskDetailsEl.addEventListener("input", (e) => {
+  noteGrowAt(e); // an open note grows with what is typed into it
   /* context item text: live state + live errors, autosave below */
   if (onCtxInput(e, currentTask, scheduleTaskSave)) return;
   const name = e.target.dataset.f;
@@ -1889,6 +2089,7 @@ taskDetailsEl.addEventListener("change", (e) => {
 });
 
 taskDetailsEl.addEventListener("click", (e) => {
+  if (noteOpenAt(e)) return; // a context item's note
   if (onCtxClick(e, taskDetailsEl, currentTask, scheduleTaskSave,
                  renderTaskPane))
     return;
@@ -1901,6 +2102,8 @@ taskDetailsEl.addEventListener("click", (e) => {
     renderTaskPane();
   }
 });
+taskDetailsEl.addEventListener("keydown", (e) => noteKeyAt(e));
+taskDetailsEl.addEventListener("focusout", (e) => noteBlurAt(e));
 
 /* ---------- actions (column three) ----------
  *
@@ -2090,6 +2293,15 @@ function depChips(a, root) {
 const stateLabel = (s) =>
   (ACTION_STATES.find(([v]) => v === s) || [, s])[1];
 
+/* the state mark: one character in the row's leading gutter. Shape and
+ * position carry the state (the row is also stamped with data-state
+ * for the color cue), so the five states stay apart in a monochrome
+ * screenshot and when the theme is retinted. */
+const STATE_MARKS = {
+  pending: "·", in_progress: "▸", completed: "✓", partial: "~", failed: "!",
+};
+const stateMark = (s) => STATE_MARKS[s] || "·";
+
 /* the "needs" chips under a row: unmet chips carry the warning
  * color, met ones fade; clicking a chip jumps to its action */
 function needsRow(chips) {
@@ -2142,6 +2354,10 @@ function actionRow(a, path, root) {
     "data-type": type, "data-blocked": String(blocked),
   },
     el("div", { class: "action-row" },
+      el("span", {
+        class: "action-state-mark", text: stateMark(state),
+        title: stateLabel(state), "aria-hidden": "true",
+      }),
       tsel,
       sel,
       el("span", {

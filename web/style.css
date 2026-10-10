@@ -1,23 +1,50 @@
 /* flower — themeable styles.
- * The :root values below mirror the server-side theme defaults
- * (src/theme.c) and act as fallback until theme.js applies the
- * user's theme.json on top of them. */
+ *
+ * The first twelve values in :root mirror the server-side theme
+ * defaults (src/theme.c) and act as fallback until theme.js applies
+ * the user's theme.json on top of them. Those twelve are the whole
+ * configurable surface; everything below the "derived" line is what
+ * the components actually ask for, computed from them — so a stored
+ * color is named once and every surface that depends on it follows.
+ *
+ * The type system is four roles and no more:
+ *   prose + controls   primary face, --step-base
+ *   labels + meta      secondary face, --step-small
+ *   machine text       --font-mono (ids, paths, json, timestamps,
+ *                      the conversation transcript), tabular numerals
+ *   titles             primary face, --step-base or larger, weight
+ *                      600 + primary color — never tracked-out caps
+ */
 
 :root {
   color-scheme: dark light;
-  --bg-primary: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary: #21262d;
-  --fg-primary: #e6edf3;
-  --fg-secondary: #8b949e;
-  --font-primary: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* -- the twelve stored keys (mirrors src/theme.c) */
+  --bg-primary: #0a0d10;
+  --bg-secondary: #151e23;
+  --bg-tertiary: #1f2a30;
+  --fg-primary: #dbe3e7;
+  --fg-secondary: #8a9aa4;
+  --font-primary: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
   --size-primary: 16px;
-  --font-secondary: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-secondary: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
   --size-secondary: 13px;
-  --accent: #58a6ff;
-  --success: #3fb950;
-  --warning: #d29922;
-  --radius: 8px;
+  --accent: #46b8c4;
+  --success: #5fae74;
+  --warning: #d3a13f;
+  /* -- derived: surfaces */
+  --line: color-mix(in srgb, var(--fg-secondary) 22%, transparent);
+  --hover: color-mix(in srgb, var(--fg-secondary) 12%, transparent);
+  --sel: color-mix(in srgb, var(--accent) 16%, transparent);
+  --radius: 4px;
+  /* -- derived: the size steps (theme sizes are the inputs) */
+  --step-micro: calc(var(--size-secondary) * .92);
+  --step-small: var(--size-secondary);
+  --step-base: var(--size-primary);
+  --step-head: calc(var(--size-primary) * 1.06);
+  --step-title: calc(var(--size-primary) * 1.31);
+  /* -- derived: the machine-text role (not a theme key: "this is
+   * data" is a decision the markup makes, not a preference) */
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
 * { box-sizing: border-box; }
@@ -28,55 +55,72 @@ body {
   background: var(--bg-primary);
   color: var(--fg-primary);
   font-family: var(--font-primary);
-  font-size: var(--size-primary);
-  line-height: 1.55;
+  font-size: var(--step-base);
+  line-height: 1.5;
 }
 
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
-h1 { font-size: 1.5rem; margin: 0 0 .6rem; }
-h2 { font-size: 1.1rem; margin: 2.2rem 0 .8rem; }
-h3 { font-size: 1rem; margin: 0 0 .5rem; }
+/* buttons do not inherit type by default — without this the + and ✕
+ * icon buttons, the chips and the emoji grid render in the UA's
+ * generic sans instead of the app's own face */
+button { font: inherit; }
+
+code { font-family: var(--font-mono); font-size: .92em; }
+h1 { font-size: var(--step-title); font-weight: 600; margin: 0 0 .6rem; }
+h2 { font-size: var(--step-head); font-weight: 600; margin: 2rem 0 .7rem; }
+h3 { font-size: var(--step-base); font-weight: 600; margin: 0 0 .5rem; }
 
 /* header nav */
 .top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: .7rem 1.4rem;
+  gap: .8rem;
+  flex-wrap: wrap;
+  padding: .6rem 1.4rem;
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--bg-tertiary);
+  border-bottom: 1px solid var(--line);
 }
+/* the wordmark: FLOW + ER, the project's own wordplay — a workflow for
+ * project management that grows into a flower. The two halves and the
+ * tracking are the identity; their colors come from the theme
+ * (--accent and --success, both of them user settings), so retinting
+ * the app retints the logo. Trade-off worth knowing: those two keys
+ * also mean "interactive" and "done" elsewhere in the UI. */
 .brand {
-  font-weight: 700;
-  letter-spacing: .3em;
-  text-transform: uppercase;
-  font-size: .8rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: .22em;
+  font-size: var(--step-micro);
   color: var(--fg-primary);
 }
 .brand-fl { color: var(--accent); }
 .brand-er { color: var(--success); }
-.brand:hover { text-decoration: none; }
-.top nav a { margin-left: 1.2rem; font-size: .9rem; }
+.brand:hover { text-decoration: none; filter: brightness(1.18); }
+.top nav { display: flex; gap: 1.1rem; flex-wrap: wrap; }
+.top nav a { font-size: var(--step-small); }
 
 main.page { max-width: 900px; margin: 0 auto; padding: 1.6rem 1.2rem 6rem; }
 
-.muted { color: var(--fg-secondary); font-size: var(--size-secondary); }
+.muted { color: var(--fg-secondary); font-size: var(--step-small); }
+/* a stamp is data: machine-text role, tabular so columns of them line
+ * up wherever they are stacked */
 .ts {
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-small);
+  font-variant-numeric: tabular-nums;
   color: var(--fg-secondary);
 }
 
 /* cards / panels */
 .card {
   background: var(--bg-secondary);
-  border: 1px solid var(--bg-tertiary);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1.1rem 1.3rem;
+  padding: 1rem 1.1rem;
 }
 .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .row-wrap { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; }
@@ -94,7 +138,7 @@ body.app {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(19rem, 24rem) 1fr 1fr;
+  grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr) minmax(0, 1.25fr);
 }
 .pane {
   min-width: 0;
@@ -104,19 +148,22 @@ body.app {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.pane + .pane { border-left: 1px solid var(--bg-tertiary); }
+.pane + .pane { border-left: 1px solid var(--line); }
 
 .pane-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: .6rem;
-  padding: .9rem 1.1rem .7rem;
+  padding: .8rem 1.1rem .55rem;
 }
-.pane-head h1, .pane-head h2 { margin: 0; font-size: .95rem; }
+/* the column's own name is the largest thing in its column — the
+ * body text under it is --step-base, the titles are step-base too */
+.pane-head h1, .pane-head h2 { margin: 0; font-size: var(--step-head); }
 .pane-hint {
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-small);
+  font-variant-numeric: tabular-nums;
   color: var(--fg-secondary);
 }
 .pane-body { padding: 0 1.1rem 1.6rem; }
@@ -132,7 +179,7 @@ body.app {
   margin: 0;
   color: var(--fg-secondary);
   font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   line-height: 1.6;
 }
 
@@ -158,7 +205,7 @@ body.app {
   overscroll-behavior: contain;
   padding: 0 1.1rem .8rem;
 }
-.task-split { flex: none; border-top: 1px solid var(--bg-tertiary); }
+.task-split { flex: none; border-top: 1px solid var(--line); }
 .task-details {
   flex: 1 1 50%;
   min-height: 0;
@@ -176,13 +223,13 @@ body.app {
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--fg-primary);
   font: inherit;
   cursor: pointer;
 }
-.task-row:hover { background: var(--bg-tertiary); }
-.task-row.active { background: var(--bg-tertiary); box-shadow: inset 3px 0 0 var(--accent); }
+.task-row:hover { background: var(--hover); }
+.task-row.active { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
 .task-row.missing .name::after { content: " ⚠"; color: var(--warning); }
 .task-row .task-main { flex: 1; min-width: 0; }
 .task-row .name {
@@ -197,66 +244,85 @@ body.app {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--fg-secondary);
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
+  font-variant-numeric: tabular-nums;
 }
 .task-none { margin: .6rem 0 0; }
 .task-empty { margin: auto; text-align: center; max-width: 30ch; padding: 1rem; }
+/* the selected task's own name: a title, not a label — primary color,
+ * sentence case, one step of weight above the fields it heads */
 .task-h3 {
-  margin: 0 0 .8rem;
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
-  color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: .12em;
+  margin: 0 0 .7rem;
+  font-size: var(--step-base);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--fg-primary);
 }
-.task-kv { margin: 0 0 .9rem; overflow-wrap: anywhere; }
+.task-kv { margin: 0 0 .85rem; overflow-wrap: anywhere; color: var(--fg-secondary); }
 .task-kv label { display: block; margin-bottom: .25rem; }
 .task-warn { color: var(--warning); }
 #task-status { min-height: 1.2em; margin: .2rem 0 0; }
 .task-actions { display: flex; gap: .7rem; margin-top: 1rem; }
 .task-details .field select { width: 100%; }
 
-/* column three: the selected task's action tree */
-.action-list { padding-top: .2rem; }
-.action { margin: .15rem 0; }
+/* column three: the selected task's action tree. The list scrolls
+ * itself: without this a long tree (an open editor, deep nesting)
+ * grew past its 60% share of the pane and painted over the reserved
+ * half below it, with no way to scroll to the rest. */
+.action-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .2rem 1.1rem .8rem;
+}
+.action { margin: .1rem 0; }
 .action-row {
   display: flex;
   align-items: center;
   gap: .45rem;
-  padding: .28rem .45rem;
-  border-radius: 6px;
+  padding: .3rem .5rem;
+  border-radius: var(--radius);
 }
-.action-row:hover { background: var(--bg-tertiary); }
-.action[data-state="in_progress"] > .action-row {
-  box-shadow: inset 3px 0 0 var(--accent);
+.action-row:hover { background: var(--hover); }
+/* state reads from shape and position first: one character in a fixed
+ * leading gutter, so the five states stay apart without color — and
+ * selection keeps the left rule to itself */
+.action-state-mark {
+  flex: none;
+  width: 1.05rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--step-small);
+  line-height: 1;
+  color: var(--fg-secondary);
 }
-.action[data-state="partial"] > .action-row,
-.action[data-state="failed"] > .action-row {
-  box-shadow: inset 3px 0 0 var(--warning);
-}
+.action[data-state="in_progress"] > .action-row .action-state-mark { color: var(--accent); }
+.action[data-state="failed"] > .action-row .action-state-mark { color: var(--warning); }
+.action[data-state="completed"] > .action-row .action-state-mark { color: var(--success); }
 .action[data-state="completed"] > .action-row .action-title {
   color: var(--fg-secondary);
   text-decoration: line-through;
 }
 .action-state {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 9rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   padding: .14rem .3rem;
 }
 .action-type {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 7.5rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   padding: .14rem .3rem;
 }
 .action-title {
-  flex: 1;
+  flex: 1 1 8rem;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 .action-title:empty::before { content: "(untitled)"; color: var(--fg-secondary); }
@@ -269,19 +335,26 @@ body.app {
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--fg-secondary);
   cursor: pointer;
-  font-size: .95rem;
+  font-size: var(--step-base);
   line-height: 1;
 }
-.icon-btn:hover { background: var(--bg-secondary); color: var(--accent); }
+.icon-btn:hover { background: var(--hover); color: var(--accent); }
+/* two permanent buttons per row is chrome the row does not need on a
+ * pointer device; they stay in the layout and in the tab order */
+@media (hover: hover) {
+  .action-row .icon-btn { opacity: 0; transition: opacity .12s ease; }
+  .action-row:hover .icon-btn,
+  .action-row:focus-within .icon-btn { opacity: 1; }
+}
 /* the task rows' delete ✕: widens to fit the armed "sure?" label */
 .task-del {
   width: auto;
   min-width: 1.55rem;
   padding: 0 .35rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
 }
 .task-del.armed {
   background: var(--warning);
@@ -292,14 +365,14 @@ body.app {
 .action-children {
   margin-left: 1.15rem;
   padding-left: .55rem;
-  border-left: 1px solid var(--bg-tertiary);
+  border-left: 1px solid var(--line);
 }
 .action-editor {
   margin: .2rem 0 .35rem 1.15rem;
-  padding: .6rem .7rem .2rem;
+  padding: .55rem .65rem .2rem;
   background: var(--bg-secondary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 .action-editor textarea { width: 100%; resize: vertical; }
 
@@ -314,21 +387,22 @@ body.app {
   margin: 0 .45rem .2rem;
 }
 .needs-label {
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   color: var(--fg-secondary);
 }
 .dep-chip {
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
+  font-variant-numeric: tabular-nums;
   line-height: 1.4;
   padding: 0 .45rem;
   border-radius: 999px;
-  border: 1px solid var(--bg-tertiary);
+  border: 1px solid var(--line);
   background: var(--bg-secondary);
   color: var(--fg-secondary);
   cursor: pointer;
 }
-.dep-chip:hover { background: var(--bg-tertiary); }
+.dep-chip:hover { background: var(--hover); }
 .dep-chip.unmet { border-color: var(--warning); color: var(--warning); }
 .dep-chip.met { text-decoration: line-through; opacity: .7; }
 .action[data-blocked="true"] > .action-row .action-title {
@@ -357,15 +431,25 @@ body.app {
   padding-right: .2rem;
 }
 .dep-cand {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 2.4rem 1fr;
   align-items: center;
   gap: .5rem;
-  font-size: var(--size-secondary);
+  padding: .18rem .3rem;
+  border-radius: var(--radius);
+  font-size: var(--step-small);
   cursor: pointer;
 }
-.dep-cand .mono { color: var(--fg-secondary); flex: none; }
+.dep-cand:hover { background: var(--hover); }
+/* the path column: right-aligned tabular, with a rule after it, so
+ * "2.0" reads as an address and never as part of the title */
+.dep-cand .mono {
+  color: var(--fg-secondary);
+  text-align: right;
+  padding-right: .45rem;
+  border-right: 1px solid var(--line);
+}
 .dep-cand-title {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -379,7 +463,10 @@ body.app {
 .pane.blocked .task-split,
 .pane.blocked .task-details { display: none; }
 
-/* a vanished working directory blocks the reserved columns */
+/* a vanished working directory blocks the reserved columns. The
+ * explanation is printed once, in the first blocked column: side by
+ * side the same sentence twice is noise, not emphasis. */
+.pane[data-pane="2"] .pane-warn .warn-text { display: none; }
 .pane-warn { display: none; }
 .pane.blocked .placeholder-body { display: none; }
 .pane.blocked .pane-warn {
@@ -398,7 +485,7 @@ body.app {
   margin: 0;
   color: var(--fg-secondary);
   font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   line-height: 1.6;
 }
 
@@ -407,13 +494,13 @@ body.app {
 .rail {
   flex: none;
   width: 4.3rem;
-  padding: .7rem .55rem;
+  padding: .7rem .6rem;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: .6rem;
   background: var(--bg-secondary);
-  border-right: 1px solid var(--bg-tertiary);
+  border-right: 1px solid var(--line);
   overflow-y: auto;
 }
 .chip {
@@ -424,7 +511,7 @@ body.app {
   border: none;
   border-radius: var(--radius);
   background: var(--pc, var(--bg-tertiary));
-  font-size: 1.35rem;
+  font-size: calc(var(--size-primary) * 1.35);
   line-height: 1;
   padding: 0;
   cursor: pointer;
@@ -442,7 +529,8 @@ body.app {
   height: 1.05rem;
   display: grid;
   place-items: center;
-  font-size: .62rem;
+  font-size: var(--step-micro);
+  font-weight: 700;
   line-height: 1;
   color: var(--warning);
   background: var(--bg-secondary);
@@ -457,7 +545,7 @@ body.app {
   background: transparent;
   border: 1px dashed var(--fg-secondary);
   color: var(--fg-secondary);
-  font-size: 1.5rem;
+  font-size: var(--step-title);
   font-weight: 300;
 }
 .chip-add:hover { border-color: var(--accent); color: var(--accent); }
@@ -475,41 +563,68 @@ body.app {
   gap: .55rem;
   padding: .2rem 0 .9rem;
 }
-.editor-head .mark { font-size: 1.5rem; line-height: 1; }
-.editor-head h2 { margin: 0; font-size: 1.05rem; }
+.editor-head .mark { font-size: var(--step-title); line-height: 1; }
+.editor-head h2 { margin: 0; font-size: var(--step-base); }
 .field { margin: 0 0 .9rem; }
 .field label { display: block; margin-bottom: .3rem; }
 .field input[type="text"] { width: 100%; }
 .field-row { display: flex; gap: 1rem; align-items: flex-start; }
 .field-row .field { flex: 1; }
 .field-row .field:first-child { flex: 0 0 auto; }
+/* the machine-text role. 0.92em is the usual optical correction:
+ * monospace glyphs carry more ink than the sans at the same nominal
+ * size, so mono set to the size around it looks a step larger */
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: .92em;
+  font-variant-numeric: tabular-nums;
 }
 
-/* project details: free-text notes below the identity fields */
+/* project details: free-text notes below the identity fields. They
+ * read as text under a dotted rule and only become a textarea when
+ * clicked, so the column is not a wall of form boxes. */
 .editor-details {
   margin-top: 1.1rem;
   padding-top: .9rem;
-  border-top: 1px solid var(--bg-tertiary);
+  border-top: 1px solid var(--line);
 }
+.field-note { margin-bottom: .75rem; }
+.note-view {
+  display: block;
+  min-height: 1.5em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg-primary);
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--fg-secondary) 38%, transparent);
+  text-underline-offset: .28em;
+  cursor: text;
+}
+.note-view:hover { text-decoration-color: var(--accent); }
+/* nothing written yet: the field's hint stands in, in the dim tone */
+.note-view.is-empty { color: var(--fg-secondary); }
+/* the section label: dim, small, sentence case, and always under a
+ * rule — the caps and tracking are gone, the division does the work */
 .editor-details h3,
 .ctx-editor h3 {
-  margin: 0 0 .8rem;
+  margin: 0 0 .7rem;
   font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
+  font-weight: 600;
   color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: .12em;
 }
+/* a note's box opens exactly as tall as the text it replaces and grows
+ * as text is typed: the column does not jump when a note is opened or
+ * committed, which also means the click that closes one note and opens
+ * another cannot land on the wrong element */
 .editor-details textarea { min-height: 3.2rem; }
+.field-note textarea { min-height: 0; }
 
 /* project scan agent (bottom of the project details) */
 .scan-editor {
   margin-top: 1rem;
   padding-top: .9rem;
-  border-top: 1px dashed var(--bg-tertiary);
+  border-top: 1px dashed var(--line);
 }
 .scan-row { display: flex; gap: .6rem; align-items: center; }
 .scan-row select { flex: 1; min-width: 0; }
@@ -517,7 +632,7 @@ body.app {
 .scan-open {
   display: inline-block;
   margin-top: .55rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   padding: .25rem .7rem;
 }
 /* the optional follow-up box: fills it and the button becomes
@@ -533,11 +648,11 @@ body.app {
 .scan-history {
   margin-top: .9rem;
   padding-top: .7rem;
-  border-top: 1px solid var(--bg-tertiary);
+  border-top: 1px solid var(--line);
 }
 .scan-history h4 {
   margin: 0 0 .35rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   font-weight: 600;
   color: var(--fg-secondary);
 }
@@ -561,14 +676,14 @@ body.app {
 .scan-run-when {
   display: block;
   color: var(--fg-secondary);
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
 }
 
 /* the Conversations page (web/conversations.html) */
 .conv-list {
   margin-top: 1.4rem;
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   background: var(--bg-secondary);
 }
 .conv-row {
@@ -578,7 +693,7 @@ body.app {
   width: 100%;
   padding: .55rem .8rem;
   border: none;
-  border-bottom: 1px solid var(--bg-tertiary);
+  border-bottom: 1px solid var(--line);
   background: transparent;
   border-radius: 0;
   color: var(--fg-primary);
@@ -587,8 +702,8 @@ body.app {
   cursor: pointer;
 }
 .conv-row:last-child { border-bottom: none; }
-.conv-row:hover { background: var(--bg-tertiary); }
-.conv-row.active { background: var(--bg-tertiary); box-shadow: inset 3px 0 0 var(--accent); }
+.conv-row:hover { background: var(--hover); }
+.conv-row.active { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
 .conv-row.sub { padding-left: 2rem; }
 .conv-row .conv-main { flex: 1; min-width: 0; }
 .conv-row .name {
@@ -603,8 +718,9 @@ body.app {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--fg-secondary);
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
+  font-variant-numeric: tabular-nums;
 }
 .conv-row .badge { flex: none; }
 .conv-when { flex: none; }
@@ -613,7 +729,7 @@ body.app {
 
 .conv-detail {
   margin-top: 1.6rem;
-  border-top: 1px solid var(--bg-tertiary);
+  border-top: 1px solid var(--line);
   padding-top: 1.1rem;
 }
 .conv-head {
@@ -644,11 +760,11 @@ body.app {
   width: auto;
   height: auto;
   padding: .18rem .65rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   font-family: var(--font-secondary);
   line-height: 1.4;
   white-space: nowrap;
-  border: 1px solid var(--bg-tertiary);
+  border: 1px solid var(--line);
   border-radius: 999px;
 }
 .chip-kid:hover { border-color: var(--accent); }
@@ -659,13 +775,16 @@ body.app {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: .35rem;
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  gap: .3rem;
+  font-family: var(--font-mono);
+  font-size: var(--step-small);
+  line-height: 1.5;
 }
 .conv-entry { display: flex; gap: .5rem; align-items: baseline; }
-.conv-mark { flex: none; color: var(--fg-secondary); }
-.conv-time { flex: none; }
+.conv-mark { flex: none; width: 1rem; text-align: center; color: var(--fg-secondary); }
+/* the timestamp and the mark get fixed columns so the transcript
+ * reads as a table of events instead of a ragged paragraph */
+.conv-time { flex: none; width: 5.4rem; font-variant-numeric: tabular-nums; }
 .conv-tool { flex: none; color: var(--accent); }
 .conv-text {
   min-width: 0;
@@ -675,7 +794,9 @@ body.app {
 }
 .k-user .conv-text,
 .k-response .conv-text { color: var(--fg-primary); }
-.k-thinking .conv-text { font-style: italic; }
+/* thinking is the bulkiest text in the app: dim, but not slanted —
+ * the mono face has no true italic and the browser fakes one */
+.k-thinking .conv-text { color: var(--fg-secondary); }
 .k-error .conv-mark,
 .k-error .conv-text,
 .is-err .conv-text { color: var(--warning); }
@@ -684,7 +805,7 @@ body.app {
 .ctx-editor {
   margin-top: 1.1rem;
   padding-top: .9rem;
-  border-top: 1px solid var(--bg-tertiary);
+  border-top: 1px solid var(--line);
 }
 .ctx-head {
   display: flex;
@@ -694,35 +815,47 @@ body.app {
 }
 .ctx-head h3 { margin: 0; }
 .ctx-add {
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   padding: .25rem .7rem;
 }
 .ctx-none { margin: .15rem 0 .4rem; }
 .ctx-item { margin: .4rem 0 .7rem; }
 .ctx-row { display: flex; align-items: center; gap: .45rem; }
 .ctx-type {
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 11rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   padding: .14rem .3rem;
 }
 .ctx-row .ctx-id {
   flex: none;
+  width: 1.5rem;
+  font-size: var(--step-micro);
   color: var(--fg-secondary);
 }
+/* the update stamp keeps its own narrow column and the compact
+ * MM-DD HH:MM form (the full locale string is the title): as a flex
+ * child with the select, the ✕ and the id it used to be squeezed to
+ * an ellipsis and showed nothing at all */
 .ctx-row .ts {
-  flex: 1;
-  min-width: 0;
+  flex: none;
+  width: 5.4rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
+  font-size: var(--step-micro);
 }
+/* a context item's text follows the same rule as a project note: the
+ * text is what you read, the box is what you open, and the box is
+ * never taller than the text it replaced */
 .ctx-item textarea {
   width: 100%;
-  min-height: 2.6rem;
+  min-height: 0;
   margin-top: .3rem;
 }
+.ctx-item .note-view { margin-top: .3rem; }
 .ctx-spec { margin-top: .3rem; }
 .ctx-spec input {
   width: 100%;
@@ -749,7 +882,7 @@ body.app {
   border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--warning) 12%, var(--bg-secondary));
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   line-height: 1.5;
 }
 .editor-warn strong { color: var(--warning); }
@@ -761,9 +894,9 @@ body.app {
   min-height: 2.45rem;
   background: var(--bg-primary);
   color: var(--fg-primary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
-  font-size: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: calc(var(--size-primary) * 1.25);
   line-height: 1;
   cursor: pointer;
 }
@@ -776,9 +909,9 @@ body.app {
   flex-direction: column;
   max-height: min(24rem, 62vh);
   background: var(--bg-secondary);
-  border: 1px solid var(--bg-tertiary);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 .6rem 1.8rem color-mix(in srgb, rgb(0 0 0) 35%, transparent);
+  box-shadow: 0 .6rem 1.8rem color-mix(in srgb, var(--bg-primary) 78%, transparent);
 }
 .emoji-search {
   margin: .55rem .55rem .35rem;
@@ -787,7 +920,7 @@ body.app {
 .emoji-list { overflow-y: auto; padding: 0 .55rem .6rem; }
 .emoji-group h3 {
   margin: .65rem 0 .3rem;
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
   color: var(--fg-secondary);
 }
 .emoji-grid {
@@ -796,17 +929,17 @@ body.app {
   gap: .12rem;
 }
 .emoji-opt {
-  font-size: 1.35rem;
+  font-size: calc(var(--size-primary) * 1.35);
   line-height: 1.3;
   padding: .28rem 0;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
-.emoji-opt:hover { background: var(--bg-tertiary); }
+.emoji-opt:hover { background: var(--hover); }
 .emoji-opt[aria-current="true"] {
-  background: var(--bg-tertiary);
+  background: var(--sel);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 .emoji-none { padding: 1rem .5rem; text-align: center; }
@@ -830,7 +963,10 @@ body.app {
 /* column navigation (mobile deck) */
 .deck-dots { display: none; }
 
-@media (max-width: 879px) {
+/* three columns stop working around 1200px, not at 880: below that the
+ * action column squeezed the row's title to a stub, while the carousel
+ * the design already has for phones handles the width fine */
+@media (max-width: 1199px) {
   .deck {
     display: flex;
     overflow-x: auto;
@@ -845,7 +981,7 @@ body.app {
     gap: .5rem;
     padding: .5rem;
     background: var(--bg-secondary);
-    border-top: 1px solid var(--bg-tertiary);
+    border-top: 1px solid var(--line);
   }
   .dot {
     width: .5rem;
@@ -853,11 +989,21 @@ body.app {
     padding: 0;
     border: none;
     border-radius: 999px;
-    background: var(--bg-tertiary);
+    background: var(--line);
     cursor: pointer;
     transition: width .18s ease, background-color .18s ease;
   }
   .dot[aria-current="true"] { width: 1.3rem; background: var(--accent); }
+  /* one column of 390px cannot hold a title between two selects and
+   * two buttons: the title takes the line, the controls follow. It
+   * used to ellipsize at about fourteen characters. */
+  .action-row { flex-wrap: wrap; row-gap: .3rem; padding: .4rem .5rem; }
+  .action-state-mark { order: 1; }
+  /* the title takes the line but keeps the row's text column, so it
+   * still lines up with the controls under it */
+  .action-title { order: 0; flex: 1 1 100%; margin-left: 1.5rem; }
+  .action-type, .action-state { order: 1; flex: 1 1 6rem; max-width: none; }
+  .action-row .icon-btn { order: 2; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -873,20 +1019,23 @@ body.app {
    (.btn and friends) — the UA default loses to any author display */
 [hidden] { display: none !important; }
 
+/* only the accent buttons carry a fill: a screen full of gray slabs
+ * reads as one flat mass, so the quiet button is a hairline and the
+ * text button has no chrome at all */
 .btn {
   display: inline-block;
-  border: 1px solid var(--bg-tertiary);
-  background: var(--bg-tertiary);
+  border: 1px solid var(--line);
+  background: transparent;
   color: var(--fg-primary);
-  border-radius: 6px;
-  padding: .5rem 1rem;
+  border-radius: var(--radius);
+  padding: .45rem .85rem;
   font: inherit;
-  font-size: .9rem;
+  font-size: var(--step-small);
   cursor: pointer;
   text-decoration: none;
 }
-.btn:hover { filter: brightness(1.18); text-decoration: none; }
-.btn-ghost { background: transparent; }
+.btn:hover { background: var(--hover); text-decoration: none; }
+.btn-ghost { border-color: transparent; }
 .btn-accent { background: var(--accent); border-color: var(--accent); color: var(--bg-primary); font-weight: 600; }
 .btn-success { background: var(--success); border-color: var(--success); color: var(--bg-primary); font-weight: 600; }
 .btn-warning { background: var(--warning); border-color: var(--warning); color: var(--bg-primary); font-weight: 600; }
@@ -894,61 +1043,66 @@ body.app {
 /* badges */
 .badge {
   display: inline-block;
-  padding: .12rem .65rem;
+  padding: .1rem .5rem;
   border-radius: 999px;
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
+  font-variant-numeric: tabular-nums;
   border: 1px solid transparent;
 }
-.badge-accent  { color: var(--accent);  background: color-mix(in srgb, var(--accent) 18%, transparent);  border-color: var(--accent); }
-.badge-success { color: var(--success); background: color-mix(in srgb, var(--success) 18%, transparent); border-color: var(--success); }
-.badge-warning { color: var(--warning); background: color-mix(in srgb, var(--warning) 18%, transparent); border-color: var(--warning); }
-.badge-muted   { color: var(--fg-secondary); background: var(--bg-tertiary); border-color: var(--bg-tertiary); }
+.badge-accent  { color: var(--accent);  background: color-mix(in srgb, var(--accent) 14%, transparent);  border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.badge-success { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+.badge-warning { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.badge-muted   { color: var(--fg-secondary); background: transparent; border-color: var(--line); }
 
 /* rows / lists */
-.rows { border: 1px solid var(--bg-tertiary); border-radius: var(--radius); overflow: hidden; }
-.row { display: flex; justify-content: space-between; gap: 1rem; padding: .65rem 1rem; }
-.row:hover { background: var(--bg-tertiary); }
-.row.active { background: var(--bg-tertiary); box-shadow: inset 3px 0 0 var(--accent); }
-.row + .row { border-top: 1px solid var(--bg-tertiary); }
+.rows { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.row { display: flex; justify-content: space-between; gap: 1rem; padding: .55rem .9rem; }
+.row:hover { background: var(--hover); }
+.row.active { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.row + .row { border-top: 1px solid var(--line); }
 
 /* forms */
-label { display: block; font-family: var(--font-secondary); font-size: var(--size-secondary); color: var(--fg-secondary); }
-.check { display: inline-flex; align-items: center; gap: .4rem; font-size: .95rem; color: var(--fg-primary); }
+label { display: block; font-family: var(--font-secondary); font-size: var(--step-small); font-weight: 400; color: var(--fg-secondary); }
+.check { display: inline-flex; align-items: center; gap: .4rem; font-size: var(--step-small); color: var(--fg-primary); }
 input[type="text"], input[type="search"], select, textarea {
   background: var(--bg-primary);
   color: var(--fg-primary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
-  padding: .45rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: .4rem .55rem;
   font: inherit;
+}
+/* a placeholder is a hint, not a value: the UA would paint it in the
+ * text color at 54% and an empty field would read as a filled one */
+input::placeholder, textarea::placeholder {
+  color: color-mix(in srgb, var(--fg-secondary) 78%, transparent);
 }
 input[type="color"] {
   background: var(--bg-primary);
   color: var(--fg-primary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   padding: 2px;
   width: 3.2rem;
   height: 2.1rem;
   cursor: pointer;
 }
 input.invalid { border-color: var(--warning); }
-.field-error { font-family: var(--font-secondary); font-size: var(--size-secondary); color: var(--warning); }
+.field-error { font-family: var(--font-secondary); font-size: var(--step-small); color: var(--warning); }
 
 /* config page */
-.cfg-group { margin: 0 0 1.4rem; border: 1px solid var(--bg-tertiary); }
+.cfg-group { margin: 0 0 1.4rem; border: 1px solid var(--line); }
 .cfg-group legend {
   padding: 0 .5rem;
   font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-size: var(--step-small);
+  font-weight: 600;
   color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: .12em;
 }
 .cfg-row { display: flex; align-items: center; gap: 1rem; margin: .7rem 0; }
 .cfg-row > label { flex: 0 0 22rem; margin: 0; }
-.cfg-row > input[type="text"] { flex: 1 1 auto; max-width: 30rem; }
+.cfg-row > input[type="text"] { flex: 1 1 auto; max-width: 34rem; }
 
 .save-bar {
   display: flex;
@@ -958,11 +1112,11 @@ input.invalid { border-color: var(--warning); }
   padding: .8rem 0;
   margin-bottom: 2.2rem;
   background: var(--bg-primary);
-  border-top: 1px solid var(--bg-tertiary);
+  border-top: 1px solid var(--line);
 }
 .save-actions { display: flex; gap: .7rem; }
-.cfg-ok { color: var(--success); font-size: var(--size-secondary); }
-.cfg-warn { color: var(--warning); font-size: var(--size-secondary); }
+.cfg-ok { color: var(--success); font-size: var(--step-small); }
+.cfg-warn { color: var(--warning); font-size: var(--step-small); }
 
 /* config page: llm endpoints (master list / editor) */
 main.page h2 { margin-top: 0; }
@@ -980,11 +1134,11 @@ main.page h2 { margin-top: 0; }
   margin-bottom: .35rem;
   padding: .45rem .7rem;
   background: transparent;
-  border: 1px dashed var(--bg-tertiary);
-  border-radius: 6px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
   color: var(--fg-secondary);
   font: inherit;
-  font-size: .9rem;
+  font-size: var(--step-small);
   cursor: pointer;
 }
 .entity-add:hover { border-color: var(--accent); color: var(--accent); }
@@ -996,13 +1150,13 @@ main.page h2 { margin-top: 0; }
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--fg-primary);
   font: inherit;
   cursor: pointer;
 }
-.entity-row:hover { background: var(--bg-tertiary); }
-.entity-row.active { background: var(--bg-tertiary); box-shadow: inset 3px 0 0 var(--accent); }
+.entity-row:hover { background: var(--hover); }
+.entity-row.active { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
 .entity-row .name {
   display: block;
   overflow: hidden;
@@ -1015,8 +1169,9 @@ main.page h2 { margin-top: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--fg-secondary);
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
+  font-variant-numeric: tabular-nums;
 }
 .entity-editor { padding: 1rem 1.2rem; }
 .entity-save {
@@ -1042,9 +1197,8 @@ details.opts summary {
   cursor: pointer;
   color: var(--fg-secondary);
   font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
-  text-transform: uppercase;
-  letter-spacing: .1em;
+  font-size: var(--step-small);
+  font-weight: 600;
 }
 details.opts summary:hover { color: var(--accent); }
 details.opts > .muted { margin: .5rem 0; }
@@ -1053,9 +1207,9 @@ details.opts > .muted { margin: .5rem 0; }
 textarea {
   background: var(--bg-primary);
   color: var(--fg-primary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 6px;
-  padding: .45rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: .4rem .55rem;
   font: inherit;
   resize: vertical;
 }
@@ -1070,8 +1224,8 @@ textarea {
 }
 
 /* palette swatches */
-.swatch { display: flex; align-items: center; gap: .7rem; font-size: var(--size-secondary); color: var(--fg-secondary); }
-.swatch .dot { width: 1.6rem; height: 1.6rem; border-radius: 50%; border: 1px solid var(--bg-tertiary); flex: none; }
+.swatch { display: flex; align-items: center; gap: .7rem; font-size: var(--step-small); color: var(--fg-secondary); }
+.swatch .dot { width: 1.6rem; height: 1.6rem; border-radius: 50%; border: 1px solid var(--line); flex: none; }
 
 @media (max-width: 640px) {
   .cfg-row { flex-direction: column; align-items: stretch; }
@@ -1095,9 +1249,9 @@ textarea {
   max-height: calc(100vh - 4rem);
   overflow-y: auto;
   background: var(--bg-secondary);
-  border: 1px solid var(--bg-tertiary);
-  border-radius: 10px;
-  padding: 1.2rem 1.4rem 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.2rem 1.2rem;
   box-shadow: 0 18px 48px color-mix(in srgb, var(--bg-primary) 55%, transparent);
 }
 .modal h3 { margin: 0 0 .4rem; }
@@ -1109,7 +1263,7 @@ textarea {
 .plan-prompt {
   display: block;
   width: 100%;
-  min-height: 7rem;
+  min-height: 6rem;
   resize: vertical;
 }
 .modal-actions {
@@ -1137,8 +1291,8 @@ textarea {
   border-radius: 999px;
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  font-family: var(--font-secondary);
-  font-size: var(--size-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--step-micro);
   white-space: nowrap;
 }
 .conv-reply { margin-top: .9rem; }

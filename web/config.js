@@ -13,8 +13,8 @@ const FIELDS = [
   { group: "Text", key: "text_secondary_color", kind: "color", label: "Secondary color — labels, timestamps" },
   { group: "Text", key: "text_secondary_font",  kind: "font",  label: "Secondary font family" },
   { group: "Text", key: "text_secondary_size",  kind: "size",  label: "Secondary size" },
-  { group: "Accents", key: "accent",  kind: "color", label: "Accent / interactive — links, focus, call to actions" },
-  { group: "Accents", key: "success", kind: "color", label: "Success / positive — buttons, badges" },
+  { group: "Accents", key: "accent",  kind: "color", label: "Accent / interactive — links, focus, the FLOW of the logo" },
+  { group: "Accents", key: "success", kind: "color", label: "Success / positive — buttons, badges, the ER of the logo" },
   { group: "Accents", key: "warning", kind: "color", label: "Warning / negative — buttons, badges" },
 ];
 

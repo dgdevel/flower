@@ -78,8 +78,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data '{"text_primary_size
 curl -s "$B/api/theme" | grep -q '"accent":"#ff00ff"' || fail "rejected PUT must not change the stored theme"
 
 echo "== 5. reset restores defaults =="
-curl -s -X POST "$B/api/theme/reset" | grep -q '"accent":"#58a6ff"' || fail "reset did not return defaults"
-curl -s "$B/api/theme" | grep -q '"accent":"#58a6ff"' || fail "defaults not persisted after reset"
+curl -s -X POST "$B/api/theme/reset" | grep -q '"accent":"#46b8c4"' || fail "reset did not return defaults"
+curl -s "$B/api/theme" | grep -q '"accent":"#46b8c4"' || fail "defaults not persisted after reset"
 
 echo "== 6. projects API =="
 curl -s "$B/api/projects" | grep -q '^\[\]$' || fail "GET /api/projects should start as []"

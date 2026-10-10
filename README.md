@@ -99,18 +99,18 @@ fall back to defaults), pretty-printed, written atomically (tmp + rename):
 
 ```json
 {
-  "background_primary":   "#0d1117",
-  "background_secondary": "#161b22",
-  "background_tertiary":  "#21262d",
-  "text_primary_color":   "#e6edf3",
-  "text_primary_font":    "system-ui, -apple-system, 'Segoe UI', sans-serif",
+  "background_primary":   "#0a0d10",
+  "background_secondary": "#151e23",
+  "background_tertiary":  "#1f2a30",
+  "text_primary_color":   "#dbe3e7",
+  "text_primary_font":    "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif",
   "text_primary_size":    "16px",
-  "text_secondary_color": "#8b949e",
-  "text_secondary_font":  "system-ui, -apple-system, 'Segoe UI', sans-serif",
+  "text_secondary_color": "#8a9aa4",
+  "text_secondary_font":  "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif",
   "text_secondary_size":  "13px",
-  "accent":   "#58a6ff",
-  "success":  "#3fb950",
-  "warning":  "#d29922"
+  "accent":   "#46b8c4",
+  "success":  "#5fae74",
+  "warning":  "#d3a13f"
 }
 ```
 
@@ -119,7 +119,12 @@ colors must be `#rrggbb`; sizes like `16px` (unit `px`, `rem`, `em`, `%`);
 fonts limited to ASCII letters, digits, spaces and `, - _ '` (keeps values
 injection-safe as CSS custom properties). The browser applies the theme as
 CSS custom properties (`--bg-primary`, `--fg-primary`, …) the moment it is
-saved — `web/style.css` carries the same defaults as fallback.
+saved — `web/style.css` carries the same defaults as fallback. Those
+twelve keys stay the only persisted settings: everything else the look
+needs (border, hover and selection colors, the monospace role, the size
+steps) is derived from them in `web/style.css:root` with `color-mix()`
+and `calc()`, so a theme edit moves the whole system and no new key has
+to be invented for it.
 
 `projects.json` — the user's project list (main screen, column one),
 same lenient/strict contract, one file per concern:
@@ -163,7 +168,13 @@ are valid UTF-8 without control characters (≤ 31 / 96 bytes), at most
 `scope`, `stakeholders`) are free multi-line text (≤ 4095 bytes each,
 valid UTF-8, no control characters but newlines), edited in column one
 under "Project details". They are optional, default to empty, and are
-the project context the llm side will draw on later.
+the project context the llm side will draw on later. In the UI each one
+reads as text under a dotted rule — the column is notes, not a wall of
+boxes — and turns into its textarea on click or Enter; Escape puts the
+stored value back, clicking away (or Cmd/Ctrl+Enter) commits through
+the same autosave as every other field. The textarea is the `[data-f]`
+control either way, so validation, the scan's live write-back and the
+save path are unchanged.
 
 The **context items** are the structured half of that context, shared
 with tasks (`src/context.c`): each item is a `type` — `fact`,
@@ -186,7 +197,15 @@ regenerated on every read (a delete renumbers the rest) and never
 persisted; a PUT may echo ids back, the server ignores them. They
 are edited as a list under "Context" in both the project editor
 and the task details, autosaved with the owning PUT; at most 64
-items per project/task.
+items per project/task. Like the project's detail fields, an item's
+text is shown as text under a dotted rule and opens into its
+textarea on click (Enter opens a focused one) — the id, the type
+select and the update stamp stay in the row above, and the `spec`
+input appears under it for `resource` items. Escape puts the stored
+text back; on an item that was added and never held anything it
+cancels the item instead (typing may already have reached the
+server, so the cancellation is saved too, leaving both sides in
+step).
 
 Working directories must **exist on disk**: PUT validates each `dir`
 with `stat()` (422 `directory does not exist` / `not a directory`).
@@ -854,6 +873,34 @@ served automatically with the right MIME type. Dotfiles are skipped.
 - **Theme as CSS custom properties**: server stores plain values, the
   browser applies them (`--bg-primary`, `--accent`, …). Instant preview
   is one `setProperty` call per field; no CSS re-generation server-side.
+- **A derived token layer between the theme and the components**: the
+  twelve stored keys are the inputs, not the vocabulary. `web/style.css`
+  derives what components actually ask for — `--line` (borders),
+  `--hover`, `--sel`, `--font-mono`, and size steps as `calc()` of
+  `--size-primary`/`--size-secondary` — with `color-mix()`, so a stored
+  color is used *once* and every dependent surface follows it. Two
+  consequences worth keeping: no component hardcodes a palette value or
+  a `px` font size, and changing "primary size" in the config page
+  actually resizes headings, because they are steps of it rather than
+  hand-picked `rem`s.
+- **Four typographic roles, not one font at five sizes**: prose and
+  controls use the primary face; labels and meta use the secondary face
+  at the secondary size; *machine text* (ids, paths, json, timestamps,
+  the whole conversation transcript) uses the monospace role, with
+  `font-variant-numeric: tabular-nums` wherever numbers stack in a
+  column; and a title is a real title (primary color, sentence case,
+  weight, size) rather than a tracked-out uppercase label. The mono role
+  is deliberately a CSS layer and not a thirteenth theme key: the
+  secondary font field exists for "different face for small text", while
+  "this is data, set it in mono" is a decision the markup makes.
+- **State by shape and position first, color second**: an action's five
+  states (`pending`, `in_progress`, `completed`, `partial`, `failed`)
+  each carry a one-character mark in a fixed leading gutter
+  (`· ▸ ✓ ~ !`) before any color is involved, so the states stay
+  distinguishable in a monochrome screenshot, for a color-blind reader,
+  and when the theme is retinted. Color is the second cue (accent =
+  running, warning = failed), which also keeps `--accent` meaning
+  "interactive" instead of doubling as a status.
 - **Lenient load, strict save**: a hand-edited theme.json with a bad
   value still boots (that field falls back to default), but the API and
   UI never let invalid data in. projects.json follows the same contract.

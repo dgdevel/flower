@@ -26,19 +26,23 @@ typedef struct {
 #define F(key, field, kind, def) \
     { key, offsetof(theme_t, field), kind, sizeof(((theme_t *)0)->field), def }
 
+/* These twelve are the whole theme. The look itself lives one layer
+ * further out, in the derived tokens web/style.css:root builds on top
+ * of them (--line, --hover, --sel, --font-mono, the size steps) — so
+ * keep the two files in step when either moves. */
 static const field_t fields[] = {
-    F("background_primary",   background_primary,   TF_COLOR, "#0d1117"),
-    F("background_secondary", background_secondary, TF_COLOR, "#161b22"),
-    F("background_tertiary",  background_tertiary,  TF_COLOR, "#21262d"),
-    F("text_primary_color",   text_primary_color,   TF_COLOR, "#e6edf3"),
-    F("text_primary_font",    text_primary_font,    TF_FONT,  "system-ui, -apple-system, 'Segoe UI', sans-serif"),
+    F("background_primary",   background_primary,   TF_COLOR, "#0a0d10"),
+    F("background_secondary", background_secondary, TF_COLOR, "#151e23"),
+    F("background_tertiary",  background_tertiary,  TF_COLOR, "#1f2a30"),
+    F("text_primary_color",   text_primary_color,   TF_COLOR, "#dbe3e7"),
+    F("text_primary_font",    text_primary_font,    TF_FONT,  "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif"),
     F("text_primary_size",    text_primary_size,    TF_SIZE,  "16px"),
-    F("text_secondary_color", text_secondary_color, TF_COLOR, "#8b949e"),
-    F("text_secondary_font",  text_secondary_font,  TF_FONT,  "system-ui, -apple-system, 'Segoe UI', sans-serif"),
+    F("text_secondary_color", text_secondary_color, TF_COLOR, "#8a9aa4"),
+    F("text_secondary_font",  text_secondary_font,  TF_FONT,  "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif"),
     F("text_secondary_size",  text_secondary_size,  TF_SIZE,  "13px"),
-    F("accent",               accent,               TF_COLOR, "#58a6ff"),
-    F("success",              success,              TF_COLOR, "#3fb950"),
-    F("warning",              warning,              TF_COLOR, "#d29922"),
+    F("accent",               accent,               TF_COLOR, "#46b8c4"),
+    F("success",              success,              TF_COLOR, "#5fae74"),
+    F("warning",              warning,              TF_COLOR, "#d3a13f"),
 };
 
 #undef F
