@@ -20,6 +20,8 @@ make
 
 `make` writes the binary `flower` into the project root. `make check` runs the file io round trip tests (no network, no LLM). `make clean` removes the build files.
 
+More targets: `make asan` builds the whole binary with address+undefined sanitizer into `build/asan/flower-asan`; `make fuzz` builds the libFuzzer harnesses in `fuzz/` (clang required, run e.g. `./fuzz/fuzz_json`); `make check-vg` runs the test suite under valgrind (log in `test/valgrind.log`).
+
 ## Commands
 
 Run `./flower` with no command to see the usage text. Exit codes: 0 ok, 1 runtime error, 2 usage, 3 no project found, 4 no current task.

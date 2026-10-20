@@ -233,4 +233,16 @@ int task_cmd(int argc, char **argv);
 /* `flower action ...`. Returns process exit code. */
 int action_cmd(int argc, char **argv);
 
+/* ---- config.c: truncation-tolerant formatting ----
+ *
+ * like snprintf but truncation is allowed (snprintf always nul-
+ * terminates; -Wformat-truncation is deliberately silenced inside).
+ * format string checked like printf at every call site. */
+char *flower_snprintf(char *buf, size_t size, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+char *flower_path_join(char *buf, size_t size, const char *dir,
+                       const char *name);
+char *flower_path_join3(char *buf, size_t size, const char *dir,
+                        const char *name, const char *ext);
+
 #endif

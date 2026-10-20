@@ -568,7 +568,7 @@ static int proposal_apply(const struct flower_proposal *pr, int auto_yes)
         return -1;
     if (pr->target[0] == '/' || strstr(pr->target, ".."))
         return -1; /* refuse absolute or escaping targets */
-    snprintf(path, sizeof(path), "%s/%s", base, pr->target);
+    flower_path_join(path, sizeof path, base, pr->target);
 
     printf("\nproposed write: %s\n", pr->target);
     printf("---- begin ----\n%s\n---- end ----\n", pr->content);

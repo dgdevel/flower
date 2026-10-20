@@ -34,7 +34,7 @@ static int task_ptr_read(const struct flower_project *p, char *id, size_t size)
     char *text = NULL;
     size_t len;
 
-    snprintf(path, sizeof(path), "%s/current-task", p->dir);
+    flower_path_join(path, sizeof path, p->dir, "current-task");
     if (flower_read_file(path, &text) != 0)
         return -1;
     len = strlen(text);
@@ -61,11 +61,11 @@ int task_current_set(const struct flower_project *p, const char *id)
     struct stat st;
     char text[FLOWER_ID_MAX + 2];
 
-    snprintf(path, sizeof(path), "%s/tasks/%s", p->dir, id);
+    flower_snprintf(path, sizeof path, "%s/tasks/%s", p->dir, id);
     if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
         return -1;
     snprintf(text, sizeof(text), "%s\n", id);
-    snprintf(path, sizeof(path), "%s/current-task", p->dir);
+    flower_path_join(path, sizeof path, p->dir, "current-task");
     return flower_write_file(path, text);
 }
 
@@ -76,7 +76,7 @@ static int task_load_config(struct flower_task *t)
     char *text = NULL;
     cJSON *root, *item;
 
-    snprintf(path, sizeof(path), "%s/config.json", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "config", "json");
     if (flower_read_file(path, &text) != 0)
         return -1;
     root = cJSON_Parse(text);
@@ -102,7 +102,7 @@ static int task_fill(const struct flower_project *p, const char *id,
 
     memset(t, 0, sizeof(*t));
     snprintf(t->id, sizeof(t->id), "%s", id);
-    snprintf(t->dir, sizeof(t->dir), "%s/tasks/%s", p->dir, id);
+    flower_snprintf(t->dir, sizeof t->dir, "%s/tasks/%s", p->dir, id);
     if (stat(t->dir, &st) != 0 || !S_ISDIR(st.st_mode))
         return -1;
     (void)task_load_config(t); /* lenient: keep empty fields */
@@ -119,7 +119,7 @@ int task_list(const struct flower_project *p, struct flower_task *out,
     char *ids[128];
     int n = 0, i, j, total = 0;
 
-    snprintf(path, sizeof(path), "%s/tasks", p->dir);
+    flower_path_join(path, sizeof path, p->dir, "tasks");
     d = opendir(path);
     if (!d)
         return 0;
@@ -140,7 +140,7 @@ int task_list(const struct flower_project *p, struct flower_task *out,
         ids[j + 1] = key;
     }
     for (i = 0; i < n && total < max; i++) {
-        snprintf(path, sizeof(path), "%s/tasks/%s", p->dir, ids[i]);
+        flower_snprintf(path, sizeof path, "%s/tasks/%s", p->dir, ids[i]);
         if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
             task_fill(p, ids[i], &out[total]);
             total++;
@@ -171,7 +171,7 @@ int task_create(const struct flower_project *p, const char *name,
     }
     memset(t, 0, sizeof(*t));
     snprintf(t->id, sizeof(t->id), "T%d", max + 1);
-    snprintf(t->dir, sizeof(t->dir), "%s/tasks/%s", p->dir, t->id);
+    flower_snprintf(t->dir, sizeof t->dir, "%s/tasks/%s", p->dir, t->id);
     if (flower_ensure_dir(t->dir) != 0)
         return -1;
     snprintf(t->name, sizeof(t->name), "%s", name);
@@ -190,7 +190,7 @@ int task_create(const struct flower_project *p, const char *name,
     text = cJSON_Print(root);
     if (!text)
         goto out;
-    snprintf(path, sizeof(path), "%s/config.json", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "config", "json");
     rc = flower_write_file(path, text);
     free(text);
 
@@ -243,7 +243,7 @@ int task_count_context_items(const struct flower_task *t)
     char *text = NULL;
     int n;
 
-    snprintf(path, sizeof(path), "%s/context.md", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "context", "md");
     if (flower_read_file(path, &text) != 0)
         return 0;
     n = flower_count_md_items(text);
@@ -258,7 +258,7 @@ int task_count_resources(const struct flower_task *t)
     cJSON *root, *arr;
     int n = -1;
 
-    snprintf(path, sizeof(path), "%s/resources.json", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "resources", "json");
     if (flower_read_file(path, &text) != 0)
         return 0;
     root = cJSON_Parse(text);
@@ -323,7 +323,7 @@ int action_list(const struct flower_task *t, struct flower_action *out,
     cJSON *root, *arr, *e;
     int count, i = 0;
 
-    snprintf(path, sizeof(path), "%s/actions.json", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "actions", "json");
     if (flower_read_file(path, &text) != 0)
         return -2;
     root = cJSON_Parse(text);
@@ -439,7 +439,7 @@ int action_save(const struct flower_task *t,
     text = cJSON_Print(arr);
     if (!text)
         goto out;
-    snprintf(path, sizeof(path), "%s/actions.json", t->dir);
+    flower_path_join3(path, sizeof path, t->dir, "actions", "json");
     rc = flower_write_file(path, text);
     free(text);
 

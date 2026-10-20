@@ -21,7 +21,7 @@ int scan_cmd(int argc, char **argv)
     struct flower_project p;
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[512];
+    char prompt_text[1024];
     char *seed, *prompt;
     int fresh;
 
@@ -56,7 +56,7 @@ int scan_cmd(int argc, char **argv)
         return 1;
     }
     if (fresh)
-        snprintf(prompt_text, sizeof(prompt_text),
+        flower_snprintf(prompt_text, sizeof prompt_text,
                  "Scan the project directory (%s) with the tools. Then "
                  "propose the four data files of this new flower project: "
                  "projects/%s/config.json (name, path, description), "
@@ -70,7 +70,7 @@ int scan_cmd(int argc, char **argv)
                  "Ask me questions when the scan leaves doubt.",
                  p.path, p.id, p.id, p.id, p.id);
     else
-        snprintf(prompt_text, sizeof(prompt_text),
+        flower_snprintf(prompt_text, sizeof prompt_text,
                  "The project %s exists. Read its current data files "
                  "(config.json, details.md, context.md, resources.json "
                  "under projects/%s/), scan the project directory (%s) "
@@ -90,9 +90,9 @@ int scan_cmd(int argc, char **argv)
         return 1;
     }
 
-    snprintf(sessions_dir, sizeof(sessions_dir), "%s/sessions", p.dir);
+    flower_path_join(sessions_dir, sizeof sessions_dir, p.dir, "sessions");
     (void)flower_ensure_dir(sessions_dir);
-    snprintf(transcript, sizeof(transcript),
+    flower_snprintf(transcript, sizeof transcript,
              "%s/scan-%d.jsonl", sessions_dir, (int)getpid());
 
     return llm_converse(&s, seed, transcript);

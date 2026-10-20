@@ -91,18 +91,18 @@ char *prompt_build(const struct flower_settings *s,
     if (p) {
         char head[512];
 
-        snprintf(head, sizeof(head),
+        flower_snprintf(head, sizeof head,
                  "\n== project %s: %s ==\npath on disk: %s\n", p->id,
                  p->name, p->path);
         if (pb_puts(&b, head) != 0)
             goto fail;
-        snprintf(path, sizeof(path), "%s/details.md", p->dir);
+        flower_path_join3(path, sizeof path, p->dir, "details", "md");
         if (pb_file(&b, path, "-- details.md --") != 0)
             goto fail;
-        snprintf(path, sizeof(path), "%s/context.md", p->dir);
+        flower_path_join3(path, sizeof path, p->dir, "context", "md");
         if (pb_file(&b, path, "-- context.md --") != 0)
             goto fail;
-        snprintf(path, sizeof(path), "%s/resources.json", p->dir);
+        flower_path_join3(path, sizeof path, p->dir, "resources", "json");
         if (pb_file(&b, path, "-- resources.json --") != 0)
             goto fail;
     }
@@ -118,10 +118,10 @@ char *prompt_build(const struct flower_settings *s,
                 || pb_puts(&b, "\n"))
                 goto fail;
         }
-        snprintf(path, sizeof(path), "%s/context.md", t->dir);
+        flower_path_join3(path, sizeof path, t->dir, "context", "md");
         if (pb_file(&b, path, "-- task context.md --") != 0)
             goto fail;
-        snprintf(path, sizeof(path), "%s/resources.json", t->dir);
+        flower_path_join3(path, sizeof path, t->dir, "resources", "json");
         if (pb_file(&b, path, "-- task resources.json --") != 0)
             goto fail;
     }
@@ -129,7 +129,7 @@ char *prompt_build(const struct flower_settings *s,
     if (a) {
         char head[512];
 
-        snprintf(head, sizeof(head), "\n== action %s: %s ==\ntype: %s\n"
+        flower_snprintf(head, sizeof head, "\n== action %s: %s ==\ntype: %s\n"
                  "state: %s\noutcome: %s\nblocked by: %s\n",
                  a->id, a->name, a->type, a->state,
                  a->outcome[0] ? a->outcome : "(none)",

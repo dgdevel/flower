@@ -5,6 +5,7 @@
 
 #include <cjson/cJSON.h>
 
+#include <stdarg.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -207,3 +208,46 @@ int flower_count_md_items(const char *text)
     }
     return count;
 }
+
+/* ---- shared snprintf wrappers ----
+ *
+ * every path join and prompt format below may legally truncate: snprintf
+ * always nul-terminates and callers treat truncated paths as "file not
+ * there". gcc cannot know that, so -Wformat-truncation is disabled inside
+ * the wrappers only; call sites keep normal format-string checking via
+ * the printf attribute. */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+
+/* format into buf, always nul-terminated, truncation allowed. */
+char *flower_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    return buf;
+}
+
+/* join two parts as "dir/name" (dir may be empty). */
+char *flower_path_join(char *buf, size_t size, const char *dir,
+                       const char *name)
+{
+    snprintf(buf, size, "%s/%s", dir, name);
+    return buf;
+}
+
+/* join as "dir/name.ext" (ext without the dot, may be NULL). */
+char *flower_path_join3(char *buf, size_t size, const char *dir,
+                        const char *name, const char *ext)
+{
+    if (ext)
+        snprintf(buf, size, "%s/%s.%s", dir, name, ext);
+    else
+        snprintf(buf, size, "%s/%s", dir, name);
+    return buf;
+}
+
+#pragma GCC diagnostic pop

@@ -100,7 +100,7 @@ static int task_cmd_show(struct flower_project *p, const char *ref)
                        acts[i].state, acts[i].type, acts[i].name);
         }
     }
-    snprintf(ctx_path, sizeof(ctx_path), "%s/context.md", t.dir);
+    flower_path_join3(ctx_path, sizeof ctx_path, t.dir, "context", "md");
     if (flower_read_file(ctx_path, &text) == 0) {
         printf("\n--- context.md ---\n%s", text);
         if (text[0] && text[strlen(text) - 1] != '\n')
@@ -186,7 +186,7 @@ static int task_llm_flow(const struct flower_settings *s,
 {
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[896];
+    char prompt_text[2048];
     char *seed, *prompt;
 
     prompt = prompt_build(s, p, t, NULL);
@@ -195,7 +195,7 @@ static int task_llm_flow(const struct flower_settings *s,
         return 1;
     }
     if (fresh)
-        snprintf(prompt_text, sizeof(prompt_text),
+        flower_snprintf(prompt_text, sizeof prompt_text,
                  "Task %s-%s (%s) was just created from this request:\n"
                  "%s\n\nPopulate the task now: read the project directory "
                  "(%s) and the project data with the tools as needed, then "
@@ -235,9 +235,9 @@ static int task_llm_flow(const struct flower_settings *s,
         fprintf(stderr, "flower task: cannot build the seed\n");
         return 1;
     }
-    snprintf(sessions_dir, sizeof(sessions_dir), "%s/sessions", t->dir);
+    flower_path_join(sessions_dir, sizeof sessions_dir, t->dir, "sessions");
     (void)flower_ensure_dir(sessions_dir);
-    snprintf(transcript, sizeof(transcript),
+    flower_snprintf(transcript, sizeof transcript,
              "%s/task-%s.jsonl", sessions_dir, t->id);
     return llm_converse(s, seed, transcript);
 }
@@ -460,7 +460,7 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
     struct flower_action *a = NULL;
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[640];
+    char prompt_text[2048];
     char *seed, *prompt;
     int n, i, rc;
 
@@ -511,7 +511,7 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
         fprintf(stderr, "flower action resume: cannot build the prompt\n");
         return 1;
     }
-    snprintf(prompt_text, sizeof(prompt_text),
+    flower_snprintf(prompt_text, sizeof prompt_text,
              "Resume action %s (%s, type %s, state %s) of task %s-%s. Work "
              "the action now with the tools: read the task and project "
              "data, do the work the description asks for, and report what "
@@ -531,9 +531,9 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
         fprintf(stderr, "flower action resume: cannot build the seed\n");
         return 1;
     }
-    snprintf(sessions_dir, sizeof(sessions_dir), "%s/sessions", t.dir);
+    flower_path_join(sessions_dir, sizeof sessions_dir, t.dir, "sessions");
     (void)flower_ensure_dir(sessions_dir);
-    snprintf(transcript, sizeof(transcript), "%s/action-%s.jsonl",
+    flower_snprintf(transcript, sizeof transcript, "%s/action-%s.jsonl",
              sessions_dir, a->id);
     rc = llm_converse(&s, seed, transcript);
     free(seed);
