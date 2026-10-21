@@ -4,6 +4,11 @@
 
 #include <stddef.h>
 
+/* release builds stamp this: tools/release.sh passes VERSION=<x.y.z> to make */
+#ifndef FLOWER_VERSION
+#define FLOWER_VERSION "0.1"
+#endif
+
 #define FLOWER_NAME_MAX  256
 #define FLOWER_PATH_MAX  1100
 #define FLOWER_ID_MAX    32
@@ -232,6 +237,11 @@ int task_cmd(int argc, char **argv);
 
 /* `flower action ...`. Returns process exit code. */
 int action_cmd(int argc, char **argv);
+
+/* ---- update.c ---- */
+
+/* `flower update`. Returns process exit code. */
+int update_cmd(int argc, char **argv);
 
 /* ---- config.c: truncation-tolerant formatting ----
  *

@@ -4,6 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+static int cmd_version(void)
+{
+    printf("flower %s\n", FLOWER_VERSION);
+    return 0;
+}
+
 static int usage(void)
 {
     fputs("usage: flower <command> [args]\n"
@@ -24,6 +30,9 @@ static int usage(void)
           "  action list                list the actions of the current task\n"
           "  action resume [ID]         work an action with the llm, then\n"
           "                             record its state and outcome\n"
+          "  update [--yes]           check github for a newer release and\n"
+          "                             install it\n"
+          "  version                  show the version\n"
           "\n"
           "llm commands need 'flower setup' and the llmkit binary in PATH.\n"
           "they write proposed files only after you approve each one.\n",
@@ -48,5 +57,9 @@ int main(int argc, char **argv)
         return action_cmd(argc - 1, argv + 1);
     if (!strcmp(argv[1], "llm-ping"))
         return llm_ping_cmd(argc - 1, argv + 1);
+    if (!strcmp(argv[1], "version"))
+        return cmd_version();
+    if (!strcmp(argv[1], "update"))
+        return update_cmd(argc - 1, argv + 1);
     return usage();
 }

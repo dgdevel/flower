@@ -7,6 +7,7 @@ flower is a command line tool for LLM-assisted project management. It keeps proj
 - C language, C11.
 - Make build with a plain Makefile.
 - cJSON library for JSON. Install it with your package manager (`libcjson-dev` on Debian, `cjson` on Homebrew).
+- libcurl for the update command (`libcurl4-openssl-dev` on Debian, `curl` on Homebrew).
 - `llmkit` does the LLM and MCP calls
 
 ## Build and run
@@ -21,6 +22,8 @@ make
 `make` writes the binary `flower` into the project root. `make check` runs the file io round trip tests (no network, no LLM). `make clean` removes the build files.
 
 More targets: `make asan` builds the whole binary with address+undefined sanitizer into `build/asan/flower-asan`; `make fuzz` builds the libFuzzer harnesses in `fuzz/` (clang required, run e.g. `./fuzz/fuzz_json`); `make check-vg` runs the test suite under valgrind (log in `test/valgrind.log`).
+
+Release targets: `make release TAG=v0.1.0` tags the release, builds and publishes binaries to GitHub Releases (needs `gh`); `make packages TAG=v0.1.0` builds .deb/.rpm/.pkg.tar.zst/.zip packages in docker, artifacts land in `dist/`.
 
 ## Commands
 
@@ -37,6 +40,8 @@ Run `./flower` with no command to see the usage text. Exit codes: 0 ok, 1 runtim
 - `flower task update [--id=ID] <prompt>`: same flow against an existing task, the current task by default.
 - `flower action list`: list the actions of the current task: id, state, type, outcome, name, blocked-by.
 - `flower action resume [ID]`: LLM conversation on the action record with task and project context. The model works the action with tools. After the conversation, flower asks for the new state (Pending, In Progress, Paused, Completed) and outcome (Success, Partial, Failure) and writes `actions.json`. Without an ID, the first action that is not Completed is picked.
+- `flower update [--yes]`: check GitHub for a newer release and install it.
+- `flower version`: show the version.
 
 ## LLM conversations
 

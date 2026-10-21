@@ -6,11 +6,28 @@
 #   fuzz       libFuzzer harnesses (clang only, see fuzz/)
 #   check-vg   run the test suite under valgrind
 #   clean      remove every build artifact
+#   release    tag, build and publish binaries to GitHub Releases (gh)
+#   packages   build .deb/.rpm/.pkg.tar.zst/.zip in docker (artifacts in dist/)
 CC       := cc
 CFLAGS   := -std=c11 -Wall -Wextra -O2
-CFLAGS   += $(shell pkg-config --cflags libcjson)
+# json parser: system libcjson by default; distro packaging links a pinned
+# static build instead (make CJSON=/tmp/cj/libcjson.a EXTRA_CFLAGS=-I/tmp/cj/include).
+# when CJSON is overridden its pkg-config cflags must go too: EXTRA_CFLAGS
+# carries the pinned include path then.
+ifeq ($(origin CJSON)$(origin CJSON_CFLAGS),undefinedundefined)
+  CFLAGS   += $(shell pkg-config --cflags libcjson)
+endif
+CJSON ?= $(shell pkg-config --libs libcjson)
+CFLAGS   += $(EXTRA_CFLAGS)
 LDFLAGS  :=
-LDLIBS   := $(shell pkg-config --libs libcjson)
+# libcurl hardcoded, not pkg-config: the distro build containers (see
+# tools/pkg/*.sh) install the -dev packages without pkg-config.
+LDLIBS   := $(CJSON) -lcurl
+
+# release builds stamp the version into the binary (tools/release.sh)
+ifneq ($(VERSION),)
+CFLAGS += -DFLOWER_VERSION=\"$(VERSION)\"
+endif
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
@@ -26,7 +43,7 @@ ASANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 FUZZ_HARNESS := path json
 FUZZFLAGS    ?= -fsanitize=address
 
-.PHONY: all clean check asan fuzz check-vg
+.PHONY: all clean check asan fuzz check-vg release packages
 
 all: $(BIN)
 
@@ -81,4 +98,14 @@ check-vg:
 
 clean:
 	rm -f $(OBJ) $(BIN) test/check test/check-vg test/valgrind.log
-	rm -rf build fuzz/fuzz_path fuzz/fuzz_json
+	rm -rf build fuzz/fuzz_path fuzz/fuzz_json dist
+
+# tag, build and publish binaries to GitHub Releases (needs gh)
+# usage: make release TAG=v0.1.0
+release:
+	@tools/release.sh "$(TAG)"
+
+# build distro packages (.deb/.rpm/.pkg.tar.zst/.zip) in docker; needs
+# docker, artifacts land in dist/. usage: make packages TAG=v0.1.0 [TGT="deb rpm"]
+packages:
+	@tools/package.sh "$(TAG)" $(TGT)
