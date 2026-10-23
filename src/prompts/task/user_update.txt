@@ -1,0 +1,4 @@
+Update task %s-%s (%s) following this request:
+%s
+
+The current task files are in the context above. Read the project directory (%s) with the tools if the update needs it, then propose the changed files as flower blocks (full file content, target projects/%s/tasks/%s/<file>). Ask me questions when in doubt.

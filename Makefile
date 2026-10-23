@@ -29,8 +29,11 @@ ifneq ($(VERSION),)
 CFLAGS += -DFLOWER_VERSION=\"$(VERSION)\"
 endif
 
-SRC := $(wildcard src/*.c)
+# prompts.gen.c is generated (rule below); pick it up whether or not it
+# exists yet at parse time.
+SRC := $(filter-out src/prompts.gen.c,$(wildcard src/*.c)) src/prompts.gen.c
 OBJ := $(SRC:.c=.o)
+
 
 BIN := flower
 
@@ -48,7 +51,19 @@ FUZZFLAGS    ?= -fsanitize=address
 all: $(BIN)
 
 $(BIN): $(OBJ)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LDLIBS)
+
+# prompt texts bundled into the binary: tools/gen-prompts.sh preprocesses
+# src/prompts/**/*.txt into src/prompts.gen.{c,h} (a changed txt or script
+# regenerates them before the next compilation). both targets share the
+# one recipe run: gen-prompts.sh writes the pair together.
+PROMPTS_TXT = $(shell find src/prompts -type f -name '*.txt' 2>/dev/null)
+
+src/prompts.gen.c src/prompts.gen.h: $(PROMPTS_TXT)	tools/gen-prompts.sh
+	tools/gen-prompts.sh
+
+# objects need the generated prompts header: force the gen rule first
+$(OBJ): src/prompts.gen.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -99,6 +114,7 @@ check-vg:
 clean:
 	rm -f $(OBJ) $(BIN) test/check test/check-vg test/valgrind.log
 	rm -rf build fuzz/fuzz_path fuzz/fuzz_json dist
+	rm -f src/prompts.gen.c src/prompts.gen.h
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v0.1.0

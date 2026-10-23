@@ -2,7 +2,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "flower.h"
+#include "prompts.gen.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +59,32 @@ static int pb_file(struct pbuf *b, const char *path, const char *label)
     return 0;
 }
 
+/* format a bundled prompt template (src/prompts txt files, see
+ * tools/gen-prompts.sh) with its runtime values. Returns a malloc'd
+ * string, NULL on error. */
+char *prompt_format(const char *tmpl, ...)
+{
+    va_list ap, ap2;
+    int n;
+    char *out;
+
+    va_start(ap, tmpl);
+    va_copy(ap2, ap);
+    n = vsnprintf(NULL, 0, tmpl, ap);
+    va_end(ap);
+    if (n < 0)
+        goto fail;
+    out = malloc((size_t)n + 1);
+    if (!out)
+        goto fail;
+    vsnprintf(out, (size_t)n + 1, tmpl, ap2);
+    va_end(ap2);
+    return out;
+fail:
+    va_end(ap2);
+    return NULL;
+}
+
 char *prompt_build(const struct flower_settings *s,
                    const struct flower_project *p,
                    const struct flower_task *t,
@@ -66,8 +94,7 @@ char *prompt_build(const struct flower_settings *s,
     char path[FLOWER_PATH_MAX];
     char *text;
 
-    if (pb_puts(&b, "You are flower, an assistant for project management.")
-        != 0)
+    if (pb_puts(&b, prompt_system_identity) != 0)
         goto fail;
     if (s->user_name[0] || s->user_role[0])
         if (pb_puts(&b, "\nYou work with ")
@@ -78,14 +105,8 @@ char *prompt_build(const struct flower_settings *s,
                     : 0)
             || pb_puts(&b, "."))
             goto fail;
-    if (pb_puts(&b,
-                "\nWhen you propose changes to flower data files (config.json,"
-                " details.md, context.md, resources.json, actions.json),"
-                " write each file as a fenced block: a line with ```flower,"
-                " then the target path relative to the flower base directory"
-                " (for example projects/P1/details.md), then the full file"
-                " content, then a closing fence.\n")
-        != 0)
+    if (pb_puts(&b, "\n") != 0
+        || pb_puts(&b, prompt_system_flower_block) != 0)
         goto fail;
 
     if (p) {

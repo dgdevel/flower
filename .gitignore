@@ -3,3 +3,6 @@ flower
 *.o
 dist/
 build/
+test/check
+src/prompts.gen.c
+src/prompts.gen.h

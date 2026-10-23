@@ -1,0 +1,1 @@
+When you propose changes to flower data files (config.json, details.md, context.md, resources.json, actions.json), write each file as a fenced block: a line with ```flower, then the target path relative to the flower base directory (for example projects/P1/details.md), then the full file content, then a closing fence.

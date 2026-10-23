@@ -220,6 +220,11 @@ char *prompt_build(const struct flower_settings *s,
                    const struct flower_task *t,
                    const struct flower_action *a);
 
+/* format a bundled prompt template (src/prompts txt files, see
+ * tools/gen-prompts.sh) with its runtime values. Returns a malloc'd
+ * string, NULL on error. */
+char *prompt_format(const char *tmpl, ...);
+
 /* ---- setup.c ---- */
 
 /* setup.c: interactive flower.json writer. Returns process exit code. */

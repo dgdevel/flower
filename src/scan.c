@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "flower.h"
+#include "prompts.gen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,8 +22,7 @@ int scan_cmd(int argc, char **argv)
     struct flower_project p;
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[1024];
-    char *seed, *prompt;
+    char *seed, *prompt, *prompt_text;
     int fresh;
 
     (void)argc;
@@ -56,34 +56,23 @@ int scan_cmd(int argc, char **argv)
         return 1;
     }
     if (fresh)
-        flower_snprintf(prompt_text, sizeof prompt_text,
-                 "Scan the project directory (%s) with the tools. Then "
-                 "propose the four data files of this new flower project: "
-                 "projects/%s/config.json (name, path, description), "
-                 "projects/%s/details.md (chapters: Output, Objectives, "
-                 "Scope, Constraints, Resources, Stakeholders, only the "
-                 "applicable ones), projects/%s/context.md (list items: "
-                 "one per line, each of type Fact, Pattern, Risk, Success "
-                 "metric, Failure sign, Evaluation method, or Rule), "
-                 "projects/%s/resources.json (a json array of strings: "
-                 "paths, urls, pointers). Use one flower block per file. "
-                 "Ask me questions when the scan leaves doubt.",
-                 p.path, p.id, p.id, p.id, p.id);
+        prompt_text = prompt_format(prompt_scan_user_fresh, p.path, p.id,
+                                    p.id, p.id, p.id);
     else
-        flower_snprintf(prompt_text, sizeof prompt_text,
-                 "The project %s exists. Read its current data files "
-                 "(config.json, details.md, context.md, resources.json "
-                 "under projects/%s/), scan the project directory (%s) "
-                 "for changes with the tools, then propose updated files "
-                 "as flower blocks where the data is stale. Ask me "
-                 "questions when something is unclear.",
-                 p.id, p.id, p.path);
+        prompt_text = prompt_format(prompt_scan_user_existing, p.id, p.id,
+                                    p.path);
+    if (!prompt_text) {
+        fprintf(stderr, "flower project scan: cannot build the prompt\n");
+        free(prompt);
+        return 1;
+    }
     {
         const char *parts[1];
 
         parts[0] = prompt;
         seed = llm_build_seed(&s, parts, 1, prompt_text);
     }
+    free(prompt_text);
     free(prompt);
     if (!seed) {
         fprintf(stderr, "flower project scan: cannot build the seed\n");

@@ -1,0 +1,1 @@
+Resume action %s (%s, type %s, state %s) of task %s-%s. Work the action now with the tools: read the task and project data, do the work the description asks for, and report what you did. When the work changes flower data files, write them as flower blocks. When done, tell me the new state (Pending, In Progress, Paused, Completed) and outcome (Success, Partial, Failure) to record.

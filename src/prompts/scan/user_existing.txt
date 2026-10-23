@@ -1,0 +1,1 @@
+The project %s exists. Read its current data files (config.json, details.md, context.md, resources.json under projects/%s/), scan the project directory (%s) for changes with the tools, then propose updated files as flower blocks where the data is stale. Ask me questions when something is unclear.

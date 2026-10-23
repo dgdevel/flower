@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "flower.h"
+#include "prompts.gen.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -186,8 +187,7 @@ static int task_llm_flow(const struct flower_settings *s,
 {
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[2048];
-    char *seed, *prompt;
+    char *seed, *prompt, *prompt_text;
 
     prompt = prompt_build(s, p, t, NULL);
     if (!prompt) {
@@ -195,41 +195,26 @@ static int task_llm_flow(const struct flower_settings *s,
         return 1;
     }
     if (fresh)
-        flower_snprintf(prompt_text, sizeof prompt_text,
-                 "Task %s-%s (%s) was just created from this request:\n"
-                 "%s\n\nPopulate the task now: read the project directory "
-                 "(%s) and the project data with the tools as needed, then "
-                 "propose projects/%s/tasks/%s/config.json (name, short "
-                 "description), projects/%s/tasks/%s/context.md (list "
-                 "items, one per line, of type Fact, Pattern, Risk, "
-                 "Success metric, Failure sign, Evaluation method, or "
-                 "Rule), projects/%s/tasks/%s/resources.json (json array "
-                 "of strings: paths, urls, pointers), and "
-                 "projects/%s/tasks/%s/actions.json (json array, each "
-                 "action an object with id \"A1\", \"A2\", ... in order, "
-                 "name, description, type Observe|Analyze|Root Cause|Act|"
-                 "Validate|Improve, state Pending, outcome \"\", "
-                 "blocked_by array of ids). Use one flower "
-                 "block per file. Ask me questions when in doubt.",
-                 p->id, t->id, t->name, user_prompt, p->path, p->id,
-                 t->id, p->id, t->id, p->id, t->id, p->id, t->id);
+        prompt_text = prompt_format(prompt_task_user_fresh, p->id, t->id,
+                                    t->name, user_prompt, p->path, p->id,
+                                    t->id, p->id, t->id, p->id, t->id,
+                                    p->id, t->id);
     else
-        snprintf(prompt_text, sizeof(prompt_text),
-                 "Update task %s-%s (%s) following this request:\n%s\n\n"
-                 "The current task files are in the context above. Read "
-                 "the project directory (%s) with the tools if the update "
-                 "needs it, then propose the changed files as flower "
-                 "blocks (full file content, target "
-                 "projects/%s/tasks/%s/<file>). Ask me questions when in "
-                 "doubt.",
-                 p->id, t->id, t->name, user_prompt, p->path, p->id,
-                 t->id);
+        prompt_text = prompt_format(prompt_task_user_update, p->id, t->id,
+                                    t->name, user_prompt, p->path, p->id,
+                                    t->id);
+    if (!prompt_text) {
+        fprintf(stderr, "flower task: cannot build the prompt\n");
+        free(prompt);
+        return 1;
+    }
     {
         const char *parts[1];
 
         parts[0] = prompt;
         seed = llm_build_seed(s, parts, 1, prompt_text);
     }
+    free(prompt_text);
     free(prompt);
     if (!seed) {
         fprintf(stderr, "flower task: cannot build the seed\n");
@@ -460,8 +445,7 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
     struct flower_action *a = NULL;
     char transcript[FLOWER_PATH_MAX];
     char sessions_dir[FLOWER_PATH_MAX];
-    char prompt_text[2048];
-    char *seed, *prompt;
+    char *seed, *prompt, *prompt_text;
     int n, i, rc;
 
     if ((rc = need_current_task(p, &t)) != 0)
@@ -511,21 +495,20 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
         fprintf(stderr, "flower action resume: cannot build the prompt\n");
         return 1;
     }
-    flower_snprintf(prompt_text, sizeof prompt_text,
-             "Resume action %s (%s, type %s, state %s) of task %s-%s. Work "
-             "the action now with the tools: read the task and project "
-             "data, do the work the description asks for, and report what "
-             "you did. When the work changes flower data files, write "
-             "them as flower blocks. When done, tell me the new state "
-             "(Pending, In Progress, Paused, Completed) and outcome "
-             "(Success, Partial, Failure) to record.",
-             a->id, a->name, a->type, a->state, p->id, t.id);
+    prompt_text = prompt_format(prompt_action_user_resume, a->id, a->name,
+                                a->type, a->state, p->id, t.id);
+    if (!prompt_text) {
+        fprintf(stderr, "flower action resume: cannot build the prompt\n");
+        free(prompt);
+        return 1;
+    }
     {
         const char *parts[1];
 
         parts[0] = prompt;
         seed = llm_build_seed(&s, parts, 1, prompt_text);
     }
+    free(prompt_text);
     free(prompt);
     if (!seed) {
         fprintf(stderr, "flower action resume: cannot build the seed\n");
