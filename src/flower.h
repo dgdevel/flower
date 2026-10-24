@@ -236,9 +236,13 @@ int llm_ping_cmd(int argc, char **argv);
  * answers y (or a: all). transcript_path (may be NULL) receives every
  * record of every turn, appended. terminal_ok (scan conversations): a
  * runner exit of 9 (terminal tool fired) ends the loop cleanly instead of
- * failing the turn. Empty line or q ends. 0 on success. */
+ * failing the turn. When terminal_tool is not NULL and its call failed
+ * (is_error tool_response), the failure is fed back to the model as a
+ * user record and the loop continues, so it can correct itself; at most 3
+ * such retries. Empty line or q ends. 0 on success. */
 int llm_converse(const struct flower_settings *cfg, const char *seed,
-                 const char *transcript_path, int terminal_ok);
+                 const char *transcript_path, int terminal_ok,
+                 const char *terminal_tool);
 
 /* ---- scan.c ---- */
 

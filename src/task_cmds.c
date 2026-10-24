@@ -224,7 +224,7 @@ static int task_llm_flow(const struct flower_settings *s,
     (void)flower_ensure_dir(sessions_dir);
     flower_snprintf(transcript, sizeof transcript,
              "%s/task-%s.jsonl", sessions_dir, t->id);
-    return llm_converse(s, seed, transcript, 0);
+    return llm_converse(s, seed, transcript, 0, NULL);
 }
 
 /* read the user prompt: argv words joined when given, else stdin until
@@ -518,7 +518,7 @@ static int action_cmd_resume(struct flower_project *p, const char *ref)
     (void)flower_ensure_dir(sessions_dir);
     flower_snprintf(transcript, sizeof transcript, "%s/action-%s.jsonl",
              sessions_dir, a->id);
-    rc = llm_converse(&s, seed, transcript, 0);
+    rc = llm_converse(&s, seed, transcript, 0, NULL);
     free(seed);
     if (rc != 0)
         return rc;

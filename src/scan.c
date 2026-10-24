@@ -322,7 +322,8 @@ int scan_cmd(int argc, char **argv)
         return 1;
     }
     {
-        int rc = llm_converse(&s, seed, transcript, 1);
+        int rc = llm_converse(&s, seed, transcript, 1,
+                              "project.update_project");
 
         free(seed);
         if (rc != 0)

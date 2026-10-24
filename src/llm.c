@@ -743,13 +743,95 @@ static void len_trim(char *s)
         s[--len] = '\0';
 }
 
+/* find the terminal tool's own answer in the turn records: the
+ * tool_response whose tool_request (same id) called terminal_tool.
+ * Returns 1 and fills text (malloc'd) when that answer is an error
+ * (is_error), 0 when it succeeded or nothing matched. */
+static int terminal_failure_text(const char *records,
+                                 const char *terminal_tool, char **text)
+{
+    char *dup = strdup(records ? records : "");
+    char *save = NULL, *line;
+    char err_id[128] = "";
+    char *err_text = NULL;
+    int found = 0;
+
+    *text = NULL;
+    if (!dup)
+        return 0;
+    /* pass 1: the tool_request id that called the terminal tool */
+    for (line = strtok_r(dup, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        cJSON *root = cJSON_Parse(line);
+        const cJSON *ty, *tool, *id;
+
+        if (!root)
+            continue;
+        ty = cJSON_GetObjectItemCaseSensitive(root, "type");
+        if (!cJSON_IsString(ty) || strcmp(ty->valuestring, "tool_request")) {
+            cJSON_Delete(root);
+            continue;
+        }
+        tool = cJSON_GetObjectItemCaseSensitive(root, "tool");
+        id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        if (cJSON_IsString(tool) && cJSON_IsString(id)
+            && !strcmp(tool->valuestring, terminal_tool)) {
+            snprintf(err_id, sizeof(err_id), "%s", id->valuestring);
+            cJSON_Delete(root);
+            break;
+        }
+        cJSON_Delete(root);
+    }
+    if (!err_id[0]) {
+        free(dup);
+        return 0;
+    }
+    /* pass 2: the tool_response with that id */
+    for (line = strtok_r(NULL, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        cJSON *root = cJSON_Parse(line);
+        const cJSON *ty, *id, *is_err, *txt;
+
+        if (!root)
+            continue;
+        ty = cJSON_GetObjectItemCaseSensitive(root, "type");
+        if (!cJSON_IsString(ty) || strcmp(ty->valuestring, "tool_response")) {
+            cJSON_Delete(root);
+            continue;
+        }
+        id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        if (!cJSON_IsString(id) || strcmp(id->valuestring, err_id)) {
+            cJSON_Delete(root);
+            continue;
+        }
+        is_err = cJSON_GetObjectItemCaseSensitive(root, "is_error");
+        txt = cJSON_GetObjectItemCaseSensitive(root, "text");
+        if (cJSON_IsTrue(is_err)) {
+            found = 1;
+            err_text = strdup(cJSON_IsString(txt) && txt->valuestring[0]
+                                  ? txt->valuestring
+                                  : "tool failed");
+        }
+        cJSON_Delete(root);
+        break;
+    }
+    free(dup);
+    if (found)
+        *text = err_text;
+    else
+        free(err_text);
+    return found;
+}
+
 int llm_converse(const struct flower_settings *cfg, const char *seed,
-                 const char *transcript_path, int terminal_ok)
+                 const char *transcript_path, int terminal_ok,
+                 const char *terminal_tool)
 {
     char *current_seed = strdup(seed);
     char *head; /* seed part before the first user record (llm, tools,
                  * system): every replay needs it, runner stdout does not
                  * carry it */
+    int term_retries = 0;
 
     (void)cfg;
     if (!current_seed)
@@ -804,8 +886,63 @@ int llm_converse(const struct flower_settings *cfg, const char *seed,
             }
         }
         if (terminal_hit) {
-            /* the terminal tool already delivered the data; finish the
-             * conversation without a follow-up prompt */
+            char *err_text = NULL;
+
+            /* failed terminal tool: the runner ended the conversation
+             * anyway, but the call did not deliver the data. Feed the
+             * error back and let the model fix its call, up to a few
+             * retries. */
+            if (terminal_tool && term_retries < 3
+                && terminal_failure_text(records, terminal_tool,
+                                         &err_text)) {
+                struct buf u = {0};
+                char *tmp, *next;
+
+                term_retries++;
+                fprintf(stderr, "flower: terminal tool failed"
+                        " (attempt %d of 3): %s\n", term_retries,
+                        err_text);
+                if (buf_puts(&u, "{\"type\":\"user\",\"content\":[{"
+                                 "\"type\":\"text\",\"text\":\"The "
+                                 "update_project call failed and the "
+                                 "scan continues. Error:\\n") != 0
+                    || buf_put_json_escaped(&u, err_text) != 0
+                    || buf_puts(&u, "\\nFix the arguments and call "
+                                    "update_project again.\"}]}") != 0) {
+                    free(err_text);
+                    free(resp);
+                    free(records);
+                    llm_free_proposals(props, prop_count);
+                    free(u.data);
+                    free(current_seed);
+                    free(head);
+                    return 1;
+                }
+                tmp = llm_append_record(head, records);
+                if (tmp)
+                    next = llm_append_record(tmp, u.data);
+                else
+                    next = NULL;
+                free(tmp);
+                free(u.data);
+                free(err_text);
+                if (!next) {
+                    free(resp);
+                    free(records);
+                    llm_free_proposals(props, prop_count);
+                    free(current_seed);
+                    free(head);
+                    return 1;
+                }
+                free(current_seed);
+                current_seed = next;
+                free(resp);
+                free(records);
+                llm_free_proposals(props, prop_count);
+                continue;
+            }
+            /* the terminal tool delivered the data (or retries are
+             * spent): finish the conversation without a follow-up */
             free(resp);
             free(records);
             llm_free_proposals(props, prop_count);
@@ -904,7 +1041,7 @@ int llm_ping_cmd(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "converse"))
         return llm_converse(&s, llm_build_seed(&s, parts, 1,
                                                argc > 2 ? argv[2] : "hello"),
-                            NULL, 0);
+                            NULL, 0, NULL);
     {
         char *resp, *records;
         struct flower_proposal *props;
