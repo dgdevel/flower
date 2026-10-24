@@ -17,6 +17,8 @@ static int usage(void)
           "commands:\n"
           "  setup                      configure llm and user settings\n"
           "  project [--json]           show the project covering the cwd\n"
+          "                             (full details, context items,\n"
+          "                             resources)\n"
           "  project scan               llm conversation that creates or\n"
           "                             updates the project data files\n"
           "  task                       show the current task\n"

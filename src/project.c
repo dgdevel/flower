@@ -297,6 +297,175 @@ int project_count_resources(const struct flower_project *p)
     return n;
 }
 
+int project_read_details(const struct flower_project *p, char **out)
+{
+    char path[FLOWER_PATH_MAX];
+    char *text = NULL;
+
+    *out = NULL;
+    flower_path_join3(path, sizeof path, p->dir, "details", "md");
+    if (flower_read_file(path, &text) != 0)
+        return 0; /* absent: fine */
+    if (!text[0]) {
+        free(text);
+        return 0;
+    }
+    *out = text;
+    return 0;
+}
+
+/* push one entry onto a growing array of structs. 0 on success. */
+static int item_push(void **arr, int *count, void *entry, size_t esz)
+{
+    char *base = realloc(*(char **)arr, (size_t)(*count + 1) * esz);
+
+    if (!base)
+        return -1;
+    *(char **)arr = base;
+    memcpy(base + (size_t)*count * esz, entry, esz);
+    (*count)++;
+    return 0;
+}
+
+int project_load_context_items(const struct flower_project *p,
+                               struct flower_context_item **out, int *count)
+{
+    char path[FLOWER_PATH_MAX];
+    char *text = NULL, *line, *next;
+    struct flower_context_item *items = NULL;
+    int n = 0, i, rc = 0;
+    void *mem = NULL;
+
+    *out = NULL;
+    *count = 0;
+    flower_path_join3(path, sizeof path, p->dir, "context", "md");
+    if (flower_read_file(path, &text) != 0)
+        return 0; /* absent: fine */
+    for (line = text; line; line = next) {
+        struct flower_context_item it;
+
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        if (strncmp(line, "- ", 2) != 0)
+            continue;
+        line += 2;
+        memset(&it, 0, sizeof(it));
+        if (line[0] == '[') {
+            char *close = strchr(line, ']');
+
+            if (close) {
+                *close = '\0';
+                snprintf(it.type, sizeof(it.type), "%s", line + 1);
+                line = close + 1;
+                if (*line == ' ')
+                    line++;
+            }
+        } else {
+            char *colon = NULL, *q;
+
+            /* last ": " run becomes the type when it fits */
+            for (q = line; *q; q++)
+                if (*q == ':' && q[1] == ' ')
+                    colon = q;
+            if (colon && (size_t)(colon - line) < sizeof(it.type)) {
+                *colon = '\0';
+                snprintf(it.type, sizeof(it.type), "%s", line);
+                line = colon + 2;
+            }
+        }
+        if (!line[0])
+            continue;
+        it.content = strdup(line);
+        if (!it.content || item_push(&mem, &n, &it, sizeof(it)) != 0) {
+            free(it.content);
+            rc = -1;
+            goto out;
+        }
+    }
+out:
+    free(text);
+    items = mem;
+    if (rc != 0) {
+        for (i = 0; i < n; i++)
+            free(items[i].content);
+        free(items);
+        return -1;
+    }
+    *out = items;
+    *count = n;
+    return 0;
+}
+
+int project_load_resources(const struct flower_project *p,
+                           struct flower_resource **out, int *count)
+{
+    char path[FLOWER_PATH_MAX];
+    char *text = NULL;
+    cJSON *root, *arr, *it;
+    struct flower_resource *res = NULL;
+    int n = 0, i, rc = 0;
+    void *mem = NULL;
+
+    *out = NULL;
+    *count = 0;
+    flower_path_join3(path, sizeof path, p->dir, "resources", "json");
+    if (flower_read_file(path, &text) != 0)
+        return 0; /* absent: fine */
+    root = cJSON_Parse(text);
+    free(text);
+    if (!root)
+        return -1;
+    arr = cJSON_IsArray(root)
+        ? root
+        : cJSON_GetObjectItemCaseSensitive(root, "resources");
+    if (!cJSON_IsArray(arr)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    cJSON_ArrayForEach(it, arr) {
+        struct flower_resource r;
+
+        memset(&r, 0, sizeof(r));
+        if (cJSON_IsString(it)) {
+            if (!it->valuestring[0])
+                continue;
+            r.content = strdup(it->valuestring);
+        } else {
+            const cJSON *ty = cJSON_GetObjectItemCaseSensitive(it, "type");
+            const cJSON *co = cJSON_GetObjectItemCaseSensitive(it,
+                                                               "content");
+
+            if (cJSON_IsString(ty) && ty->valuestring[0])
+                snprintf(r.type, sizeof(r.type), "%s", ty->valuestring);
+            if (!cJSON_IsString(co) || !co->valuestring[0])
+                continue;
+            r.content = strdup(co->valuestring);
+        }
+        if (!r.content) {
+            rc = -1;
+            goto oom;
+        }
+        if (item_push(&mem, &n, &r, sizeof(r)) != 0) {
+            free(r.content);
+            rc = -1;
+            goto oom;
+        }
+    }
+oom:
+    cJSON_Delete(root);
+    res = mem;
+    if (rc != 0) {
+        for (i = 0; i < n; i++)
+            free(res[i].content);
+        free(res);
+        return -1;
+    }
+    *out = res;
+    *count = n;
+    return 0;
+}
+
 int project_task_count(const struct flower_project *p)
 {
     char path[FLOWER_PATH_MAX];

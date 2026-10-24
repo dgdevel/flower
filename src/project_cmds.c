@@ -7,34 +7,171 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* print parsed context items, one "- [type] content" line each. */
+static int dump_context_items(const struct flower_project *p)
+{
+    struct flower_context_item *items = NULL;
+    int i, n;
+
+    printf("\n--- context items ---\n");
+    if (project_load_context_items(p, &items, &n) != 0) {
+        printf("(cannot read)\n");
+        return 0;
+    }
+    if (n == 0) {
+        printf("(none)\n");
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        printf("- [%s] %s\n", items[i].type[0] ? items[i].type : "-",
+               items[i].content);
+        free(items[i].content);
+    }
+    free(items);
+    return 0;
+}
+
+/* print parsed resources, one "- [type] content" line each. */
+static int dump_resources(const struct flower_project *p)
+{
+    struct flower_resource *res = NULL;
+    int i, n;
+
+    printf("\n--- resources ---\n");
+    if (project_load_resources(p, &res, &n) != 0) {
+        printf("(cannot read)\n");
+        return 0;
+    }
+    if (n == 0) {
+        printf("(none)\n");
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        printf("- [%s] %s\n", res[i].type[0] ? res[i].type : "-",
+               res[i].content);
+        free(res[i].content);
+    }
+    free(res);
+    return 0;
+}
+
 /* human output of `flower project`. */
 static int project_show(struct flower_project *p)
 {
     char current[FLOWER_ID_MAX];
-    int ctx, res, tasks;
+    char *details = NULL;
 
     printf("project %s (%s)\n", p->id, p->name);
     if (p->description[0])
         printf("  description: %s\n", p->description);
     printf("  path: %s\n", p->path);
     printf("  dir: %s\n", p->dir);
-    ctx = project_count_context_items(p);
-    res = project_count_resources(p);
-    tasks = project_task_count(p);
-    printf("  context items: %d\n", ctx < 0 ? 0 : ctx);
-    printf("  resources: %d\n", res < 0 ? 0 : res);
-    printf("  tasks: %d\n", tasks < 0 ? 0 : tasks);
+    printf("  tasks: %d\n", project_task_count(p));
     if (task_current_get(p, current, sizeof(current)) == 0)
         printf("  current task: %s\n", current);
     else
         printf("  current task: (none)\n");
+    if (project_read_details(p, &details) != 0) {
+        fprintf(stderr, "flower project: cannot read details.md\n");
+        return 1;
+    }
+    printf("\n--- details.md ---\n");
+    if (details) {
+        printf("%s", details);
+        if (details[strlen(details) - 1] != '\n')
+            printf("\n");
+        free(details);
+    } else {
+        printf("(not set)\n");
+    }
+    dump_context_items(p);
+    dump_resources(p);
     return 0;
+}
+
+/* add the context_items array to root. 0 on success. */
+static int json_context_items(const struct flower_project *p, cJSON *root)
+{
+    struct flower_context_item *items = NULL;
+    cJSON *arr, *o, *item;
+    int i, n;
+
+    if (project_load_context_items(p, &items, &n) != 0)
+        n = 0;
+    arr = cJSON_CreateArray();
+    if (!arr)
+        goto fail;
+    for (i = 0; i < n; i++) {
+        o = cJSON_CreateObject();
+        if (!o)
+            goto fail;
+        item = cJSON_CreateString(items[i].type);
+        if (!item || !cJSON_AddItemToObject(o, "type", item))
+            goto fail;
+        item = cJSON_CreateString(items[i].content);
+        if (!item || !cJSON_AddItemToObject(o, "content", item))
+            goto fail;
+        cJSON_AddItemToArray(arr, o);
+    }
+    if (!cJSON_AddItemToObject(root, "context_items", arr))
+        goto fail;
+    for (i = 0; i < n; i++)
+        free(items[i].content);
+    free(items);
+    return 0;
+
+fail:
+    cJSON_Delete(arr);
+    for (i = 0; i < n; i++)
+        free(items[i].content);
+    free(items);
+    return -1;
+}
+
+/* add the resources array to root. 0 on success. */
+static int json_resources(const struct flower_project *p, cJSON *root)
+{
+    struct flower_resource *res = NULL;
+    cJSON *arr, *o, *item;
+    int i, n;
+
+    if (project_load_resources(p, &res, &n) != 0)
+        n = 0;
+    arr = cJSON_CreateArray();
+    if (!arr)
+        goto fail;
+    for (i = 0; i < n; i++) {
+        o = cJSON_CreateObject();
+        if (!o)
+            goto fail;
+        item = cJSON_CreateString(res[i].type);
+        if (!item || !cJSON_AddItemToObject(o, "type", item))
+            goto fail;
+        item = cJSON_CreateString(res[i].content);
+        if (!item || !cJSON_AddItemToObject(o, "content", item))
+            goto fail;
+        cJSON_AddItemToArray(arr, o);
+    }
+    if (!cJSON_AddItemToObject(root, "resources", arr))
+        goto fail;
+    for (i = 0; i < n; i++)
+        free(res[i].content);
+    free(res);
+    return 0;
+
+fail:
+    cJSON_Delete(arr);
+    for (i = 0; i < n; i++)
+        free(res[i].content);
+    free(res);
+    return -1;
 }
 
 /* --json output of `flower project`. */
 static int project_show_json(struct flower_project *p)
 {
     char current[FLOWER_ID_MAX];
+    char *details = NULL;
     cJSON *root, *item;
 
     root = cJSON_CreateObject();
@@ -53,16 +190,9 @@ static int project_show_json(struct flower_project *p)
     if (!item || !cJSON_AddItemToObject(root, "description", item))
         goto fail;
     {
-        int ctx = project_count_context_items(p);
-        int res = project_count_resources(p);
         int tasks = project_task_count(p);
         int cur = task_current_get(p, current, sizeof(current));
 
-        if (!cJSON_AddNumberToObject(root, "context_items",
-                                     ctx < 0 ? 0 : ctx))
-            goto fail;
-        if (!cJSON_AddNumberToObject(root, "resources", res < 0 ? 0 : res))
-            goto fail;
         if (!cJSON_AddNumberToObject(root, "tasks", tasks < 0 ? 0 : tasks))
             goto fail;
         if (cur == 0) {
@@ -74,6 +204,17 @@ static int project_show_json(struct flower_project *p)
                 goto fail;
         }
     }
+    if (project_read_details(p, &details) != 0)
+        goto fail;
+    item = cJSON_CreateString(details ? details : "");
+    if (!item || !cJSON_AddItemToObject(root, "details", item))
+        goto fail;
+    free(details);
+    details = NULL;
+    if (json_context_items(p, root) != 0)
+        goto fail;
+    if (json_resources(p, root) != 0)
+        goto fail;
     {
         char *text = cJSON_Print(root);
 
@@ -87,6 +228,7 @@ static int project_show_json(struct flower_project *p)
     return 0;
 
 fail:
+    free(details);
     cJSON_Delete(root);
     fprintf(stderr, "flower project: out of memory\n");
     return 1;

@@ -154,6 +154,52 @@ static void test_project(void)
           "project: empty array counts zero");
     check(project_task_count(&p1) == 0, "project: task count zero");
 
+    /* details + parsed loaders */
+    snprintf(path, sizeof(path), "%s/details.md", p1.dir);
+    (void)flower_write_file(path, "# Output\n\nstuff\n");
+    {
+        char *det = NULL;
+
+        check(project_read_details(&p1, &det) == 0 && det
+              && !strcmp(det, "# Output\n\nstuff\n"),
+              "project: read details");
+        free(det);
+    }
+    snprintf(path, sizeof(path), "%s/context.md", p1.dir);
+    (void)flower_write_file(path, "- [Fact] a\n- [Risk] b\n- plain\n");
+    {
+        struct flower_context_item *items = NULL;
+        int n = 0;
+
+        check(project_load_context_items(&p1, &items, &n) == 0 && n == 3,
+              "project: load context items");
+        check(n == 3 && !strcmp(items[0].type, "Fact")
+              && !strcmp(items[0].content, "a")
+              && !strcmp(items[2].type, "") && !strcmp(items[2].content,
+              "plain"), "project: context item fields");
+        for (int i = 0; i < n; i++)
+            free(items[i].content);
+        free(items);
+    }
+    snprintf(path, sizeof(path), "%s/resources.json", p1.dir);
+    (void)flower_write_file(path,
+                            "[{\"type\":\"path\",\"content\":\"src/a.c\"},"
+                            "\"bare\"]");
+    {
+        struct flower_resource *res = NULL;
+        int n = 0;
+
+        check(project_load_resources(&p1, &res, &n) == 0 && n == 2,
+              "project: load resources");
+        check(n == 2 && !strcmp(res[0].type, "path")
+              && !strcmp(res[0].content, "src/a.c")
+              && !strcmp(res[1].type, "") && !strcmp(res[1].content,
+              "bare"), "project: resource fields");
+        for (int i = 0; i < n; i++)
+            free(res[i].content);
+        free(res);
+    }
+
     /* find_current: sandbox cwd is <tmp>/proj, make P2 cover it */
     {
         struct flower_project tmp_p;

@@ -30,7 +30,7 @@ Release targets: `make release TAG=v0.1.0` tags the release, builds and publishe
 Run `./flower` with no command to see the usage text. Exit codes: 0 ok, 1 runtime error, 2 usage, 3 no project found, 4 no current task.
 
 - `flower setup`: interactive configuration of the LLM endpoint and your name and role. Writes `flower.json` with mode `0600`.
-- `flower project [--json]`: show the project that covers the current directory: id, name, path, context items, resources, task count, current task.
+- `flower project [--json]`: show the project that covers the current directory: id, name, path, task count, current task, then the full data set: details.md, context items (parsed from context.md), resources (parsed from resources.json). `--json` prints the same as one json object (`details` string, `context_items` and `resources` arrays of `{type, content}`).
 - `flower project scan`: LLM conversation that fills the project data. No project covers the cwd yet: a new project is created first. The model gets one project tool, `update_project(details, contextItems, resources)`: a single call writes `details.md`, `context.md`, `resources.json` and ends the scan. For inspection it gets readonly tools (`files_list`, `files_search`, `file_read`, `file_analyze`) rooted at the project directory - the raw filesystem root is never exposed.
 - `flower task`: show the current task. Same output as `task show`.
 - `flower task list`: list the tasks of the project as `P1-T1  name` lines. The current task is marked.

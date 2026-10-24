@@ -87,6 +87,36 @@ int project_count_context_items(const struct flower_project *p);
  * 0 when absent. */
 int project_count_resources(const struct flower_project *p);
 
+/* one context item parsed from context.md ("- [Type] content" lines,
+ * "Type: content" and bare "- content" lines fall back to type ""). */
+struct flower_context_item {
+    char type[32];        /* "" when the line had no type */
+    char *content;        /* malloc'd, caller frees */
+};
+
+/* one resource parsed from resources.json ({type, content} objects,
+ * bare strings fall back to type ""). */
+struct flower_resource {
+    char type[32];        /* "" when the entry had no type */
+    char *content;        /* malloc'd, caller frees */
+};
+
+/* read details.md into a malloc'd string. 0 on success (*out is NULL
+ * when the file is absent), -1 on read error. */
+int project_read_details(const struct flower_project *p, char **out);
+
+/* parse context.md into a malloc'd array of items (caller frees each
+ * .content and the array). 0 on success (*count 0, *out NULL when the
+ * file is absent), -1 on read error. */
+int project_load_context_items(const struct flower_project *p,
+                               struct flower_context_item **out, int *count);
+
+/* parse resources.json into a malloc'd array of resources (caller frees
+ * each .content and the array). 0 on success (*count 0, *out NULL when
+ * the file is absent or empty), -1 on read or parse error. */
+int project_load_resources(const struct flower_project *p,
+                           struct flower_resource **out, int *count);
+
 /* task directories under the project. -1 on io error, 0 when none. */
 int project_task_count(const struct flower_project *p);
 
