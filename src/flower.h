@@ -2,6 +2,7 @@
 #ifndef FLOWER_H
 #define FLOWER_H
 
+#include <cjson/cJSON.h>
 #include <stddef.h>
 
 /* release builds stamp this: tools/release.sh passes VERSION=<x.y.z> to make */
@@ -188,11 +189,43 @@ char *llm_build_seed(const struct flower_settings *cfg,
                      const char **prompt_parts, int part_count,
                      const char *first_user_text);
 
+/* like `llm_build_seed`, but for the scan conversation: the tools record
+ * holds the project server `flower mcp-scan <project-id>` (its
+ * update_project tool is terminal: calling it ends the conversation) and
+ * the readonly scan server `llmkit mcp-proxy <proxy-cfg>` (builtin-mcp
+ * behind a files_list/files_search/file_read/file_analyze whitelist).
+ * self_exe is the flower binary path (used to spawn the project server).
+ * Returns a malloc'd seed jsonl, NULL on failure. */
+char *llm_build_scan_seed(const struct flower_settings *cfg,
+                          const char *self_exe, const char *proxy_cfg,
+                          const char *project_id,
+                          const char **prompt_parts, int part_count,
+                          const char *first_user_text);
+
 /* return a new malloc'd seed = seed + record + "\n". NULL on failure. */
 char *llm_append_record(const char *seed, const char *record);
 
 /* free a proposal array as filled by llm_run_turn. */
 void llm_free_proposals(struct flower_proposal *props, int count);
+
+/* ---- scan.c ---- */
+
+/* `flower project scan`. Returns process exit code. */
+int scan_cmd(int argc, char **argv);
+
+/* ---- mcp_scan.c ---- */
+
+/* apply one update_project argument set (details object, contextItems
+ * array, resources array) to the project dir: writes details.md,
+ * context.md, resources.json. args keeps cJSON ownership (untouched).
+ * Returns 0 on success, -1 on invalid arguments (err filled), -2 on
+ * write failure. */
+int mcp_scan_apply(const char *project_dir, const cJSON *args,
+                   char *err, size_t errsz);
+
+/* `flower mcp-scan <P-id>`: the project mcp server of a scan. Returns
+ * process exit code. */
+int mcp_scan_cmd(int argc, char **argv);
 
 /* hidden smoke command `flower llm-ping`. Returns exit code. */
 int llm_ping_cmd(int argc, char **argv);
@@ -201,9 +234,11 @@ int llm_ping_cmd(int argc, char **argv);
  * terminal input. After each turn, flower fenced blocks become proposals:
  * each is shown and applied (written under $FLOWER_BASE) only when the user
  * answers y (or a: all). transcript_path (may be NULL) receives every
- * record of every turn, appended. Empty line or q ends. 0 on success. */
+ * record of every turn, appended. terminal_ok (scan conversations): a
+ * runner exit of 9 (terminal tool fired) ends the loop cleanly instead of
+ * failing the turn. Empty line or q ends. 0 on success. */
 int llm_converse(const struct flower_settings *cfg, const char *seed,
-                 const char *transcript_path);
+                 const char *transcript_path, int terminal_ok);
 
 /* ---- scan.c ---- */
 

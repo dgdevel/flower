@@ -57,6 +57,8 @@ int main(int argc, char **argv)
         return action_cmd(argc - 1, argv + 1);
     if (!strcmp(argv[1], "llm-ping"))
         return llm_ping_cmd(argc - 1, argv + 1);
+    if (!strcmp(argv[1], "mcp-scan"))
+        return mcp_scan_cmd(argc - 2, argv + 2);
     if (!strcmp(argv[1], "version"))
         return cmd_version();
     if (!strcmp(argv[1], "update"))

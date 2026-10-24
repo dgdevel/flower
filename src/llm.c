@@ -247,6 +247,126 @@ fail:
     return NULL;
 }
 
+char *llm_build_scan_seed(const struct flower_settings *cfg,
+                          const char *self_exe, const char *proxy_cfg,
+                          const char *project_id,
+                          const char **prompt_parts, int part_count,
+                          const char *first_user_text)
+{
+    struct buf b = {0};
+    char *llmkit_path;
+    int i;
+
+    /* llm record: same shape as llm_build_seed */
+    {
+        char body[2048];
+        int n = snprintf(body, sizeof(body),
+                         "\"endpoint_protocol\":\"%s\",\"api_base\":\"%s\"",
+                         cfg->protocol, cfg->api_base);
+
+        if (n < 0)
+            return NULL;
+        if (cfg->model[0] || cfg->api_key[0]) {
+            char more[1024];
+            int m = 0;
+
+            more[0] = '\0';
+            if (cfg->model[0])
+                m += snprintf(more + m, sizeof(more) - (size_t)m,
+                              ",\"model\":\"%s\"", cfg->model);
+            if (cfg->api_key[0])
+                m += snprintf(more + m, sizeof(more) - (size_t)m,
+                              ",\"api_key\":\"%s\"", cfg->api_key);
+            if (m < 0 || (size_t)(n + m) >= sizeof(body))
+                return NULL;
+            strcat(body, more);
+        }
+        if (seed_add(&b, "llm", body) != 0)
+            goto fail;
+    }
+
+    /* tools record: project server (terminal update_project) + readonly
+     * scan server (mcp-proxy over the whitelist config) */
+    llmkit_path = find_llmkit();
+    if (!llmkit_path) {
+        fprintf(stderr, "flower: llmkit binary not found in PATH\n");
+        goto fail;
+    }
+    {
+        struct buf t = {0};
+        char cmd[FLOWER_PATH_MAX * 2 + 64];
+        int n = snprintf(cmd, sizeof(cmd), "%s mcp-scan %s", self_exe,
+                         project_id);
+
+        if (n < 0 || (size_t)n >= sizeof(cmd))
+            goto tools_fail;
+        if (buf_puts(&t, "\"tools\":[") != 0
+            || buf_puts(&t, "{\"type\":\"stdio\",\"name\":\"project\","
+                            "\"command_line\":\"") != 0
+            || buf_put_json_escaped(&t, cmd) != 0
+            || buf_puts(&t, "\",\"terminal_tools\":[\"update_project\"],"
+                            "\"required\":true},{\"type\":\"stdio\","
+                            "\"name\":\"scan\",\"command_line\":\"") != 0
+            || buf_puts(&t, llmkit_path) != 0
+            || buf_puts(&t, " mcp-proxy ") != 0
+            || buf_put_json_escaped(&t, proxy_cfg) != 0
+            || buf_puts(&t, "\",\"required\":true}]") != 0)
+            goto tools_fail;
+        if (seed_add(&b, "tools", t.data) != 0)
+            goto tools_fail;
+        free(t.data);
+    }
+    free(llmkit_path);
+
+    /* options: bound the readonly scanning rounds */
+    if (seed_add(&b, "options", "\"max_tool_rounds\":40") != 0)
+        goto fail;
+
+    /* system record */
+    if (part_count > 0) {
+        struct buf s = {0};
+        int first = 1;
+
+        if (buf_puts(&s, "\"content\":[{\"type\":\"text\",\"text\":\""))
+            goto fail;
+        for (i = 0; i < part_count; i++) {
+            if (!first && buf_puts(&s, "\\n") != 0)
+                goto fail;
+            if (buf_put_json_escaped(&s, prompt_parts[i]) != 0)
+                goto fail;
+            first = 0;
+        }
+        if (buf_puts(&s, "\"}]"))
+            goto fail;
+        if (seed_add(&b, "system", s.data) != 0)
+            goto fail;
+        free(s.data);
+    }
+
+    /* first user record */
+    if (first_user_text && first_user_text[0]) {
+        struct buf u = {0};
+
+        if (buf_puts(&u, "\"content\":[{\"type\":\"text\",\"text\":\""))
+            goto fail;
+        if (buf_put_json_escaped(&u, first_user_text) != 0)
+            goto fail;
+        if (buf_puts(&u, "\"}]"))
+            goto fail;
+        if (seed_add(&b, "user", u.data) != 0)
+            goto fail;
+        free(u.data);
+    }
+
+    return b.data;
+
+tools_fail:
+    free(llmkit_path);
+fail:
+    free(b.data);
+    return NULL;
+}
+
 char *llm_append_record(const char *seed, const char *record)
 {
     struct buf b = {0};
@@ -520,7 +640,12 @@ out_wait:
     waitpid(pid, &status, 0);
     if (rc == 0 && !WIFEXITED(status))
         rc = -1;
-    if (rc == 0 && WEXITSTATUS(status) != 0) {
+    if (rc == 0 && WEXITSTATUS(status) == 9) {
+        /* exit 9: a terminal tool fired. A requested end, not a failure:
+         * the caller decides whether that ends the conversation (scan)
+         * or is unexpected (flower blocks). */
+        rc = 9;
+    } else if (rc == 0 && WEXITSTATUS(status) != 0) {
         fprintf(stderr, "flower: llmkit runner exited with code %d\n",
                 WEXITSTATUS(status));
         rc = -1;
@@ -529,7 +654,7 @@ out_wait:
         if (parse_proposals(resp_b.data, &prop_v, &prop_n) != 0)
             rc = -1;
     }
-    if (rc != 0) {
+    if (rc != 0 && rc != 9) {
         free(resp_b.data);
         free(rec_b.data);
         llm_free_proposals(prop_v, prop_n);
@@ -542,7 +667,7 @@ out_wait:
         free(rec_b.data);
     *props = prop_v;
     *prop_count = prop_n;
-    return 0;
+    return rc;
 }
 
 void llm_free_proposals(struct flower_proposal *props, int count)
@@ -619,7 +744,7 @@ static void len_trim(char *s)
 }
 
 int llm_converse(const struct flower_settings *cfg, const char *seed,
-                 const char *transcript_path)
+                 const char *transcript_path, int terminal_ok)
 {
     char *current_seed = strdup(seed);
     char *head; /* seed part before the first user record (llm, tools,
@@ -649,13 +774,19 @@ int llm_converse(const struct flower_settings *cfg, const char *seed,
         char *resp, *records, *user_line = NULL;
         size_t cap = 0;
         struct flower_proposal *props;
-        int prop_count, i, all = 0, rc;
+        int prop_count, i, all = 0, rc, terminal_hit = 0;
 
-        if (llm_run_turn(current_seed, &resp, &records, &props,
-                         &prop_count) != 0) {
-            free(current_seed);
-            free(head);
-            return 1;
+        {
+            int trc = llm_run_turn(current_seed, &resp, &records, &props,
+                                   &prop_count);
+            int terminal = (trc == 9);
+
+            if (trc != 0 && !(terminal && terminal_ok)) {
+                free(current_seed);
+                free(head);
+                return 1;
+            }
+            terminal_hit = terminal;
         }
         if (transcript_path && transcript_path[0]) {
             char *old = NULL;
@@ -671,6 +802,16 @@ int llm_converse(const struct flower_settings *cfg, const char *seed,
             } else {
                 flower_write_file(transcript_path, records);
             }
+        }
+        if (terminal_hit) {
+            /* the terminal tool already delivered the data; finish the
+             * conversation without a follow-up prompt */
+            free(resp);
+            free(records);
+            llm_free_proposals(props, prop_count);
+            free(current_seed);
+            free(head);
+            return 0;
         }
         for (i = 0; i < prop_count; i++) {
             rc = proposal_apply(&props[i], all);
@@ -763,7 +904,7 @@ int llm_ping_cmd(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "converse"))
         return llm_converse(&s, llm_build_seed(&s, parts, 1,
                                                argc > 2 ? argv[2] : "hello"),
-                            NULL);
+                            NULL, 0);
     {
         char *resp, *records;
         struct flower_proposal *props;

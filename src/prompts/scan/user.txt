@@ -1,0 +1,13 @@
+Scan the project directory and use the `update_project` tool once to fill the details.
+
+# Context
+Project name: %s
+Project description: %s
+
+# Current data set
+## details
+%s
+## context
+%s
+## resources
+%s

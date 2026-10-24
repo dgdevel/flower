@@ -306,6 +306,64 @@ static void test_prompt(void)
     }
 }
 
+static void test_mcp_scan_apply(void)
+{
+    struct flower_project p;
+    char path[1100];
+    char *text = NULL;
+    cJSON *args;
+
+    project_by_id("P1", &p);
+
+    /* invalid: no required fields */
+    check(mcp_scan_apply(p.dir, cJSON_Parse("{\"x\":1}"), NULL, 0) == -1,
+          "mcp_scan: args without required fields rejected");
+
+    /* minimal valid call */
+    args = cJSON_Parse(
+        "{\"details\":{\"Output\":\"docs\",\"Scope\":\"src only\"},"
+        "\"contextItems\":[{\"type\":\"Fact\",\"content\":\"c code\"},"
+        "{\"type\":\"Rule\",\"content\":\"c11\"}],"
+        "\"resources\":[{\"type\":\"path\",\"content\":\"src\"},"
+        "{\"type\":\"url\",\"content\":\"https://x\"}]}");
+    check(args && mcp_scan_apply(p.dir, args, NULL, 0) == 0,
+          "mcp_scan: valid args applied");
+    cJSON_Delete(args);
+
+    snprintf(path, sizeof(path), "%s/details.md", p.dir);
+    check(flower_read_file(path, &text) == 0 && strstr(text, "# Output")
+          && strstr(text, "docs") && strstr(text, "# Scope"),
+          "mcp_scan: details.md chapters");
+    free(text);
+    text = NULL;
+    snprintf(path, sizeof(path), "%s/context.md", p.dir);
+    check(flower_read_file(path, &text) == 0
+          && strstr(text, "- [Fact] c code")
+          && strstr(text, "- [Rule] c11"),
+          "mcp_scan: context.md items");
+    free(text);
+    text = NULL;
+    snprintf(path, sizeof(path), "%s/resources.json", p.dir);
+    check(flower_read_file(path, &text) == 0
+          && project_count_resources(&p) == 2,
+          "mcp_scan: resources.json entries countable");
+    free(text);
+    text = NULL;
+
+    /* invalid enum rejected, nothing rewritten */
+    args = cJSON_Parse(
+        "{\"details\":{},\"contextItems\":[{\"type\":\"Nope\","
+        "\"content\":\"x\"}],\"resources\":[]}");
+    check(args && mcp_scan_apply(p.dir, args, NULL, 0) == -1,
+          "mcp_scan: bad context type rejected");
+    cJSON_Delete(args);
+    snprintf(path, sizeof(path), "%s/context.md", p.dir);
+    check(flower_read_file(path, &text) == 0
+          && strstr(text, "[Fact] c code") != NULL,
+          "mcp_scan: rejected call left files intact");
+    free(text);
+}
+
 int main(void)
 {
     char cfg[1024], proj[1024];
@@ -320,6 +378,7 @@ int main(void)
     test_task();
     test_actions();
     test_prompt();
+    test_mcp_scan_apply();
     printf("\n%s\n", failures ? "FAILURES" : "all ok");
     return failures ? 1 : 0;
 }

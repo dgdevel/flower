@@ -31,7 +31,7 @@ Run `./flower` with no command to see the usage text. Exit codes: 0 ok, 1 runtim
 
 - `flower setup`: interactive configuration of the LLM endpoint and your name and role. Writes `flower.json` with mode `0600`.
 - `flower project [--json]`: show the project that covers the current directory: id, name, path, context items, resources, task count, current task.
-- `flower project scan`: LLM conversation. No project covers the cwd yet: a new project is created and the model proposes `config.json`, `details.md`, `context.md`, `resources.json`. Existing project: the model reads the current files, rescans the directory, and proposes updates.
+- `flower project scan`: LLM conversation that fills the project data. No project covers the cwd yet: a new project is created first. The model gets one project tool, `update_project(details, contextItems, resources)`: a single call writes `details.md`, `context.md`, `resources.json` and ends the scan. For inspection it gets readonly tools (`files_list`, `files_search`, `file_read`, `file_analyze`) rooted at the project directory - the raw filesystem root is never exposed.
 - `flower task`: show the current task. Same output as `task show`.
 - `flower task list`: list the tasks of the project as `P1-T1  name` lines. The current task is marked.
 - `flower task show [ID]`: show task details. `ID` is `T1` for the current project or `P2-T1` for another project. Without `ID`, the current task is shown.
@@ -47,7 +47,7 @@ Run `./flower` with no command to see the usage text. Exit codes: 0 ok, 1 runtim
 
 Every LLM command is a conversation: thinking, tool calls, and the response render on the terminal as they arrive. A `>` prompt after each turn accepts a follow-up; an empty line or `q` ends the session. Each session keeps its transcript under `$FLOWER_BASE/projects/<id>/sessions/` (project scans) or `.../tasks/<id>/sessions/` (task and action commands), in the llmkit records format.
 
-The model never writes files with tools. It proposes files as fenced `flower` blocks that name the target path (relative to `$FLOWER_BASE`) and hold the full content. flower shows each proposal and writes it only after you answer `y`. This keeps every write under your control and reviewable.
+The model never writes files with tools, except in a scan: there the `update_project` project tool writes the three data files itself (details.md, context.md, resources.json) in one validated call, and the scan ends. Everywhere else the model proposes files as fenced `flower` blocks that name the target path (relative to `$FLOWER_BASE`) and hold the full content. flower shows each proposal and writes it only after you answer `y`. This keeps every write under your control and reviewable.
 
 ## Data layout
 
@@ -83,6 +83,7 @@ $FLOWER_BASE/projects/P1/tasks/T1/sessions/   task and action transcripts
 - `src/project_cmds.c`, `src/task_cmds.c`, and `src/scan.c` hold the command surfaces.
 - `src/llm.c` bridges to the `llmkit runner`: seed building, turn running, rendering, proposal parsing and application.
 - `src/prompt.c` assembles the shared system prompt.
+- `src/mcp_scan.c` holds the scan project server (`flower mcp-scan <P-id>`): the `update_project` tool.
 - `test/check.c` holds the file io round trip tests, run with `make check`.
 - `src/flower.h` declares the shared functions.
 - `llmkit/` holds the llmkit library, a separate project.
