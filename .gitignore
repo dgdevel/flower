@@ -1,0 +1,12 @@
+# build artifacts
+/flower
+/flower.exe
+/test/selfcheck
+/test/selfcheck.exe
+/test/selfcheck-vg
+/test/valgrind.log
+/dist/
+/build/
+/fuzz/fuzz_buf
+/fuzz/fuzz_cli
+/fuzz/out/
