@@ -1,0 +1,1 @@
+replace one resources.md entry pointer

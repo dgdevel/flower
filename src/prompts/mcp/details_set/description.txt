@@ -1,0 +1,1 @@
+replace one details.md chapter: the whole chapter body of the given field

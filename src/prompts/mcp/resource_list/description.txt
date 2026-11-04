@@ -1,0 +1,1 @@
+list every resources.md entry as name + pointer

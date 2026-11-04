@@ -436,13 +436,286 @@ static void test_store(void) {
     }
 }
 
+static void test_store_llm(void) {
+    static const char *const want_keys[] = {
+        "Api base", "Api key", "Protocol", "Model", "Max tokens",
+        "Reasoning effort", "Header", "Mcp proxy", "Terminal tool",
+    };
+    static const char *const want_protos[] = {
+        "anthropic", "openai", "openai-responses",
+    };
+    size_t i;
+    const char *const *p;
+
+    printf("store_llm:\n");
+
+    /* store_llm_keys table: exact contents, NULL-terminated */
+    for (i = 0; i < sizeof want_keys / sizeof want_keys[0]; i++)
+        check(store_llm_keys[i] && !strcmp(store_llm_keys[i],
+                                           want_keys[i]),
+              "llm_keys slot matches");
+    check(store_llm_keys[sizeof want_keys / sizeof want_keys[0]] == NULL,
+          "llm_keys null terminated");
+    for (p = store_llm_keys; *p; p++)
+        for (i = 0; i < sizeof want_keys / sizeof want_keys[0]; i++)
+            if (!strcmp(*p, want_keys[i])) break;
+    check_int((int)(p - store_llm_keys),
+              (int)(sizeof want_keys / sizeof want_keys[0]),
+              "llm_keys has no extras");
+
+    /* store_llm_protocols table */
+    for (i = 0; i < sizeof want_protos / sizeof want_protos[0]; i++)
+        check(store_llm_protocols[i] && !strcmp(store_llm_protocols[i],
+                                                want_protos[i]),
+              "llm_protocols slot matches");
+    check(store_llm_protocols[3] == NULL, "llm_protocols null terminated");
+
+    /* store_valid_llm_protocol matrix */
+    check_int(store_valid_llm_protocol("anthropic"), 1,
+              "protocol anthropic ok");
+    check_int(store_valid_llm_protocol("openai"), 1, "protocol openai ok");
+    check_int(store_valid_llm_protocol("openai-responses"), 1,
+              "protocol openai-responses ok");
+    check_int(store_valid_llm_protocol("bogus"), 0,
+              "protocol bogus bad");
+    check_int(store_valid_llm_protocol(""), 0, "protocol empty bad");
+    check_int(store_valid_llm_protocol("Anthropic"), 0,
+              "protocol case sensitive");
+    check_int(store_valid_llm_protocol(NULL), 0, "protocol null bad");
+
+    /* store_valid_llm_name matrix */
+    check_int(store_valid_llm_name("gpt"), 1, "name gpt ok");
+    check_int(store_valid_llm_name("claude sonnet"), 1,
+              "name with space ok");
+    check_int(store_valid_llm_name("my-prod 2"), 1,
+              "name mixed space dash digit ok");
+    check_int(store_valid_llm_name("A"), 1, "name single letter ok");
+    check_int(store_valid_llm_name("gpt-4_turbo x"), 1,
+              "name dash underscore space ok");
+    check_int(store_valid_llm_name(NULL), 0, "name null bad");
+    check_int(store_valid_llm_name(""), 0, "name empty bad");
+    check_int(store_valid_llm_name("9gpt"), 0, "name digit first bad");
+    check_int(store_valid_llm_name("claude/sonnet"), 0,
+              "name slash bad");
+    check_int(store_valid_llm_name("claude@x"), 0, "name at bad");
+    check_int(store_valid_llm_name(" claude"), 0, "name leading space bad");
+}
+
+static void test_json(void) {
+    static const char *const doc =
+        "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"fs\","
+        "\"command_line\":\"npx -y x\",\"required\":false,\"n\":3,"
+        "\"nest\":{\"a\":[1,2,{\"b\":null}]}}]}";
+    json_t *j, *j2, *n, *tools, *first;
+    char *p1, *p2, *p3;
+
+    printf("json:\n");
+
+    /* roundtrip of a representative mcp-ish document */
+    j = json_parse(doc);
+    check(j != NULL, "parse mcp doc ok");
+    p1 = j ? json_print(j) : NULL;
+    check_str(p1, doc, "print mcp doc compact");
+    j2 = p1 ? json_parse(p1) : NULL;
+    check(j2 != NULL, "reparse printed doc");
+    p2 = j2 ? json_print(j2) : NULL;
+    check(p1 && p2 && !strcmp(p1, p2), "roundtrip identical");
+    check_str(json_str_of(j, "type"), "tools", "str_of type");
+    tools = json_get(j, "tools");
+    check(tools && tools->type == JSON_ARR, "get tools is arr");
+    first = tools && tools->child ? tools->child : NULL;
+    check(first && first->type == JSON_OBJ, "tools[0] is obj");
+    check_str(json_str_of(first, "command_line"), "npx -y x",
+              "str_of nested");
+    n = json_get(first, "required");
+    check(n && n->type == JSON_BOOL && !(int)n->num, "required false");
+    n = json_get(first, "n");
+    check(n && n->type == JSON_NUM && n->num == 3.0, "n == 3.0");
+    n = json_get(json_get(json_get(first, "nest"), "a"), "x");
+    check(n == NULL, "get missing key null");
+    check(json_get(j, "nope") == NULL, "get missing top null");
+    check(json_get(NULL, "a") == NULL, "get null obj null");
+    check(json_str_of(NULL, "a") == NULL, "str_of null obj null");
+    free(p2);
+    free(p1);
+    json_free(j2);
+    json_free(j);
+
+    /* escapes: quote, backslash, newline, tab, \u00e9, surrogate pair */
+    j = json_parse("\"a\\\"b\\\\c\\nd\\te\\u00e9f\\ud83d\\ude00g\"");
+    check(j != NULL, "parse escape string ok");
+    p1 = j ? json_print(j) : NULL;
+    check_str(p1, "\"a\\\"b\\\\c\\nd\\te\xC3\xA9" "f\xF0\x9F\x98\x80" "g\"",
+              "escapes decoded to utf8");
+    j2 = p1 ? json_parse(p1) : NULL;
+    check(j2 != NULL, "reparse escaped string");
+    p2 = j2 ? json_print(j2) : NULL;
+    check(p1 && p2 && !strcmp(p1, p2), "escape roundtrip identical");
+    free(p2);
+    free(p1);
+    json_free(j2);
+    json_free(j);
+
+    /* control char escapes on serialize: \u0001 */
+    j = json_str("a\001b");
+    check(j != NULL, "json_str ok");
+    p1 = j ? json_print(j) : NULL;
+    check_str(p1, "\"a\\u0001b\"", "control char escaped");
+    free(p1);
+    json_free(j);
+
+    /* errors: NULL on all of these */
+    {
+        static const char *const bad[] = {
+            "", "{", "{\"a\":}", "[1,]", "{\"a\" 1}", "nul",
+            "\"unterminated", "\"\\q\"", "\"\\u00\"", "\"\\ud83d\"",
+            "\"\\udc00x\"", "-", "01x", "1 2", "[] extra", "{} trailing",
+            "[}", "{\"a\"}", "{1:2}",
+        };
+        size_t i;
+        for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            char name[64];
+            snprintf(name, sizeof name, "parse error case %d",
+                     (int)i + 1);
+            check(json_parse(bad[i]) == NULL, name);
+        }
+    }
+    {
+        /* deep nesting: 70 levels of [ fails, 10 passes */
+        char deep[200];
+        int i;
+        for (i = 0; i < 70; i++) deep[i] = '[';
+        for (i = 70; i < 140; i++) deep[i] = ']';
+        deep[140] = '\0';
+        check(json_parse(deep) == NULL, "70 nested arrays rejected");
+        for (i = 0; i < 10; i++) deep[i] = '[';
+        for (i = 10; i < 20; i++) deep[i] = ']';
+        deep[20] = '\0';
+        j = json_parse(deep);
+        check(j != NULL, "10 nested arrays ok");
+        json_free(j);
+    }
+    {
+        /* deep nesting via objects too */
+        char deep[256];
+        int i;
+        for (i = 0; i < 64; i++) {
+            deep[i * 2] = '{';
+            deep[i * 2 + 1] = '"';
+        }
+        deep[128] = '1';
+        for (i = 129; i < 193; i++) deep[i] = '}';
+        deep[193] = '\0';
+        check(json_parse(deep) == NULL, "65 nested objects rejected");
+    }
+
+    /* builders: json_new/json_str/json_num/json_bool/json_arr/json_obj */
+    j = json_obj();
+    n = json_str("v1");
+    n->key = str_dup("k1");
+    json_add(j, n);
+    n = json_num(2.5);
+    n->key = str_dup("k2");
+    json_add(j, n);
+    n = json_bool(1);
+    n->key = str_dup("k3");
+    json_add(j, n);
+    n = json_arr();
+    n->key = str_dup("k4");
+    json_add(j, n);
+    json_add(n, json_num(1));
+    json_add(n, json_num(2));
+    n = json_new(JSON_NULL);
+    n->key = str_dup("k5");
+    json_add(j, n);
+    p1 = json_print(j);
+    check_str(p1, "{\"k1\":\"v1\",\"k2\":2.5,\"k3\":true,"
+                  "\"k4\":[1,2],\"k5\":null}",
+              "build + print tree");
+    free(p1);
+    json_free(j);
+
+    /* number formatting: integral no .0, big/frac via %g */
+    j = json_num(1.0);
+    p1 = json_print(j);
+    check_str(p1, "1", "integral prints without .0");
+    free(p1);
+    json_free(j);
+    j = json_num(-42.0);
+    p1 = json_print(j);
+    check_str(p1, "-42", "negative integral");
+    free(p1);
+    json_free(j);
+    j = json_num(0.1);
+    p1 = json_print(j);
+    check_str(p1, "0.10000000000000001", "fraction %.17g");
+    free(p1);
+    json_free(j);
+    j = json_num(1e300);
+    p1 = json_print(j);
+    check_str(p1, "1.0000000000000001e+300", "huge exponent");
+    free(p1);
+    json_free(j);
+
+    /* parse of the printed numbers roundtrips */
+    j = json_parse("{\"a\":1,\"b\":0.1,\"c\":-42,\"d\":1e300}");
+    check(j != NULL, "parse numbers doc");
+    p1 = j ? json_print(j) : NULL;
+    j2 = p1 ? json_parse(p1) : NULL;
+    p2 = j2 ? json_print(j2) : NULL;
+    p3 = p2 ? json_print(j2) : NULL;
+    check(p2 && p3 && !strcmp(p2, p3), "number print idempotent");
+    check(j2 && json_get(j2, "c") && json_get(j2, "c")->num == -42.0,
+          "c parsed -42");
+    check(j2 && json_get(j2, "d") && json_get(j2, "d")->num == 1e300,
+          "d parsed 1e300");
+    free(p3);
+    free(p2);
+    free(p1);
+    json_free(j2);
+    json_free(j);
+
+    /* json_free(NULL) and empty containers */
+    json_free(NULL);
+    j = json_parse("{}");
+    check(j != NULL && j->child == NULL, "empty object");
+    p1 = j ? json_print(j) : NULL;
+    check_str(p1, "{}", "empty object prints {}");
+    free(p1);
+    json_free(j);
+    j = json_parse("[]");
+    check(j != NULL && j->child == NULL, "empty array");
+    p1 = j ? json_print(j) : NULL;
+    check_str(p1, "[]", "empty array prints []");
+    free(p1);
+    json_free(j);
+    j = json_parse("  null  ");
+    check(j != NULL && j->type == JSON_NULL, "ws-wrapped null");
+    json_free(j);
+
+    /* siblings survive a nested free (leak check: run under valgrind) */
+    j = json_parse("[[1],[2,[3]],[4]]");
+    check(j != NULL, "sibling tree parse");
+    if (j && j->child) {
+        json_t *mid = j->child->next;
+        json_free(mid->child); /* free [2,[3]] contents, keep [4] */
+        j->child->next->child = NULL;
+    }
+    p1 = json_print(j);
+    check_str(p1, "[[1],[],[4]]", "sibling free keeps neighbors");
+    free(p1);
+    json_free(j);
+}
+
 int main(void) {
     test_buf();
     test_strutil();
     test_md();
     test_store();
+    test_store_llm();
     test_cli();
     test_semver();
+    test_json();
     printf("selfcheck: %d passed, %d failed\n", tests_run - tests_failed,
            tests_failed);
     return tests_failed ? 1 : 0;

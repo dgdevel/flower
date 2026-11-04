@@ -171,6 +171,15 @@ const char *const store_context_prefixes[] = {
     "Fact",       "Pattern",  "Risk",
     "Success metric", "Failure sign", "Evaluation method",
     "Rule",       NULL};
+/* keys for llms.md profile chapters. Header, Mcp proxy and Terminal
+   tool may repeat inside one chapter, the rest are single-valued. */
+const char *const store_llm_keys[] = {"Api base", "Api key", "Protocol",
+                                      "Model", "Max tokens",
+                                      "Reasoning effort", "Header",
+                                      "Mcp proxy", "Terminal tool", NULL};
+/* protocols inherited from llmkit */
+const char *const store_llm_protocols[] = {"anthropic", "openai",
+                                           "openai-responses", NULL};
 
 /* longest prefix from store_context_prefixes that s starts with
    followed by ": ", NULL when none */
@@ -230,6 +239,33 @@ int store_valid_status(const char *status) {
     return !strcmp(status, "pending") || !strcmp(status, "complete");
 }
 
+/* 1 when protocol value is one of store_llm_protocols */
+int store_valid_llm_protocol(const char *protocol) {
+    const char *const *p;
+    if (!protocol) return 0;
+    for (p = store_llm_protocols; *p; p++)
+        if (!strcmp(*p, protocol)) return 1;
+    return 0;
+}
+
+/* 1 when profile name is non-empty and matches the md key charset:
+   [A-Za-z][A-Za-z0-9 _-]*. uniqueness is md_parse's duplicate-title
+   check, not this. */
+int store_valid_llm_name(const char *name) {
+    size_t i;
+    if (!name || name[0] == '\0') return 0;
+    if (!((name[0] >= 'A' && name[0] <= 'Z') ||
+          (name[0] >= 'a' && name[0] <= 'z')))
+        return 0;
+    for (i = 1; name[i]; i++) {
+        char c = name[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
 int store_parse_id_list(const char *s, char ***out_ids) {
     const char *p = s;
     char **ids = NULL;
@@ -265,4 +301,12 @@ oom:
     while (n > 0) free(ids[--n]);
     free(ids);
     return -1;
+}
+
+/* free one store_parse_id_list result */
+void store_free_ids(char **ids, int n) {
+    int i;
+    if (!ids) return;
+    for (i = 0; i < n; i++) free(ids[i]);
+    free(ids);
 }

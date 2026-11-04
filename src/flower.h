@@ -91,6 +91,49 @@ int md_load(const char *path, md_doc_t *doc);
    returns 0 ok, -1 io error (stderr message). */
 int md_save(const char *path, const md_doc_t *doc);
 
+/* json tree (json.c): a minimal rfc 8259 parser/serializer, no
+   external deps. nodes own their strings and children. */
+typedef enum {
+    JSON_NULL, JSON_BOOL, JSON_NUM, JSON_STR, JSON_ARR, JSON_OBJ
+} json_type_t;
+
+typedef struct json {
+    json_type_t type;
+    /* JSON_STR: owned string. JSON_OBJ children carry their member
+       name in .key, everything else has key == NULL */
+    char *str;           /* owned */
+    char *key;           /* owned, object member name, NULL otherwise */
+    double num;          /* JSON_NUM; JSON_BOOL uses (int)num */
+    struct json *child;  /* first child (ARR/OBJ) */
+    struct json *next;   /* next sibling */
+} json_t;
+
+/* parse whole document (NUL-terminated). returns tree or NULL on any
+   syntax error (bad escapes, lone surrogates, trailing junk, nesting
+   deeper than 64). empty input is an error. */
+json_t *json_parse(const char *s);
+/* fresh node of type t (JSON_STR nodes start with empty string) */
+json_t *json_new(json_type_t t);
+/* fresh string/number/bool node, NULL on oom */
+json_t *json_str(const char *s);
+json_t *json_num(double v);
+json_t *json_bool(int v);
+json_t *json_arr(void);
+json_t *json_obj(void);
+/* append child to the end of parent's ARR/OBJ. for OBJ the child's
+   .key must be set before the call; caller keeps the child on oom. */
+void json_add(json_t *parent, json_t *child);
+/* first member of obj matching key, NULL when missing. obj NULL-safe */
+json_t *json_get(const json_t *obj, const char *key);
+/* json_get + ->str of the hit, NULL-safe both ways */
+const char *json_str_of(const json_t *obj, const char *key);
+/* compact serialization of the subtree, malloc'd string, NULL oom.
+   numbers print without ".0" when integral, strings escape " and \
+   plus control chars (<0x20 as \uXXXX) */
+char *json_print(const json_t *node);
+/* deep free of the subtree, NULL-safe */
+void json_free(json_t *node);
+
 /* cli parser (cli.c). long options only: --name, --name=value.
    a lone "--" ends options; everything after is positional. */
 struct cli_opt {
@@ -120,6 +163,12 @@ int cli_parse(int argc, char **argv, const struct cli_opt *opts,
 /* command layer (flower.c): setup and project/task configuration
    editing per docs/config_cli.md. argv[0]=prog, argv[1]=command. */
 int flower_main(int argc, char **argv);
+/* `flower mcp <P> <area>`: stdio json-rpc server over one project
+   area (src/mcpserve.c) */
+int cmd_mcp(int argc, char **argv);
+/* scan.c: drive the llmkit runner session; argv0 for self-spawning */
+int cmd_scan(const char *pid, const char *profile, int dry_run,
+             const char *argv0);
 /* $FLOWER_BASE: $FLOWER_BASE env if set, else $XDG_CONFIG_HOME/flower,
    else $HOME/.config/flower. NULL on missing HOME and no env. */
 const char *store_base(void);
@@ -151,6 +200,16 @@ extern const char *const store_context_prefixes[]; /* Fact, Pattern, Risk,
                                                       Success metric, Failure
                                                       sign, Evaluation method,
                                                       Rule */
+/* allowed keys for llms.md profile chapters (Api base, Api key,
+   Protocol, Model, Max tokens, Reasoning effort, Header, Mcp proxy,
+   Terminal tool; the last three may repeat) and the llmkit protocol
+   values. */
+extern const char *const store_llm_keys[];
+extern const char *const store_llm_protocols[];
+/* 1 if protocol value is one of store_llm_protocols */
+int store_valid_llm_protocol(const char *protocol);
+/* 1 if profile name is non-empty [A-Za-z][A-Za-z0-9 _-]* */
+int store_valid_llm_name(const char *name);
 /* context chapter title in file is "<Prefix>: <Title>"; helpers: */
 /* 1 if title starts with one of allowed prefixes + ": " */
 int store_is_context_title(const char *chapter_title);
@@ -164,6 +223,99 @@ int store_valid_status(const char *status);
 /* parse "A1, A2" comma list into malloc'd array of malloc'd ids (trim
    spaces), returns count, *out_ids set; NULL ids on 0. -1 oom. */
 int store_parse_id_list(const char *s, char ***out_ids);
+/* free one store_parse_id_list result */
+void store_free_ids(char **ids, int n);
+
+/* config plumbing (config.c): doc schema validation, load/save under
+   $FLOWER_BASE. split out of flower.c, behavior unchanged. */
+
+/* out-of-memory reporter: prints "flower: out of memory" to stderr and
+   returns 1 so callers can `return oom();` */
+int oom(void);
+/* malloc'd sprintf, NULL on oom or format error */
+char *xasprintf(const char *fmt, ...);
+
+/* file kinds for load-time validation */
+enum {
+    FV_USER,     /* flower.md: one "# User" kv chapter */
+    FV_PROJECT,  /* config.md: one "# Project" kv chapter */
+    FV_TASK,     /* config.md: one "# Task" kv chapter */
+    FV_FIELDS,   /* details.md: chapters from store_detail_fields */
+    FV_CONTEXT,  /* context.md: "<Prefix>: <Title>" bare chapters */
+    FV_RESOURCE, /* resources.md: any name, bare value */
+    FV_ACTIONS,  /* actions.md: "# A<n>: <Title>" kv chapters */
+    FV_LLM       /* llms.md: one kv chapter per profile */
+};
+
+/* chapter title and allowed keys for the kv kinds */
+void kind_schema(int kind, const char **chapter,
+                 const char *const **keys);
+/* 1 if k is in the NULL-terminated keys list */
+int key_allowed(const char *const *keys, const char *k);
+/* entry from store_context_prefixes matching p, NULL when unknown */
+const char *prefix_known(const char *p);
+/* 1 when s is one or more digits (a positive whole number) */
+int llm_digits(const char *s);
+
+/* doc mutation helpers (md.c keeps parsing only) */
+/* append a fresh chapter at the doc tail. returns it, NULL oom (doc
+   stays valid, nch unchanged) */
+md_chapter_t *doc_add_chapter(md_doc_t *doc, const char *title,
+                              int level);
+/* drop chapter idx, freeing it */
+void doc_remove_chapter(md_doc_t *doc, int idx);
+/* append one kv pair at the chapter tail, no duplicate check (md.c is
+   parsing-only, so repeatable keys grow here). 0 ok, -1 oom */
+int doc_append_kv(md_chapter_t *c, const char *key, const char *val);
+/* replace the chapter value: kv pairs go away, body becomes text split
+   on newlines (blank lines dropped, md_parse drops them anyway).
+   0 ok, -1 oom */
+int chapter_set_body(md_chapter_t *c, const char *text);
+
+/* context/action chapter title helpers */
+/* title part of a context chapter, NULL when the title is not a valid
+   "<Prefix>: <Title>" */
+char *context_title_part(const char *chapter_title);
+/* "A<n>: <Title>" split. 1 ok (malloc'd id + title), 0 bad shape.
+   title may come back empty ("A3: ") so callers can reject it. */
+int action_split(const char *chapter_title, char **id, char **title);
+/* 1 when the chapter title is a valid "# A<n>: <Title>" */
+int action_valid_title(const char *t);
+/* 1 when some chapter is action id ("A1" matching "A1: title") */
+int action_exists(const md_doc_t *doc, const char *id);
+/* malloc'd title text of an action chapter, "" (not NULL) on oom-free
+   bad shape */
+char *action_title_of(const md_chapter_t *c);
+/* 1 when some chapter (other than skip) already holds this title */
+int context_title_taken(md_doc_t *doc, const char *title,
+                        const md_chapter_t *skip);
+
+/* schema check of an already parsed file; rejects stray chapters, keys
+   and key-value pairs where only bare text may live. on failure writes
+   the reason into out (snprintf-style, always NUL-terminated) and
+   returns 1. */
+int doc_check(int kind, const md_doc_t *doc, char *out, size_t outn);
+/* doc_check + stderr line prefixed with path */
+int validate_doc(const char *path, int kind, md_doc_t *doc);
+/* load store_path(rel) when present and validate it. 0 ok (doc may be
+   empty), 1 after printing why (doc freed). */
+int load_rel(const char *rel, int kind, md_doc_t *doc);
+/* print path as absolute: prefix it with the base directory when the
+   caller passed a relative one. realpath is not used: it would fail on
+   the freshly removed files too, not only on the just-written ones */
+void print_abs(const char *path);
+/* save doc to store_path(rel), creating mkdir_rel first when given,
+   then print the absolute path */
+int save_rel(const char *mkdir_rel, const char *rel,
+             const md_doc_t *doc);
+/* dump the raw file to stdout; missing file prints nothing */
+int print_rel_file(const char *rel);
+/* 1 when store_path(rel) is an existing directory */
+int rel_dir_exists(const char *rel);
+/* 1 after printing an error when projects/<pid> is missing */
+int require_project(const char *pid);
+/* same for projects/<pid>/tasks/<tid> (checks the project too) */
+int require_task(const char *pid, const char *tid);
 
 /* crash report (crash_report.c) */
 void crash_report_init(const char *argv0);

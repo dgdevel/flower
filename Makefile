@@ -11,9 +11,15 @@ ifneq ($(VERSION),)
 CFLAGS  += -DFLOWER_VERSION=\"$(VERSION)\"
 endif
 
-SRC  = src/buf.c src/strutil.c src/md.c src/store.c src/cli.c src/crash_report.c src/update.c src/flower.c
+SRC  = src/buf.c src/strutil.c src/md.c src/json.c src/store.c src/cli.c src/crash_report.c src/update.c src/config.c src/mcpserve.c src/scan.c src/prompts.gen.c src/flower.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
+
+# prompt texts: bundled into prompts.gen.c/.h by tools/gen-prompts.sh,
+# run whenever a .txt source or the script itself is newer than the
+# generated pair. the pair is never committed (see .gitignore).
+PROMPTS_GEN = src/prompts.gen.c src/prompts.gen.h
+PROMPTS_SRC = $(shell find src/prompts -name '*.txt' 2>/dev/null) tools/gen-prompts.sh
 
 all: flower
 
@@ -26,7 +32,7 @@ FUZZ_HARNESS = buf cli
 
 fuzz: $(foreach h,$(FUZZ_HARNESS),fuzz/fuzz_$(h))
 
-fuzz/fuzz_%: fuzz/fuzz_%.c $(SRC) src/flower.h src/crash_report.h | check-ascii
+fuzz/fuzz_%: fuzz/fuzz_%.c $(SRC) $(PROMPTS_GEN) src/flower.h src/crash_report.h | check-ascii
 	@mkdir -p $(@D)
 	clang $(CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link \
 	      $(FUZZFLAGS) -o $@ $< $(SRC) $(LDLIBS) -fsanitize=fuzzer $(FUZZFLAGS)
@@ -34,13 +40,16 @@ fuzz/fuzz_%: fuzz/fuzz_%.c $(SRC) src/flower.h src/crash_report.h | check-ascii
 # runs before every compilation (order-only: gates the build without
 # forcing a relink when nothing changed)
 check-ascii:
-	@tools/check-ascii.sh
+	tools/check-ascii.sh
 
-flower: $(MAIN) $(SRC) src/flower.h src/crash_report.h | check-ascii
+$(PROMPTS_GEN): $(PROMPTS_SRC)
+	tools/gen-prompts.sh
+
+flower: $(MAIN) $(SRC) $(PROMPTS_GEN) src/flower.h src/crash_report.h | check-ascii
 	$(CC) $(CFLAGS) -o $@ $(MAIN) $(SRC) $(LDLIBS)
 
-test/selfcheck: $(TEST) $(SRC) src/flower.h src/crash_report.h | check-ascii
-	@mkdir -p test
+test/selfcheck: $(TEST) $(SRC) $(PROMPTS_GEN) src/flower.h src/crash_report.h | check-ascii
+	mkdir -p test
 	$(CC) $(CFLAGS) -o $@ $(TEST) $(SRC) $(LDLIBS)
 
 check: test/selfcheck
@@ -55,7 +64,7 @@ VGFLAGS ?= --leak-check=full --show-leak-kinds=definite \
            --error-exitcode=99 --log-file=test/valgrind.log
 
 # -O1 instead of -O2: faster under valgrind, still debuggable
-test/selfcheck-vg: $(TEST) $(SRC) src/flower.h src/crash_report.h | check-ascii
+test/selfcheck-vg: $(TEST) $(SRC) $(PROMPTS_GEN) src/flower.h src/crash_report.h | check-ascii
 	@mkdir -p test
 	$(CC) $(CFLAGS) -O1 -g -fno-omit-frame-pointer -o $@ $(TEST) $(SRC) $(LDLIBS)
 
@@ -69,7 +78,7 @@ check-vg: test/selfcheck-vg
 # usage: make asan && FLOWER_CRASH_BACKTRACE=1 ./build/asan/flower-asan version
 ASANFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g
 
-build/asan/flower-asan: $(MAIN) $(SRC) src/flower.h src/crash_report.h | check-ascii
+build/asan/flower-asan: $(MAIN) $(SRC) $(PROMPTS_GEN) src/flower.h src/crash_report.h | check-ascii
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ $(MAIN) $(SRC) $(LDLIBS)
 
@@ -80,7 +89,8 @@ clean:
 	rm -rf build
 	rm -f flower flower.exe test/selfcheck \
 	      test/selfcheck-vg test/valgrind.log \
-	      fuzz/fuzz_buf fuzz/fuzz_cli
+	      fuzz/fuzz_buf fuzz/fuzz_cli \
+	      src/prompts.gen.c src/prompts.gen.h
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v1.2.3

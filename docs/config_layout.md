@@ -14,6 +14,29 @@ Name: Daniele
 Role: Software Developer
 ```
 
+#### LLM Configuration
+`$FLOWER_BASE/llms.md`: One chapter per named LLM profile.  
+Managed via: `./flower llm`
+
+```markdown
+# claude
+Api base: https://api.anthropic.com
+Protocol: anthropic
+Api key: sk-...
+Model: claude-sonnet-4-5
+Max tokens: 8192
+Reasoning effort: high
+Header: X-Thing=1
+Header: X-Other=2
+Mcp proxy: mcp.json
+Terminal tool: shell.exec
+```
+
+- Profile names match `[A-Za-z][A-Za-z0-9 _-]*`, unique per file.
+- Required keys: `Api base`, `Protocol`. Protocols: `anthropic`, `openai`, `openai-responses`.
+- `Header`, `Mcp proxy` and `Terminal tool` may repeat; all other keys appear at most once per profile.
+- Commands: see [docs/config_cli.md](docs/config_cli.md).
+
 #### Project Configuration
 Projects are organized as directories within `$FLOWER_BASE/projects/<project_id>/`.
 
@@ -56,6 +79,16 @@ Projects are organized as directories within `$FLOWER_BASE/projects/<project_id>
    # bulk csv generator
    src/product/feeds/generator.py#generate_csv
    ```
+
+#### Scan Artifacts
+`projects/<project_id>/scan/`: runtime files of `flower project <P> scan`
+(see docs/config_cli.md). `scout-seed.jsonl` is the readonly search
+subagent seed (mode 0600), `runner-input.jsonl` the records fed to the
+llmkit runner. Regenerated on every scan.
+
+`projects/<project_id>/llm-sessions/`: one `scan-<timestamp>.jsonl`
+transcript per scan run (mode 0600): input records plus runner output,
+replayable with `llmkit runner`.
 
 #### Task Configuration
 Tasks are organized as directories within `$FLOWER_BASE/projects/<project_id>/tasks/<task_id>/`.

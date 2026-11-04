@@ -1,0 +1,1 @@
+readonly search subagent over the project tree: lists, reads and greps files. use it to find things in the repo, read sources or verify assumptions. it never writes.

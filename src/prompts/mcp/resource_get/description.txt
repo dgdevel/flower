@@ -1,0 +1,1 @@
+show one resources.md entry: the whole value of the named entry

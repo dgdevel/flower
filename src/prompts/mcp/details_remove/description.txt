@@ -1,0 +1,1 @@
+drop one details.md chapter: the whole chapter of the given field

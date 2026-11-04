@@ -16,6 +16,28 @@ hdr "setup (update, keep Name via empty line)"
 printf '\nSenior Developer\n' | ./flower setup
 cat "$FLOWER_BASE/flower.md"
 
+hdr "setup guided llm add"
+printf 'Daniele\nSoftware Developer\ny\nclaude\nhttps://api.anthropic.com\nanthropic\nsk-test\nclaude-sonnet-4-5\n\n\nn\n' | ./flower setup
+cat "$FLOWER_BASE/llms.md"
+./flower llm list
+./flower llm claude show
+grep -q 'claude-sonnet-4-5' "$FLOWER_BASE/llms.md" && echo "ok: model in llms.md" || { echo "FAIL: model missing"; exit 1; }
+
+hdr "setup guided llm edit"
+printf '\n\ny\nclaude\n\n\n\nclaude-opus-4-1\n\n\n' | ./flower setup
+./flower llm claude show
+grep -q 'Daniele' "$FLOWER_BASE/flower.md" && echo "ok: flower.md kept Name" || { echo "FAIL: Name lost"; exit 1; }
+grep -q 'claude-opus-4-1' "$FLOWER_BASE/llms.md" && echo "ok: new model in llms.md" || { echo "FAIL: new model missing"; exit 1; }
+
+hdr "setup guided llm invalid retry (protocol)"
+printf '\n\ny\nclaude\n\n\nbogus\nanthropic\n\n\n\n\nn\n' | ./flower setup
+grep -q 'Protocol: anthropic' "$FLOWER_BASE/llms.md" && echo "ok: protocol recovered" || { echo "FAIL: protocol wrong"; exit 1; }
+
+hdr "setup eof-safe"
+printf 'x\ny\n' | ./flower setup && echo "ok: rc 0"
+./flower llm list
+./flower llm list | grep -q '^claude$' && echo "ok: claude still listed" || { echo "FAIL: claude gone"; exit 1; }
+
 hdr "project set + show"
 ./flower project P1 set Name "flower"
 ./flower project P1 set Path "/home/user/projects/flower"

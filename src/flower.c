@@ -48,32 +48,25 @@ static int usage(FILE *out) {
           "[--pending|--complete]\n"
           "       flower project <P> remove\n"
           "       flower project <P> task <T> remove\n"
-          "       flower edit <path>\n",
+          "       flower llm add <name> --base <url> --protocol <p> "
+          "[--key <k>]\n"
+          "                          [--model <m>] [--max-tokens <n>] "
+          "[--reasoning-effort <v>]\n"
+          "                          [--header <n=v>]... [--mcp-proxy "
+          "<cfg>]...\n"
+          "                          [--terminal-tool <t>]...\n"
+          "       flower llm <name> set <Key> \"<Value>\"\n"
+          "       flower llm <name> unset <Key>\n"
+          "       flower llm <name> remove\n"
+          "       flower llm <name> show\n"
+          "       flower llm list\n"
+          "       flower project <P> scan <profile> [--dry-run]\n"
+          "       flower edit <path>\n"
+          "       flower mcp <P> <area>\n",
           out);
     return 1;
 }
 
-static int oom(void) {
-    fprintf(stderr, "flower: out of memory\n");
-    return 1;
-}
-
-/* malloc'd sprintf */
-static char *xasprintf(const char *fmt, ...) {
-    va_list ap;
-    int n;
-    char *p;
-    va_start(ap, fmt);
-    n = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
-    if (n < 0) return NULL;
-    p = malloc((size_t)n + 1);
-    if (!p) return NULL;
-    va_start(ap, fmt);
-    vsnprintf(p, (size_t)n + 1, fmt, ap);
-    va_end(ap);
-    return p;
-}
 
 /* strip one pair of surrounding double quotes. returns NULL after
    complaining when the quotes are unbalanced. mutates s in place. */
@@ -96,452 +89,6 @@ static char *arg_val(char *s) {
     return s;
 }
 
-/* file kinds for load-time validation */
-enum {
-    FV_USER,     /* flower.md: one "# User" kv chapter */
-    FV_PROJECT,  /* config.md: one "# Project" kv chapter */
-    FV_TASK,     /* config.md: one "# Task" kv chapter */
-    FV_FIELDS,   /* details.md: chapters from store_detail_fields */
-    FV_CONTEXT,  /* context.md: "<Prefix>: <Title>" bare chapters */
-    FV_RESOURCE, /* resources.md: any name, bare value */
-    FV_ACTIONS   /* actions.md: "# A<n>: <Title>" kv chapters */
-};
-
-static void kind_schema(int kind, const char **chapter,
-                        const char *const **keys) {
-    *chapter = kind == FV_USER ? "User" : "Project";
-    *keys = kind == FV_USER ? store_user_keys : store_project_keys;
-    if (kind == FV_TASK) {
-        *chapter = "Task";
-        *keys = store_task_keys;
-    }
-}
-
-static int key_allowed(const char *const *keys, const char *k) {
-    for (; *keys; keys++)
-        if (!strcmp(*keys, k)) return 1;
-    return 0;
-}
-
-static const char *prefix_known(const char *p) {
-    const char *const *q;
-    for (q = store_context_prefixes; *q; q++)
-        if (!strcmp(*q, p)) return *q;
-    return NULL;
-}
-
-/* ---------- doc mutation helpers (md.c keeps parsing only) ---------- */
-
-static md_chapter_t *doc_add_chapter(md_doc_t *doc, const char *title,
-                                     int level) {
-    md_chapter_t *g = realloc(doc->ch, (size_t)(doc->nch + 1) * sizeof *g);
-    md_chapter_t *c;
-    char *t;
-    if (!g) return NULL;
-    doc->ch = g;
-    t = str_dup(title);
-    if (!t) return NULL; /* tail slot stays garbage, nch unchanged */
-    c = &doc->ch[doc->nch];
-    memset(c, 0, sizeof *c);
-    c->title = t;
-    c->level = level;
-    doc->nch++;
-    return c;
-}
-
-static void doc_remove_chapter(md_doc_t *doc, int idx) {
-    md_chapter_t *c = &doc->ch[idx];
-    int i;
-    free(c->title);
-    for (i = 0; i < c->nkv; i++) {
-        free(c->keys[i]);
-        free(c->vals[i]);
-    }
-    free(c->keys);
-    free(c->vals);
-    for (i = 0; i < c->nbody; i++) free(c->body[i].text);
-    free(c->body);
-    memmove(&doc->ch[idx], &doc->ch[idx + 1],
-            (size_t)(doc->nch - idx - 1) * sizeof *doc->ch);
-    doc->nch--;
-}
-
-/* replace the chapter value: kv pairs go away, body becomes text split
-   on newlines (blank lines dropped, md_parse drops them anyway). */
-static int chapter_set_body(md_chapter_t *c, const char *text) {
-    const char *p = text;
-    md_line_t *body = NULL;
-    int n = 0;
-    int i;
-    for (;;) {
-        const char *nl = strchr(p, '\n');
-        size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
-        if (len > 0) {
-            char *line = malloc(len + 1);
-            md_line_t *g;
-            if (!line) goto fail;
-            memcpy(line, p, len);
-            line[len] = '\0';
-            g = realloc(body, (size_t)(n + 1) * sizeof *g);
-            if (!g) {
-                free(line);
-                goto fail;
-            }
-            body = g;
-            body[n].text = line;
-            n++;
-        }
-        if (!nl) break;
-        p = nl + 1;
-    }
-    for (i = 0; i < c->nkv; i++) {
-        free(c->keys[i]);
-        free(c->vals[i]);
-    }
-    free(c->keys);
-    free(c->vals);
-    c->keys = NULL;
-    c->vals = NULL;
-    c->nkv = 0;
-    for (i = 0; i < c->nbody; i++) free(c->body[i].text);
-    free(c->body);
-    c->body = body;
-    c->nbody = n;
-    return 0;
-fail:
-    for (i = 0; i < n; i++) free(body[i].text);
-    free(body);
-    return -1;
-}
-
-/* title part of a context chapter, NULL when the title is not a valid
-   "<Prefix>: <Title>" */
-static char *context_title_part(const char *chapter_title) {
-    char *pfx, *t;
-    if (!store_split_context(chapter_title, &pfx, &t)) return NULL;
-    free(pfx);
-    return t;
-}
-
-/* "A<n>: <Title>" split. 1 ok (malloc'd id + title), 0 bad shape.
-   title may come back empty ("A3: ") so callers can reject it. */
-static int action_split(const char *chapter_title, char **id, char **title) {
-    const char *p = chapter_title;
-    char *end;
-    long n;
-    char idbuf[24];
-    *id = NULL;
-    *title = NULL;
-    if (!p || p[0] != 'A') return 0;
-    errno = 0;
-    n = strtol(p + 1, &end, 10);
-    if (errno != 0 || end == p + 1 || n < 1) return 0;
-    if (*end != ':' || end[1] != ' ') return 0;
-    snprintf(idbuf, sizeof idbuf, "A%ld", n);
-    *id = str_dup(idbuf);
-    *title = str_dup(end + 2);
-    if (!*id || !*title) {
-        free(*id);
-        free(*title);
-        *id = NULL;
-        *title = NULL;
-        return 0;
-    }
-    return 1;
-}
-
-/* 1 when the chapter title is a valid "# A<n>: <Title>" */
-static int action_valid_title(const char *t) {
-    char *id, *title;
-    int ok = action_split(t, &id, &title);
-    if (!ok) return 0;
-    ok = title[0] != '\0';
-    free(id);
-    free(title);
-    return ok;
-}
-
-/* 1 when some chapter is action id ("A1" matching "A1: title") */
-static int action_exists(const md_doc_t *doc, const char *id) {
-    int i;
-    for (i = 0; i < doc->nch; i++) {
-        char *cid, *t;
-        int eq;
-        if (!action_split(doc->ch[i].title, &cid, &t)) continue;
-        eq = !strcmp(cid, id);
-        free(cid);
-        free(t);
-        if (eq) return 1;
-    }
-    return 0;
-}
-
-/* 1 when some chapter (other than skip) already holds this title */
-static int context_title_taken(md_doc_t *doc, const char *title,
-                               const md_chapter_t *skip) {
-    int i;
-    for (i = 0; i < doc->nch; i++) {
-        char *t;
-        int eq;
-        if (&doc->ch[i] == skip) continue;
-        t = context_title_part(doc->ch[i].title);
-        if (!t) continue;
-        eq = !strcmp(t, title);
-        free(t);
-        if (eq) return 1;
-    }
-    return 0;
-}
-
-/* free one store_parse_id_list result */
-static void store_free_ids(char **ids, int n) {
-    int i;
-    if (!ids) return;
-    for (i = 0; i < n; i++) free(ids[i]);
-    free(ids);
-}
-
-/* ---------- load/save plumbing ---------- */
-
-/* schema check of an already parsed file; rejects stray chapters, keys
-   and key-value pairs where only bare text may live. on failure writes
-   the reason into out (snprintf-style, always NUL-terminated) and
-   returns 1. */
-static int doc_check(int kind, const md_doc_t *doc, char *out, size_t outn) {
-    int i, j, k;
-    for (i = 0; i < doc->nch; i++) {
-        md_chapter_t *c = &doc->ch[i];
-        if (kind == FV_USER || kind == FV_PROJECT || kind == FV_TASK) {
-            const char *chapter = NULL;
-            const char *const *keys = NULL;
-            kind_schema(kind, &chapter, &keys);
-            if (c->level != 1 || strcmp(c->title, chapter) != 0) {
-                snprintf(out, outn, "unexpected chapter '%s'", c->title);
-                return 1;
-            }
-            for (j = 0; j < c->nkv; j++) {
-                if (!key_allowed(keys, c->keys[j])) {
-                    snprintf(out, outn, "unknown key '%s' in chapter '%s'",
-                             c->keys[j], c->title);
-                    return 1;
-                }
-                for (k = 0; k < j; k++)
-                    if (!strcmp(c->keys[k], c->keys[j])) {
-                        snprintf(out, outn,
-                                 "duplicate key '%s' in chapter '%s'",
-                                 c->keys[j], c->title);
-                        return 1;
-                    }
-            }
-        } else {
-            int ok = c->level == 1 && c->title[0] != '\0';
-            if (ok && kind == FV_FIELDS)
-                ok = key_allowed(store_detail_fields, c->title);
-            else if (ok && kind == FV_CONTEXT)
-                ok = store_is_context_title(c->title);
-            else if (ok && kind == FV_ACTIONS)
-                ok = action_valid_title(c->title);
-            if (!ok) {
-                snprintf(out, outn, "unexpected chapter '%s'", c->title);
-                return 1;
-            }
-            if (kind != FV_ACTIONS && c->nkv > 0) {
-                snprintf(out, outn, "chapter '%s' must be bare text",
-                         c->title);
-                return 1;
-            }
-            if (kind == FV_ACTIONS) {
-                int nkv_status = 0;
-                for (j = 0; j < c->nkv; j++) {
-                    if (!key_allowed(store_action_keys, c->keys[j])) {
-                        snprintf(out, outn,
-                                 "unknown key '%s' in chapter '%s'",
-                                 c->keys[j], c->title);
-                        return 1;
-                    }
-                    for (k = 0; k < j; k++)
-                        if (!strcmp(c->keys[k], c->keys[j])) {
-                            snprintf(out, outn,
-                                     "duplicate key '%s' in chapter '%s'",
-                                     c->keys[j], c->title);
-                            return 1;
-                        }
-                    if (!strcmp(c->keys[j], "Status")) {
-                        nkv_status = 1;
-                        if (!store_valid_status(c->vals[j])) {
-                            snprintf(out, outn,
-                                     "invalid Status '%s' in chapter "
-                                     "'%s'",
-                                     c->vals[j], c->title);
-                            return 1;
-                        }
-                    }
-                }
-                if (!nkv_status) {
-                    snprintf(out, outn,
-                             "chapter '%s' has no Status", c->title);
-                    return 1;
-                }
-            }
-        }
-    }
-    if (kind == FV_ACTIONS) {
-        /* Depends ids must exist as chapters in this same file */
-        for (i = 0; i < doc->nch; i++) {
-            const char *dep = md_kv_get((const char **)doc->ch[i].keys,
-                                        (const char **)doc->ch[i].vals,
-                                        doc->ch[i].nkv, "Depends");
-            char **ids = NULL;
-            int n, j;
-            if (!dep) continue;
-            n = store_parse_id_list(dep, &ids);
-            if (n < 0) return oom();
-            for (j = 0; j < n; j++) {
-                if (!action_exists(doc, ids[j])) {
-                    snprintf(out, outn, "unknown action id '%s' in "
-                                        "Depends of chapter '%s'",
-                             ids[j], doc->ch[i].title);
-                    store_free_ids(ids, n);
-                    return 1;
-                }
-            }
-            store_free_ids(ids, n);
-        }
-    }
-    return 0;
-}
-
-static int validate_doc(const char *path, int kind, md_doc_t *doc) {
-    char reason[512];
-    int rc = doc_check(kind, doc, reason, sizeof reason);
-    if (rc != 0) fprintf(stderr, "flower: %s: %s\n", path, reason);
-    return rc;
-}
-
-/* load store_path(rel) when present and validate it. 0 ok (doc may be
-   empty), 1 after printing why (doc freed). */
-static int load_rel(const char *rel, int kind, md_doc_t *doc) {
-    char *path = store_path(rel);
-    int rc;
-    if (!path) return oom();
-    rc = md_load(path, doc);
-    if (rc == 1) { /* not there yet: fresh empty doc */
-        free(path);
-        return 0;
-    }
-    if (rc != 0) {
-        fprintf(stderr, "flower: cannot parse %s: %s\n", path,
-                rc == -2 ? "duplicate chapter title"
-                         : rc == -3 ? "malformed structure" : "read error");
-        free(path);
-        return 1;
-    }
-    rc = validate_doc(path, kind, doc);
-    free(path);
-    if (rc != 0) {
-        md_free_doc(doc);
-        return 1;
-    }
-    return 0;
-}
-
-/* print path as absolute: prefix it with the base directory when the
-   caller passed a relative one. realpath is not used: it would fail on
-   the freshly removed files too, not only on the just-written ones */
-static void print_abs(const char *path) {
-    const char *base = store_base();
-    if (path[0] == '/') {
-        puts(path);
-    } else if (base && base[0] == '/') {
-        char *abs = xasprintf("%s/%s", base, path);
-        if (!abs) {
-            puts(path);
-            return;
-        }
-        puts(abs);
-        free(abs);
-    } else {
-        puts(path);
-    }
-}
-
-/* save doc to store_path(rel), creating mkdir_rel first when given,
-   then print the absolute path */
-static int save_rel(const char *mkdir_rel, const char *rel,
-                    const md_doc_t *doc) {
-    char *path = store_path(rel);
-    int rc = 0;
-    if (!path) return oom();
-    if (mkdir_rel && store_mkdir_p(mkdir_rel) != 0) rc = 1;
-    if (rc == 0 && md_save(path, doc) != 0) rc = 1;
-    if (rc == 0) print_abs(path);
-    free(path);
-    return rc;
-}
-
-/* dump the raw file to stdout; missing file prints nothing */
-static int print_rel_file(const char *rel) {
-    char *path = store_path(rel);
-    FILE *f;
-    char chunk[4096];
-    size_t n;
-    int rc = 0;
-    if (!path) return oom();
-    f = fopen(path, "rb");
-    if (!f) {
-        if (errno != ENOENT) {
-            fprintf(stderr, "flower: cannot read %s: %s\n", path,
-                    strerror(errno));
-            rc = 1;
-        }
-        free(path);
-        return rc;
-    }
-    while ((n = fread(chunk, 1, sizeof chunk, f)) > 0)
-        fwrite(chunk, 1, n, stdout);
-    if (ferror(f) || ferror(stdout)) {
-        fprintf(stderr, "flower: read/write error on %s\n", path);
-        rc = 1;
-    }
-    fclose(f);
-    free(path);
-    return rc;
-}
-
-static int rel_dir_exists(const char *rel) {
-    char *path = store_path(rel);
-    struct stat st;
-    int ok = path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-    free(path);
-    return ok;
-}
-
-static int require_project(const char *pid) {
-    char *rel = xasprintf("projects/%s", pid);
-    int ok = rel && rel_dir_exists(rel);
-    free(rel);
-    if (!ok) {
-        fprintf(stderr, "flower: no such project %s\n", pid);
-        return 0;
-    }
-    return 1;
-}
-
-static int require_task(const char *pid, const char *tid) {
-    char *rel;
-    int ok;
-    if (!require_project(pid)) return 0;
-    rel = xasprintf("projects/%s/tasks/%s", pid, tid);
-    ok = rel && rel_dir_exists(rel);
-    free(rel);
-    if (!ok) {
-        fprintf(stderr, "flower: no such task %s\n", tid);
-        return 0;
-    }
-    return 1;
-}
-
 /* ---------- setup ---------- */
 
 /* prompt for one key; empty line or eof keeps the current value */
@@ -558,6 +105,167 @@ static int prompt_kv(md_chapter_t *c, const char *key) {
     return md_kv_set(c, key, line);
 }
 
+/* one yes/no prompt. 1 yes, 0 no; empty line answers def_yes, eof is
+   always no so piping /dev/null never invents profiles. */
+static int ask_yes(const char *prompt, int def_yes) {
+    char line[64];
+    printf("%s ", prompt);
+    fflush(stdout);
+    if (!fgets(line, sizeof line, stdin)) return 0;
+    str_trim(line);
+    if (!line[0]) return def_yes;
+    if (line[0] == 'y' || line[0] == 'Y') return 1;
+    return 0;
+}
+
+/* one text prompt with a "[current]" hint when cur is set. out gets
+   the trimmed answer; *eof_out flags eof. returns 1 for non-empty
+   text, 0 for empty line or eof. */
+static int ask_line(const char *prompt, const char *cur, char *out,
+                    size_t outn, int *eof_out) {
+    *eof_out = 0;
+    if (cur && cur[0]) printf("%s [%s]: ", prompt, cur);
+    else printf("%s: ", prompt);
+    fflush(stdout);
+    if (!fgets(out, (int)outn, stdin)) {
+        *eof_out = 1;
+        out[0] = '\0';
+        return 0;
+    }
+    str_trim(out);
+    return out[0] != '\0';
+}
+
+/* one llm profile walk. *c_io names the existing chapter or comes in
+   NULL to create it. keys asked in store_llm_keys order: Api base
+   (required once the chapter is empty), Protocol (validated, retried),
+   Api key, Model, Max tokens (digits, retried), Reasoning effort.
+   name is fixed, repeatable Header/Mcp proxy/Terminal tool stay with
+   `flower llm <name> set`. empty input keeps the current value, eof
+   stops. *changed reports any write to the doc. 0 ok, 1 oom. */
+static int prompt_llm_chapter(md_doc_t *doc, md_chapter_t **c_io,
+                              const char *name, int *changed, int *eof) {
+    static const struct {
+        const char *key;
+        int digits; /* 1: llm_digits validated, retried */
+    } walk[] = {{"Api base", 0},  {"Protocol", 0},   {"Api key", 0},
+                {"Model", 0},     {"Max tokens", 1}, {"Reasoning effort", 0}};
+    md_chapter_t *c = *c_io;
+    int fresh = c == NULL;
+    int i;
+    if (fresh) {
+        c = doc_add_chapter(doc, name, 1);
+        if (!c) return oom();
+        *c_io = c;
+        *changed = 1;
+    }
+    for (i = 0; i < (int)(sizeof walk / sizeof walk[0]); i++) {
+        const char *key = walk[i].key;
+        char line[4096];
+        int e = 0, want = 0;
+        const char *cur = md_kv_get((const char **)c->keys,
+                                    (const char **)c->vals, c->nkv, key);
+        for (;;) {
+            if (!ask_line(key, cur, line, sizeof line, &e)) {
+                if (e) { /* eof: keep what was collected so far */
+                    *eof = 1;
+                    return 0;
+                }
+                if (fresh || i != 0) break; /* keep current value */
+                fprintf(stderr, "flower: %s is required\n", key);
+                continue; /* first key of a new chapter: retry */
+            }
+            if (walk[i].digits && !llm_digits(line)) {
+                fprintf(stderr, "flower: invalid %s '%s'\n", key, line);
+                continue;
+            }
+            if (!strcmp(key, "Protocol") &&
+                !store_valid_llm_protocol(line)) {
+                fprintf(stderr, "flower: invalid Protocol '%s'\n", line);
+                continue;
+            }
+            want = 1;
+            break;
+        }
+        if (want && md_kv_set(c, key, line) != 0) return oom();
+        if (want) *changed = 1;
+    }
+    return 0;
+}
+
+/* guided llms.md walk after flower.md: list or offer to add, then edit
+   or create profiles by name. eof anywhere just stops. saves only when
+   something changed. 0 ok, 1 error. */
+static int setup_llm_walk(void) {
+    const char *file = "llms.md";
+    md_doc_t doc;
+    int changed = 0, eof = 0, rc = 0, i;
+    if (load_rel(file, FV_LLM, &doc)) return 1;
+    if (doc.nch == 0) {
+        if (!ask_yes("no llm profiles configured. add one? [Y/n]", 1))
+            goto out;
+    } else {
+        for (i = 0; i < doc.nch; i++)
+            printf("  %d. %s\n", i + 1, doc.ch[i].title);
+        if (!ask_yes("edit llm profiles? [y/N]", 0)) goto out;
+    }
+    while (!eof) {
+        md_chapter_t *c = NULL;
+        char name[4096];
+        int e = 0;
+        if (doc.nch > 0) {
+            if (!ask_line("profile to edit (name, Enter to skip)", NULL,
+                          name, sizeof name, &e)) {
+                if (e) break;
+                goto another;
+            }
+        } else {
+            if (!ask_line("profile name (Enter to stop)", NULL, name,
+                          sizeof name, &e))
+                break;
+        }
+        if (!store_valid_llm_name(name)) {
+            fprintf(stderr, "flower: invalid profile name '%s'\n", name);
+            goto another;
+        }
+        c = md_find(&doc, name);
+        if (!c && doc.nch > 0 &&
+            !ask_yes("no profile. create? [y/N]", 0))
+            goto another;
+        while (!c && md_find(&doc, name)) {
+            /* duplicate title: md would parse-refuse it, so retry */
+            char dup[4096];
+            int de = 0;
+            fprintf(stderr, "flower: duplicate profile '%s'\n", name);
+            if (!ask_line("profile name (Enter to stop)", NULL, dup,
+                          sizeof dup, &de)) {
+                if (de) goto out; /* eof: keep what we have */
+                goto another;
+            }
+            if (!store_valid_llm_name(dup)) {
+                fprintf(stderr, "flower: invalid profile name '%s'\n",
+                        dup);
+                continue;
+            }
+            strcpy(name, dup);
+        }
+        if (prompt_llm_chapter(&doc, &c, name, &changed, &eof) != 0) {
+            rc = 1;
+            goto out;
+        }
+        if (eof) break;
+    another:
+        if (!ask_yes("add another llm profile? [y/N]", 0)) break;
+    }
+out:
+    if (!rc && changed) {
+        if (store_mkdir_p(NULL) != 0) rc = 1;
+        else rc = save_rel(NULL, file, &doc);
+    }
+    md_free_doc(&doc);
+    return rc;
+}
+
 static int cmd_setup(void) {
     char *rel = "flower.md";
     md_doc_t doc;
@@ -571,6 +279,7 @@ static int cmd_setup(void) {
     if (prompt_kv(u, "Role") != 0) goto out;
     if (store_mkdir_p(NULL) != 0) goto out;
     rc = save_rel(NULL, rel, &doc);
+    if (rc == 0) rc = setup_llm_walk();
 out:
     md_free_doc(&doc);
     return rc;
@@ -913,14 +622,6 @@ static md_chapter_t *action_find(md_doc_t *doc, const char *id) {
     return NULL;
 }
 
-/* malloc'd title text of an action chapter, NULL oom */
-static char *action_title_of(const md_chapter_t *c) {
-    char *id, *t;
-    if (!action_split(c->title, &id, &t)) return str_dup("");
-    free(id);
-    return t;
-}
-
 /* 1 when some action's Depends mentions id (skip's own Depends is
    ignored: self-reference is rejected at set time, not here) */
 static char *action_depended_on(md_doc_t *doc, const char *id,
@@ -1159,6 +860,268 @@ out:
     return rc;
 }
 
+/* ---------- llm profiles (llms.md) ---------- */
+
+/* argv[1]="llm". verbs: add, list, or "<name> set|unset|remove|show".
+   add scans its flags by hand like cmd_action's --description loop
+   because Header/Mcp proxy/Terminal tool repeat and cli_parse keeps
+   only the last value of an option. */
+static int cmd_llm(int argc, char **argv) {
+    const char *file = "llms.md";
+    const char *verb;
+    md_doc_t doc;
+    md_chapter_t *c;
+    int rc;
+
+    if (argc < 3) return usage(stderr);
+    verb = argv[2];
+
+    if (!strcmp(verb, "list")) {
+        int i;
+        if (argc != 3) return usage(stderr);
+        if (load_rel(file, FV_LLM, &doc)) return 1;
+        for (i = 0; i < doc.nch; i++) printf("%s\n", doc.ch[i].title);
+        md_free_doc(&doc);
+        return ferror(stdout) ? 1 : 0;
+    }
+
+    if (!strcmp(verb, "add")) {
+        char *name;
+        char *base = NULL, *proto = NULL, *apikey = NULL;
+        char *model = NULL, *maxtok = NULL, *reason = NULL;
+        struct {
+            const char *key; /* store key of a repeatable flag */
+            char *val;
+        } rep[64];
+        int nrep = 0;
+        int i;
+
+        if (argc < 4) return usage(stderr);
+        name = arg_val(argv[3]);
+        if (!name) return usage(stderr);
+        for (i = 4; i < argc; i++) {
+            const char *rkey = NULL;
+            char **slot = NULL;
+            char *v;
+            if (i + 1 >= argc) return usage(stderr);
+            if (!strcmp(argv[i], "--base"))
+                slot = &base;
+            else if (!strcmp(argv[i], "--protocol"))
+                slot = &proto;
+            else if (!strcmp(argv[i], "--key"))
+                slot = &apikey;
+            else if (!strcmp(argv[i], "--model"))
+                slot = &model;
+            else if (!strcmp(argv[i], "--max-tokens"))
+                slot = &maxtok;
+            else if (!strcmp(argv[i], "--reasoning-effort"))
+                slot = &reason;
+            else if (!strcmp(argv[i], "--header"))
+                rkey = "Header";
+            else if (!strcmp(argv[i], "--mcp-proxy"))
+                rkey = "Mcp proxy";
+            else if (!strcmp(argv[i], "--terminal-tool"))
+                rkey = "Terminal tool";
+            else
+                return usage(stderr);
+            v = arg_val(argv[i + 1]);
+            if (!v) return usage(stderr);
+            if (slot) {
+                *slot = v;
+            } else if (nrep < (int)(sizeof rep / sizeof rep[0])) {
+                rep[nrep].key = rkey;
+                rep[nrep].val = v;
+                nrep++;
+            } else {
+                fprintf(stderr, "flower: too many repeatable llm "
+                                "options\n");
+                return 1;
+            }
+            i++;
+        }
+        if (!store_valid_llm_name(name)) {
+            fprintf(stderr, "flower: invalid profile name '%s'\n", name);
+            return 1;
+        }
+        if (!base || !base[0]) {
+            fprintf(stderr, "flower: --base <url> is required\n");
+            return 1;
+        }
+        if (!proto || !store_valid_llm_protocol(proto)) {
+            fprintf(stderr, "flower: --protocol must be anthropic, "
+                            "openai or openai-responses\n");
+            return 1;
+        }
+        if (maxtok && !llm_digits(maxtok)) {
+            fprintf(stderr, "flower: invalid --max-tokens '%s'\n", maxtok);
+            return 1;
+        }
+        if (load_rel(file, FV_LLM, &doc)) return 1;
+        if (md_find(&doc, name)) {
+            fprintf(stderr, "flower: duplicate profile '%s'\n", name);
+            md_free_doc(&doc);
+            return 1;
+        }
+        c = doc_add_chapter(&doc, name, 1);
+        if (!c) {
+            md_free_doc(&doc);
+            return oom();
+        }
+        if (md_kv_set(c, "Api base", base) != 0 ||
+            md_kv_set(c, "Protocol", proto) != 0 ||
+            (apikey && md_kv_set(c, "Api key", apikey) != 0) ||
+            (model && md_kv_set(c, "Model", model) != 0) ||
+            (maxtok && md_kv_set(c, "Max tokens", maxtok) != 0) ||
+            (reason && md_kv_set(c, "Reasoning effort", reason) != 0)) {
+            md_free_doc(&doc);
+            return oom();
+        }
+        for (i = 0; i < nrep; i++)
+            if (doc_append_kv(c, rep[i].key, rep[i].val) != 0) {
+                md_free_doc(&doc);
+                return oom();
+            }
+        if (store_mkdir_p(NULL) != 0) {
+            md_free_doc(&doc);
+            return 1;
+        }
+        rc = save_rel(NULL, file, &doc);
+        md_free_doc(&doc);
+        return rc;
+    }
+
+    /* remaining verbs address one profile */
+    {
+        const char *name = argv[2];
+        const char *v = argv[3];
+
+        if (argc < 4) return usage(stderr);
+        if (!store_valid_llm_name(name)) {
+            fprintf(stderr, "flower: invalid profile name '%s'\n", name);
+            return 1;
+        }
+
+        if (!strcmp(v, "set") && argc == 6) {
+            char *key = arg_val(argv[4]);
+            char *val = arg_val(argv[5]);
+            if (!key || !val) return usage(stderr);
+            if (!key_allowed(store_llm_keys, key)) {
+                fprintf(stderr, "flower: unknown key '%s'\n", key);
+                return 1;
+            }
+            if (!strcmp(key, "Api base") && !val[0]) {
+                fprintf(stderr, "flower: empty Api base\n");
+                return 1;
+            }
+            if (!strcmp(key, "Protocol") && !store_valid_llm_protocol(val)) {
+                fprintf(stderr, "flower: invalid Protocol '%s'\n", val);
+                return 1;
+            }
+            if (!strcmp(key, "Max tokens") && !llm_digits(val)) {
+                fprintf(stderr, "flower: invalid Max tokens '%s'\n", val);
+                return 1;
+            }
+            if (load_rel(file, FV_LLM, &doc)) return 1;
+            c = md_find(&doc, name);
+            if (!c) {
+                fprintf(stderr, "flower: no such profile '%s'\n", name);
+                md_free_doc(&doc);
+                return 1;
+            }
+            if (!strcmp(key, "Header") || !strcmp(key, "Mcp proxy") ||
+                !strcmp(key, "Terminal tool")) {
+                rc = doc_append_kv(c, key, val) != 0 ? oom() : 0;
+            } else {
+                rc = md_kv_set(c, key, val) != 0 ? oom() : 0;
+            }
+            if (rc != 0) {
+                md_free_doc(&doc);
+                return rc;
+            }
+            rc = save_rel(NULL, file, &doc);
+            md_free_doc(&doc);
+            return rc;
+        }
+
+        if (!strcmp(v, "unset") && argc == 5) {
+            char *key = arg_val(argv[4]);
+            int j, kept = 0, found = 0;
+            if (!key) return usage(stderr);
+            if (!key_allowed(store_llm_keys, key)) {
+                fprintf(stderr, "flower: unknown key '%s'\n", key);
+                return 1;
+            }
+            /* Api base and Protocol are required, dropping either
+               would leave an invalid file */
+            if (!strcmp(key, "Api base") || !strcmp(key, "Protocol")) {
+                fprintf(stderr, "flower: %s cannot be unset\n", key);
+                return 1;
+            }
+            if (load_rel(file, FV_LLM, &doc)) return 1;
+            c = md_find(&doc, name);
+            if (!c) {
+                fprintf(stderr, "flower: no such profile '%s'\n", name);
+                md_free_doc(&doc);
+                return 1;
+            }
+            for (j = 0; j < c->nkv; j++) {
+                if (!strcmp(c->keys[j], key)) {
+                    free(c->keys[j]);
+                    free(c->vals[j]);
+                    found = 1;
+                    continue;
+                }
+                c->keys[kept] = c->keys[j];
+                c->vals[kept] = c->vals[j];
+                kept++;
+            }
+            if (!found) {
+                fprintf(stderr, "flower: no such key '%s' in profile "
+                                "'%s'\n",
+                        key, name);
+                md_free_doc(&doc);
+                return 1;
+            }
+            c->nkv = kept;
+            rc = save_rel(NULL, file, &doc);
+            md_free_doc(&doc);
+            return rc;
+        }
+
+        if (!strcmp(v, "remove") && argc == 4) {
+            if (load_rel(file, FV_LLM, &doc)) return 1;
+            c = md_find(&doc, name);
+            if (!c) {
+                fprintf(stderr, "flower: no such profile '%s'\n", name);
+                md_free_doc(&doc);
+                return 1;
+            }
+            doc_remove_chapter(&doc, (int)(c - doc.ch));
+            rc = save_rel(NULL, file, &doc);
+            md_free_doc(&doc);
+            return rc;
+        }
+
+        if (!strcmp(v, "show") && argc == 4) {
+            int i;
+            if (load_rel(file, FV_LLM, &doc)) return 1;
+            c = md_find(&doc, name);
+            if (!c) {
+                fprintf(stderr, "flower: no such profile '%s'\n", name);
+                md_free_doc(&doc);
+                return 1;
+            }
+            for (i = 0; i < c->nkv; i++)
+                printf("%s: %s\n", c->keys[i], c->vals[i]);
+            for (i = 0; i < c->nbody; i++) printf("%s\n", c->body[i].text);
+            md_free_doc(&doc);
+            return ferror(stdout) ? 1 : 0;
+        }
+    }
+
+    return usage(stderr);
+}
+
 /* ---------- recursive delete ---------- */
 
 /* rm -rf by opendir recursion, no system(). 0 ok, -1 io error. */
@@ -1246,6 +1209,7 @@ static int cmd_remove_tree(const char *rel) {
 /* file kind by relative path under base, -1 when unrecognized */
 static int kind_for_rel(const char *rel) {
     if (!strcmp(rel, "flower.md")) return FV_USER;
+    if (!strcmp(rel, "llms.md")) return FV_LLM;
     if (str_starts(rel, "projects/")) {
         const char *p = rel + strlen("projects/");
         const char *slash = strchr(p, '/');
@@ -1598,6 +1562,16 @@ static int cmd_project(int argc, char **argv) {
         return usage(stderr);
     }
 
+    if (!strcmp(area, "scan") && (argc == 5 ||
+                                   (argc == 6 &&
+                                    !strcmp(argv[5], "--dry-run")))) {
+        if (!store_valid_id(pid, 'P')) {
+            fprintf(stderr, "flower: invalid project id '%s'\n", pid);
+            return 1;
+        }
+        return cmd_scan(pid, argv[4], argc == 6, argv[0]);
+    }
+
     if (!strcmp(area, "remove") && argc == 4) {
         char *rel;
         int rc;
@@ -1620,6 +1594,7 @@ int flower_main(int argc, char **argv) {
         return cmd_setup();
     }
     if (!strcmp(cmd, "project")) return cmd_project(argc, argv);
+    if (!strcmp(cmd, "llm")) return cmd_llm(argc, argv);
     if (!strcmp(cmd, "edit")) {
         if (argc != 3) return usage(stderr);
         return cmd_edit(argv[2]);

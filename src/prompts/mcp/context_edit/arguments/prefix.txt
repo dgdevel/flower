@@ -1,0 +1,1 @@
+chapter kind: Fact, Pattern, Risk, Success metric, Failure sign, Evaluation method or Rule

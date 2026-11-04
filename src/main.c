@@ -10,7 +10,8 @@ static int usage(FILE *out) {
     fputs("usage: flower <command> [args]\n"
           "\n"
           "commands:\n"
-          "  setup                          create/update $FLOWER_BASE/flower.md\n"
+          "  setup                          create/update flower.md, then guide\n"
+          "                                through llm profiles (llms.md)\n"
           "  project <P> set <Key> \"<Value>\"\n"
           "                                edit project config.md (Name, Path,\n"
           "                                Description)\n"
@@ -38,8 +39,22 @@ static int usage(FILE *out) {
           "                                list \"<id>: <title> [<status>]\"\n"
           "  project <P> remove               delete project directory\n"
           "  project <P> task <T> remove      delete task directory\n"
+          "  llm add <name> --base <url> --protocol <p> [options]\n"
+          "                                add profile to llms.md\n"
+          "  llm <name> set <Key> \"<Value>\"\n"
+          "                                edit profile key\n"
+          "  llm <name> unset <Key>          drop key from profile\n"
+          "  llm <name> remove               drop profile chapter\n"
+          "  llm <name> show                 print profile pairs\n"
+          "  llm list                        print profile names\n"
           "  edit <path>                    $EDITOR on file under FLOWER_BASE,\n"
           "                                validated before saving\n"
+          "  project <P> scan <profile>     llm session: scan the project\n"
+          "                                and fill details/context/resources\n"
+          "                                [--dry-run prints the runner jsonl]\n"
+          "  mcp <P> <area>                 stdio json-rpc server over one\n"
+          "                                project area (details, context,\n"
+          "                                resource)\n"
           "  update [--yes]                 check github for a newer release\n"
           "                                and install it\n"
           "  help                           show this help\n"
@@ -69,7 +84,9 @@ int main(int argc, char **argv) {
     cmd = argv[1];
     if (!strcmp(cmd, "setup")) return flower_main(argc, argv);
     if (!strcmp(cmd, "project")) return flower_main(argc, argv);
+    if (!strcmp(cmd, "llm")) return flower_main(argc, argv);
     if (!strcmp(cmd, "edit")) return flower_main(argc, argv);
+    if (!strcmp(cmd, "mcp")) return cmd_mcp(argc, argv);
     if (!strcmp(cmd, "update")) return cmd_update(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();

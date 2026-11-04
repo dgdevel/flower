@@ -39,7 +39,8 @@ make fuzz         # set up libFuzzer harnesses (see fuzz/README.md)
 ./flower project <P> task <T> <area> <verb> [args]
 ```
 
-- `setup` - create/update `$FLOWER_BASE/flower.md`
+- `setup` - create/update `$FLOWER_BASE/flower.md`, then guided add/edit of llm
+  profiles (`llms.md`)
 - `project <P> set|show|remove` - project config (`Name`, `Path`,
   `Description`)
 - `project <P> details set|remove|show` - detail chapters (`Output`,
@@ -99,9 +100,9 @@ Full specs: [docs/config_layout.md](docs/config_layout.md),
 ## Develop
 
 - `src/` holds all sources, `flower.h` is the single header.
-- `test/selfcheck.c` is the unit suite (`make check`); `test/smoke-part1.sh`
-  and `test/smoke-part2.sh` run the docs/config_cli.md examples end to end
-  against a throwaway `$FLOWER_BASE`.
+- `test/selfcheck.c` is the unit suite (`make check`); `test/smoke-part1.sh`,
+  `test/smoke-part2.sh` and `test/smoke-part3.sh` run the docs/config_cli.md
+  examples end to end against a throwaway `$FLOWER_BASE`.
 - `fuzz/` has the libFuzzer harnesses, `tools/` the packaging scripts.
 - Sources are ASCII-only, enforced by the `check-ascii` gate that runs
   before every compilation.

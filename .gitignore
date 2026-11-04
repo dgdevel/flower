@@ -10,3 +10,8 @@
 /fuzz/fuzz_buf
 /fuzz/fuzz_cli
 /fuzz/out/
+/src/prompts.gen.c
+/src/prompts.gen.h
+
+# ignore the dir
+/llmkit/

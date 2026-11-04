@@ -23,12 +23,17 @@ dependency-free.
     - `strutil.c`: byte-oriented string helpers (`str_trim`, `str_starts`).
     - `md.c`: markdown chapter parser/serializer (`md_parse`/`md_find`/`md_kv_set`/`md_serialize`/`md_load`/`md_save`).
     - `store.c`: `$FLOWER_BASE` resolution, path builders, id allocators (`P1`/`T1`/`A1`), schema tables (allowed keys and context prefixes).
+    - `json.c`: the minimal json tree - parser, builders, serializer (no deps).
     - `cli.c`: the long-option parser (`--name`, `--name value`, `--name=value`, lone `--`).
+    - `config.c`: the config plumbing - doc schema validation, load/save under `$FLOWER_BASE` (used by the command layer).
+    - `mcpserve.c`: `flower mcp <P> <area>` - stdio json-rpc servers exposing the details/context/resource editing tools.
+    - `scan.c`: `flower project <P> scan <profile>` - builds the llmkit runner jsonl (llm record from the profile, tool servers, embedded config prompt) and spawns `<llmkit> runner`.
+    - `src/prompts/`: tool descriptions and system prompts as txt, bundled into the binary by `tools/gen-prompts.sh` at build time (edit the txt, rebuild - never edit `src/prompts.gen.c`).
     - `crash_report.c`/`.h`: fatal-signal handler (SIGSEGV/SIGBUS/SIGFPE/SIGABRT), optional backtrace.
     - `update.c`: `flower update` - latest-release check via the curl binary; download step is a documented stub.
     - `flower.c`: the command layer (`flower_main`) - setup, project/task configuration editing per docs/config_cli.md.
 - `test/selfcheck.c`: the self-check unit suite (`make check`).
-- `test/smoke-part1.sh`, `test/smoke-part2.sh`: end-to-end runs of the docs/config_cli.md examples in a throwaway `$FLOWER_BASE`.
+- `test/smoke-part1.sh`, `test/smoke-part2.sh`, `test/smoke-part3.sh`, `test/smoke-part4.sh`: end-to-end runs of the docs/config_cli.md examples in a throwaway `$FLOWER_BASE` (part 4 covers the mcp servers and scan dry-run, no network).
 - `fuzz/`: libFuzzer harnesses and seed corpora (see `fuzz/README.md`).
 - `tools/`: build, release, and packaging utilities (`release.sh`, `package.sh`, `check-ascii.sh`, `pkg/`).
 - `docs/`: release and crash-report documentation.
