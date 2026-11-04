@@ -83,12 +83,12 @@ Projects are organized as directories within `$FLOWER_BASE/projects/<project_id>
 #### Scan Artifacts
 `projects/<project_id>/scan/`: runtime files of `flower project <P> scan`
 (see docs/config_cli.md). `scout-seed.jsonl` is the readonly search
-subagent seed (mode 0600), `runner-input.jsonl` the records fed to the
-llmkit runner. Regenerated on every scan.
+subagent seed (mode 0600). Regenerated on every scan.
 
 `projects/<project_id>/llm-sessions/`: one `scan-<timestamp>.jsonl`
-transcript per scan run (mode 0600): input records plus runner output,
-replayable with `llmkit runner`.
+transcript per scan run (mode 0600): every record sent to the runner's
+stdin in send order (header, llm, tools, then per stage system, user,
+flush) plus the runner output, replayable with `llmkit runner`.
 
 #### Task Configuration
 Tasks are organized as directories within `$FLOWER_BASE/projects/<project_id>/tasks/<task_id>/`.

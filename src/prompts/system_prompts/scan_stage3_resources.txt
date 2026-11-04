@@ -1,0 +1,6 @@
+stage 3 of 3: resource cataloging.
+
+catalog useful pointers in resources.md, one named entry per pointer:
+the build file, key sources, docs, entry points. a pointer is a url,
+a path or file#fragment. name each entry so its purpose is clear from
+the name alone.

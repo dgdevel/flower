@@ -189,9 +189,10 @@ hdr "scan: setup profiles"
     --header "broken"
 ./flower project P1 details set Output "old output line"
 
-hdr "scan dry-run: record shape"
+hdr "scan dry-run: staged record shape"
 ./flower project P1 scan gpt --dry-run > scan-dry.jsonl 2> scan-dry.err
-test "$(grep -c "" scan-dry.jsonl)" = 5
+# header, llm, tools + three stages of (system, user, flush)
+test "$(grep -c "" scan-dry.jsonl)" = 12
 grep -q '"type":"header","version":1' scan-dry.jsonl
 sed -n 2p scan-dry.jsonl | grep -q '"endpoint_protocol":"openai"'
 sed -n 2p scan-dry.jsonl | grep -q '"api_base":"https://api.openai.com/v1"'
@@ -204,19 +205,25 @@ sed -n 3p scan-dry.jsonl | grep -q 'mcp P1 context'
 sed -n 3p scan-dry.jsonl | grep -q 'mcp P1 resource'
 sed -n 3p scan-dry.jsonl | grep -q 'agent-as-tool'
 sed -n 3p scan-dry.jsonl | grep -q 'scout-seed.jsonl'
+for n in 6 9 12; do sed -n "${n}p" scan-dry.jsonl | grep -q '"type":"flush"'; done
 python3 - "$FLOWER_BASE" <<'EOF'
 import json, sys
-line = open("scan-dry.jsonl").read().splitlines()[3]
-text = json.loads(line)["content"][0]["text"]
-assert "## Project" in text, "shifted config header"
-assert "## Output" in text, "shifted details header"
-assert "old output line" in text, "details body embedded"
-assert text.startswith("you are a project scanner"), "prompt head"
-assert "# Project configuration" in text
-print("ok: system record shape")
+lines = open("scan-dry.jsonl").read().splitlines()
+def text(i): return json.loads(lines[i])["content"][0]["text"]
+s1, s2, s3 = text(3), text(6), text(9)
+assert s1.startswith("you are a project scanner"), "preamble head"
+assert "stage 1 of 3" in s1 and "[STEP_COMPLETE]" in s1
+assert "# Current details.md" in s1, "details embedded in stage 1"
+assert "## Output" in s1 and "old output line" in s1, "shifted details body"
+assert "# Current context.md" not in s1, "no other files in stage 1"
+assert text(4).startswith("begin stage 1")
+assert "stage 2 of 3" in s2 and "# Current context.md" in s2
+assert "stage 3 of 3" in s3 and "# Current resources.md" in s3
+print("ok: staged system records")
 EOF
-sed -n 5p scan-dry.jsonl | grep -q 'Scan the project now.'
 echo "ok: dry-run records"
+# runner-input.jsonl is gone: the records go to the runner's stdin live
+test ! -f "$FLOWER_BASE/projects/P1/scan/runner-input.jsonl"
 
 hdr "scan seed file"
 SEED="$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
@@ -235,33 +242,84 @@ hdr "scan error paths (expect fails)"
 ./flower project P9 scan gpt 2>&1 | grep -q "no such project"
 echo "ok: scan errors"
 
-hdr "scan session transcript (fake llmkit)"
+hdr "scan session transcript (fake llmkit, staged)"
 rc=0
 mkdir -p fakellm
 cat > fakellm/llmkit <<'FAKE'
-#!/bin/sh
-# fake llmkit: emits a runner-shaped output line, no network
-printf '%s\n' '{"type":"header","version":1}'
-printf '%s\n' '{"type":"error","code":"connect_failed","message":"fake","fatal":true}'
-exit 3
+#!/usr/bin/env python3
+# fake llmkit runner: reads stdin incrementally (proves the records are
+# fed live, not from a file), answers each flush with a start marker and
+# ends every stage turn with [STEP_COMPLETE]. no network.
+import sys, json
+stage = 0
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line:
+        continue
+    rec = json.loads(line)
+    t = rec.get("type")
+    if t == "system":
+        txt = rec["content"][0]["text"]
+        if "stage 1 of 3" in txt:
+            stage = 1
+        elif "stage 2 of 3" in txt:
+            stage = 2
+        elif "stage 3 of 3" in txt:
+            stage = 3
+    elif t == "flush":
+        print(json.dumps({"type": "start"}), flush=True)
+        print(json.dumps({"type": "response",
+                          "text": "stage %d done [STEP_COMPLETE]" % stage,
+                          "finish_reason": "stop"}), flush=True)
+sys.exit(0)
 FAKE
 chmod +x fakellm/llmkit
 ./flower llm add mock --base "http://localhost:9/v1" --protocol openai \
     --model m1 --max-tokens 64
 FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >scan-out.jsonl || rc=$?
-test "$rc" = 3
-grep -q '"code":"connect_failed"' scan-out.jsonl
+test "$rc" = 0
+# stdout carries the runner output only: three start/response pairs
+test "$(grep -c "" scan-out.jsonl)" = 6
+grep -q '"type": *"start"' scan-out.jsonl
+grep -q 'stage 1 done \[STEP_COMPLETE\]' scan-out.jsonl
+grep -q 'stage 2 done \[STEP_COMPLETE\]' scan-out.jsonl
+grep -q 'stage 3 done \[STEP_COMPLETE\]' scan-out.jsonl
 SESSDIR="$FLOWER_BASE/projects/P1/llm-sessions"
 SESS=$(ls "$SESSDIR"/scan-*.jsonl | head -1)
 test "$(stat -c %a "$SESS")" = 600
-# input records (5) + runner output (1): dup header skipped
-test "$(grep -c "" "$SESS")" = 6
+# initial records (3) + per stage (system, user, flush, start, response)
+test "$(grep -c "" "$SESS")" = 18
 head -1 "$SESS" | grep -q '"type":"header","version":1'
 sed -n 2p "$SESS" | grep -q '"type":"llm"'
-tail -1 "$SESS" | grep -q '"code":"connect_failed"'
+python3 - "$SESS" <<'EOF'
+import json, sys
+lines = open(sys.argv[1]).read().splitlines()
+seq = [json.loads(l)["type"] for l in lines]
+assert seq == ["header", "llm", "tools",
+               "system", "user", "flush", "start", "response",
+               "system", "user", "flush", "start", "response",
+               "system", "user", "flush", "start", "response"], seq
+print("ok: staged transcript")
+EOF
 FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >/dev/null 2>&1 || true
 test "$(ls "$SESSDIR" | grep -c scan-)" = 2
-rm -rf fakellm scan-out.jsonl
 echo "ok: session transcript"
+
+hdr "scan error path: runner dies mid-stage (expect fail)"
+cat > fakellm/llmkit <<'FAKE'
+#!/bin/sh
+# fake llmkit: emits a fatal error before any stage can complete
+printf '%s\n' '{"type":"header","version":1}'
+printf '%s\n' '{"type":"error","code":"connect_failed","message":"fake","fatal":true}'
+exit 3
+FAKE
+chmod +x fakellm/llmkit
+FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >scan-out2.jsonl || rc=$?
+test "$rc" = 3
+grep -q '"code":"connect_failed"' scan-out2.jsonl
+SESS=$(ls "$SESSDIR"/scan-*.jsonl | head -2 | tail -1)
+tail -1 "$SESS" | grep -q '"code":"connect_failed"'
+rm -rf fakellm scan-out.jsonl scan-out2.jsonl
+echo "ok: mid-stage failure"
 
 echo "ALL SMOKE STEPS RAN"

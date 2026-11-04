@@ -170,11 +170,11 @@ ids, e.g. `"A1, A2"`.
 - `set Depends` fails on unknown action id in same task or self-reference.
 - `remove` fails if another action still depends on it; remove dependents first.
 
-## Project scan - llm session over the config
+## Project scan - staged llm session over the config
 
-Runs one llm session (via the `llmkit runner`) that reads the project
-and writes details.md, context.md and resources.md itself, through
-flower's own mcp servers. The session's tools:
+Runs one llm session (via the `llmkit runner`) in three stages that
+read the project and write details.md, context.md and resources.md
+themselves, through flower's own mcp servers. The session's tools:
 
 - `details`, `context`, `resource`: `flower mcp <P> <area>` stdio json-rpc
   servers exposing the `details_*`, `context_*`, `resource_*` tools -
@@ -183,28 +183,43 @@ flower's own mcp servers. The session's tools:
   `llmkit builtin-mcp --read-only`) for listing, reading and grepping
   the project tree. it cannot write config.
 
-The system prompt embeds the current config.md, details.md, context.md
-and resources.md with every header shifted one `#` deeper, so the agent
-updates existing entries instead of duplicating them.
+The stages run in one runner process: flower feeds header, llm and
+tools records to its stdin, then per stage a system prompt, a kickoff
+user message and a `flush` record (llmkit steering). The stage ends
+when the final response of its turn ends with a line that is exactly
+`[STEP_COMPLETE]`; if it does not, flower sends one nudge user record
+and flush before giving up on the stage. Each stage's system prompt
+embeds only the current content of the file that stage writes, with
+every header shifted one `#` deeper, so the agent updates existing
+entries instead of duplicating them:
+
+- stage 1 fills details.md (Output, Objectives, Scope, Constraints,
+  Stakeholders),
+- stage 2 fills context.md (one chapter per finding, allowed prefixes),
+- stage 3 fills resources.md (one named pointer per entry).
 
 ```
 ./flower project P1 scan claude            # run the session
-./flower project P1 scan claude --dry-run  # print the runner jsonl only
+./flower project P1 scan claude --dry-run  # print the staged runner jsonl only
 ```
 
 - `<profile>` names a chapter in llms.md (see the llm section).
 - anthropic profiles need `Max tokens` (llmkit rule).
 - profile `Mcp proxy` entries join the session as extra tool servers,
   `Terminal tool` entries mark tools as terminal (llmkit rule).
-- artifacts under `projects/P1/scan/`: `scout-seed.jsonl` (subagent
-  seed, mode 0600) and `runner-input.jsonl` (the records fed to the
-  runner; kept for inspection).
+- artifacts under `projects/P1/scan/`: `scout-seed.jsonl` only (subagent
+  seed, mode 0600). the runner records are written to the runner's
+  stdin live; there is no input file.
 - the whole session is saved as a jsonl transcript under
   `projects/P1/llm-sessions/scan-<timestamp>.jsonl` (mode 0600 - it
-  carries the api key): the input records followed by every runner
-  output record (the runner's duplicate header line is dropped). the
-  file is a valid continuation transcript, replayable with
-  `llmkit runner < <file>`.
+  carries the api key): every record sent to the runner's stdin, in
+  send order, followed by every runner output record (the runner's
+  duplicate header line is dropped). the file is a valid continuation
+  transcript, replayable with `llmkit runner < <file>`.
+- exit code: the runner's own exit code when it exits nonzero (127
+  means the llmkit binary was not found), 1 when the stages did not
+  complete despite a clean runner exit, 0 when all three stages ended
+  with `[STEP_COMPLETE]`.
 - `FLOWER_LLMKIT` overrides the llmkit binary path (default `llmkit`
   from PATH). The runner's jsonl output goes to stdout unchanged.
 

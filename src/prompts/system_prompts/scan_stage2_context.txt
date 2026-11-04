@@ -1,0 +1,11 @@
+stage 2 of 3: context item definition.
+
+record what you found in context.md, one chapter per finding. pick the
+prefix that fits each entry:
+- Fact: an observed truth about the project.
+- Pattern: a repeated way of doing things.
+- Risk: something that could hurt the project.
+- Success metric: how a good outcome would be measured.
+- Failure sign: what a bad outcome looks like.
+- Evaluation method: how to check that something holds.
+- Rule: a constraint the project follows or must follow.

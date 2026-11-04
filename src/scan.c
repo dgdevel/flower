@@ -1,6 +1,10 @@
-/* scan.c - flower project <P> scan <profile>: drive an llmkit runner
-   session that scans the project and fills details.md, context.md and
-   resources.md through the flower mcp servers. design: plan.md task 5,
+/* scan.c - flower project <P> scan <profile>: drive a staged llmkit
+   runner session that scans the project and fills details.md,
+   context.md and resources.md through the flower mcp servers. three
+   stages (details, context, resources), one system prompt and one user
+   kickoff each: the stage records are written to the runner's stdin as
+   it runs, a flush record starts each stage, and the stage ends when
+   [STEP_COMPLETE] closes its final response. design: plan.md,
    llmkit records: llmkit/docs/records.md. */
 #define _POSIX_C_SOURCE 200809L
 #include "flower.h"
@@ -465,29 +469,214 @@ static int append_file(buf_t *b, const char *rel) {
     return 0;
 }
 
-/* the system prompt: bundled scan prompt + project config markdown */
-static char *system_prompt_text(const char *pid) {
+/* one scan stage: bundled instructions + the config file it writes +
+   its kickoff user message */
+typedef struct {
+    const char *prompt;  /* stage instructions (system prompt body) */
+    const char *file;    /* projects/<pid>/<file>, embedded as current */
+    const char *kickoff; /* stage start user message */
+} scan_stage_t;
+
+static const scan_stage_t scan_stages[3] = {
+    {prompt_system_prompts_scan_stage1_details, "details.md",
+     prompt_system_prompts_scan_stage1_start},
+    {prompt_system_prompts_scan_stage2_context, "context.md",
+     prompt_system_prompts_scan_stage2_start},
+    {prompt_system_prompts_scan_stage3_resources, "resources.md",
+     prompt_system_prompts_scan_stage3_start},
+};
+
+/* the system prompt for one stage: shared preamble + stage
+   instructions + the current content of the file this stage writes,
+   headers shifted one level deeper. NULL oom */
+static char *stage_prompt_text(const char *pid, const scan_stage_t *st) {
     buf_t b;
-    static const char *files[] = {"config.md", "details.md",
-                                  "context.md", "resources.md"};
-    size_t i;
+    char *rel;
     buf_init(&b);
-    if (buf_appendf(&b, "%s", prompt_system_prompts_scan) != 0 ||
-        buf_appendf(&b, "\n\n# Project configuration\n\n") != 0)
+    if (buf_appendf(&b, "%s\n%s", prompt_system_prompts_scan_preamble,
+                    st->prompt) != 0 ||
+        buf_appendf(&b, "\n# Current %s\n", st->file) != 0)
         goto fail;
-    for (i = 0; i < sizeof files / sizeof files[0]; i++) {
-        char *rel = xasprintf("projects/%s/%s", pid, files[i]);
-        if (!rel) goto fail;
-        if (append_file(&b, rel) != 0) {
-            free(rel);
-            goto fail;
-        }
+    rel = xasprintf("projects/%s/%s", pid, st->file);
+    if (!rel) goto fail;
+    if (append_file(&b, rel) != 0) {
         free(rel);
+        goto fail;
     }
+    free(rel);
     return b.data;
 fail:
     buf_free(&b);
     return NULL;
+}
+
+/* one stage's system prompt record. NULL oom */
+static json_t *stage_system_record(const char *text) {
+    json_t *o = json_obj();
+    json_t *content = json_arr();
+    json_t *blk = json_obj();
+    json_t *txt = json_str(text);
+    if (!o || !content || !blk || !txt) goto fail;
+    txt->key = str_dup("text");
+    if (!txt->key) goto fail;
+    json_add(blk, txt);
+    if (obj_str(blk, "type", "text") != 0) goto fail;
+    json_add(content, blk);
+    if (obj_str(o, "type", "system") != 0) goto fail;
+    content->key = str_dup("content");
+    if (!content->key) goto fail;
+    json_add(o, content);
+    return o;
+fail:
+    json_free(txt);
+    json_free(blk);
+    json_free(content);
+    json_free(o);
+    return NULL;
+}
+
+/* one user record. NULL oom */
+static json_t *stage_user_record(const char *text) {
+    json_t *o = json_obj();
+    json_t *content = json_arr();
+    json_t *blk = json_obj();
+    json_t *txt = json_str(text);
+    if (!o || !content || !blk || !txt) goto fail;
+    txt->key = str_dup("text");
+    if (!txt->key) goto fail;
+    json_add(blk, txt);
+    if (obj_str(blk, "type", "text") != 0) goto fail;
+    json_add(content, blk);
+    if (obj_str(o, "type", "user") != 0) goto fail;
+    content->key = str_dup("content");
+    if (!content->key) goto fail;
+    json_add(o, content);
+    return o;
+fail:
+    json_free(txt);
+    json_free(blk);
+    json_free(content);
+    json_free(o);
+    return NULL;
+}
+
+/* append one stage's records to out: system prompt, kickoff user
+   message, then the flush that starts the stage (a flush is only legal
+   with new records pending - llmkit rule). 0 ok, -1 oom */
+static int stage_records(buf_t *out, const scan_stage_t *st,
+                         const char *text) {
+    json_t *rec;
+    rec = stage_system_record(text);
+    if (!rec) return -1;
+    if (emit_record(out, rec) != 0) return -1;
+    rec = stage_user_record(st->kickoff);
+    if (!rec) return -1;
+    if (emit_record(out, rec) != 0) return -1;
+    if (emit_record(out, json_parse("{\"type\":\"flush\"}")) != 0)
+        return -1;
+    return 0;
+}
+
+/* append the nudge user record + flush: the turn ended without the
+   stage marker. 0 ok, -1 oom */
+static int nudge_records(buf_t *out) {
+    json_t *rec = stage_user_record(prompt_system_prompts_scan_nudge);
+    if (!rec) return -1;
+    if (emit_record(out, rec) != 0) return -1;
+    if (emit_record(out, json_parse("{\"type\":\"flush\"}")) != 0)
+        return -1;
+    return 0;
+}
+
+/* write out to the runner's stdin in full and mirror it to the session
+   transcript. 0 ok, -1 io error */
+static int send_records(int fd, FILE *sess, buf_t *out) {
+    size_t off = 0;
+    while (off < out->len) {
+        ssize_t n = write(fd, out->data + off, out->len - off);
+        if (n <= 0) {
+            fprintf(stderr, "flower: runner stdin write error\n");
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    if (sess && out->len > 0 &&
+        fwrite(out->data, 1, out->len, sess) != out->len) {
+        fprintf(stderr, "flower: session write error\n");
+        return -1;
+    }
+    buf_reset(out);
+    return 0;
+}
+
+/* classify one runner output line for stage tracking: 1 a final
+   response ending in [STEP_COMPLETE], 2 a final response without the
+   marker, 0 anything else, -1 unparseable (printed). "final" means
+   non-partial with a finish_reason: text before tool calls in the same
+   turn also arrives as response records, but without one. */
+static int stage_line(const char *line, size_t len) {
+    static const char marker[] = "[STEP_COMPLETE]";
+    json_t *rec;
+    const char *text;
+    size_t m = sizeof marker - 1;
+    (void)len;
+    rec = json_parse(line);
+    if (!rec) {
+        fprintf(stderr, "flower: bad runner line\n");
+        return -1;
+    }
+    if (json_str_of(rec, "type") &&
+        !strcmp(json_str_of(rec, "type"), "response") &&
+        !json_get(rec, "partial") && json_get(rec, "finish_reason")) {
+        text = json_str_of(rec, "text");
+        if (text) {
+            size_t t = strlen(text);
+            /* models may pad the marker line with whitespace */
+            while (t > 0 && (text[t - 1] == '\n' || text[t - 1] == '\r' ||
+                             text[t - 1] == ' ' || text[t - 1] == '\t'))
+                t--;
+            int r = (t >= m && memcmp(text + t - m, marker, m) == 0) ? 1 : 2;
+            json_free(rec);
+            return r;
+        }
+    }
+    json_free(rec);
+    return 0;
+}
+
+/* read runner output through session_line until the stage's turn ends.
+   1 done ([STEP_COMPLETE]), 0 turn ended without the marker (caller
+   may nudge), -1 io error (printed), 2 the runner's output closed
+   before a final response */
+static int wait_stage_end(FILE *rp, char **line, size_t *cap, FILE *sess,
+                          int *skipped_header) {
+    for (;;) {
+        ssize_t got;
+        if ((got = getline(line, cap, rp)) < 0) {
+            if (ferror(rp)) {
+                fprintf(stderr, "flower: session read error\n");
+                return -1;
+            }
+            return 2; /* eof without a final response */
+        }
+        if (!*line) continue; /* getline may set NULL on empty input */
+        while (got > 0 && ((*line)[got - 1] == '\n' ||
+                           (*line)[got - 1] == '\r'))
+            got--;
+        if (got <= 0) continue;
+        if (session_line(*line, (size_t)got, sess, skipped_header) != 0)
+            return -1;
+        switch (stage_line(*line, (size_t)got)) {
+        case 1:
+            return 1;
+        case 2:
+            return 0;
+        case -1:
+            return -1;
+        default:
+            break;
+        }
+    }
 }
 
 /* one stdio server entry, borrowed fields copied. NULL oom */
@@ -525,10 +714,8 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     profile_t p;
     md_doc_t llms_doc; /* holds the borrowed profile strings */
     char exe[4096];    /* absolute self path for mcp server spawns */
-    char *seed_rel = NULL, *seed_path = NULL, *input_rel = NULL,
-         *input_path = NULL;
+    char *seed_rel = NULL, *seed_path = NULL;
     buf_t seed, input;
-    char *sys_text = NULL;
     json_t *llm = NULL, *tools = NULL, *sysrec = NULL;
     const char *llmkit;
     int rc = 1;
@@ -668,7 +855,8 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     if (!seed_path) goto oom;
     if (write_private(seed_path, &seed) != 0) goto out;
 
-    /* --- runner input: header, llm, tools, system, user --- */
+    /* --- runner stdin: header, llm, tools; the stage records are
+       appended as the scan progresses --- */
     if (emit_record(&input, json_parse("{\"type\":\"header\","
                                        "\"version\":1}")) != 0)
         goto oom;
@@ -859,158 +1047,77 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         json_add(tools_rec, arr);
         if (emit_record(&input, tools_rec) != 0) goto oom;
     }
-    sys_text = system_prompt_text(pid);
-    if (!sys_text) goto oom;
-    {
-        json_t *sr = json_obj();
-        json_t *content;
-        json_t *blk;
-        json_t *txt;
-        if (!sr) goto oom;
-        content = json_arr();
-        blk = json_obj();
-        txt = json_str(sys_text);
-        if (!content || !blk || !txt) {
-            json_free(content);
-            json_free(blk);
-            json_free(txt);
-            json_free(sr);
-            goto oom;
-        }
-        txt->key = str_dup("text");
-        if (!txt->key) {
-            json_free(txt);
-            json_free(content);
-            json_free(blk);
-            json_free(sr);
-            goto oom;
-        }
-        json_add(blk, txt);
-        if (obj_str(blk, "type", "text") != 0) {
-            json_free(content);
-            json_free(blk);
-            json_free(sr);
-            goto oom;
-        }
-        json_add(content, blk);
-        if (obj_str(sr, "type", "system") != 0) {
-            json_free(content);
-            json_free(sr);
-            goto oom;
-        }
-        content->key = str_dup("content");
-        if (!content->key) {
-            json_free(content);
-            json_free(sr);
-            goto oom;
-        }
-        json_add(sr, content);
-        if (emit_record(&input, sr) != 0) goto oom;
-    }
-    {
-        json_t *ur = json_obj();
-        json_t *content;
-        json_t *blk;
-        json_t *txt;
-        if (!ur) goto oom;
-        content = json_arr();
-        blk = json_obj();
-        txt = json_str("Scan the project now.");
-        if (!content || !blk || !txt) {
-            json_free(content);
-            json_free(blk);
-            json_free(txt);
-            json_free(ur);
-            goto oom;
-        }
-        txt->key = str_dup("text");
-        if (!txt->key) {
-            json_free(txt);
-            json_free(content);
-            json_free(blk);
-            json_free(ur);
-            goto oom;
-        }
-        json_add(blk, txt);
-        if (obj_str(blk, "type", "text") != 0) {
-            json_free(content);
-            json_free(blk);
-            json_free(ur);
-            goto oom;
-        }
-        json_add(content, blk);
-        if (obj_str(ur, "type", "user") != 0) {
-            json_free(content);
-            json_free(ur);
-            goto oom;
-        }
-        content->key = str_dup("content");
-        if (!content->key) {
-            json_free(content);
-            json_free(ur);
-            goto oom;
-        }
-        json_add(ur, content);
-        if (emit_record(&input, ur) != 0) goto oom;
-    }
-
-    input_rel = xasprintf("projects/%s/scan/runner-input.jsonl", pid);
-    if (!input_rel) goto oom;
-    input_path = store_path(input_rel);
-    if (!input_path) goto oom;
-    if (write_private(input_path, &input) != 0) goto out;
-
+    /* stage 1 records are appended as the scan progresses */
     if (dry_run) {
+        int s;
+        for (s = 0; s < 3; s++) {
+            char *text = stage_prompt_text(pid, &scan_stages[s]);
+            if (!text) goto oom;
+            if (stage_records(&input, &scan_stages[s], text) != 0) {
+                free(text);
+                goto oom;
+            }
+            free(text);
+        }
         fprintf(stderr, "flower: seed: %s\n", seed_path);
         fwrite(input.data, 1, input.len, stdout);
         rc = ferror(stdout) ? 1 : 0;
         goto out;
     }
 
-    /* spawn <llmkit> runner with stdin from the input file; tee its
-       stdout to flower's stdout and the session transcript */
+    /* spawn <llmkit> runner with a pipe as stdin; the parent keeps the
+       write end and feeds the records stage by stage: header/llm/tools
+       first, then per stage system + user + flush, waiting for the
+       [STEP_COMPLETE] marker before the next one. the runner's stdout
+       is teed to flower's stdout and the session transcript. */
     {
         pid_t kid;
         int st;
+        int inpipe[2];
         int outp[2];
-        FILE *in = fopen(input_path, "rb");
         FILE *sess = NULL;
         char *sess_path = NULL;
         int skipped_header = 0;
-        if (!in) {
-            fprintf(stderr, "flower: cannot read %s: %s\n", input_path,
-                    strerror(errno));
-            goto out;
-        }
-        if (pipe(outp) != 0) {
+        FILE *rp = NULL;
+        char *line = NULL;
+        size_t cap = 0;
+        int s, rc2 = 0;
+
+        if (pipe(inpipe) != 0 || pipe(outp) != 0) {
             fprintf(stderr, "flower: pipe: %s\n", strerror(errno));
-            fclose(in);
+            if (inpipe[0] >= 0) {
+                close(inpipe[0]);
+                close(inpipe[1]);
+            }
             goto out;
         }
         fflush(stdout);
         kid = fork();
         if (kid < 0) {
             fprintf(stderr, "flower: fork: %s\n", strerror(errno));
+            close(inpipe[0]);
+            close(inpipe[1]);
             close(outp[0]);
             close(outp[1]);
-            fclose(in);
             goto out;
         }
         if (kid == 0) {
-            if (dup2(fileno(in), STDIN_FILENO) < 0 ||
+            if (dup2(inpipe[0], STDIN_FILENO) < 0 ||
                 dup2(outp[1], STDOUT_FILENO) < 0)
                 _exit(127);
-            fclose(in);
+            close(inpipe[0]);
+            close(inpipe[1]);
             close(outp[0]);
             close(outp[1]);
             execl(llmkit, "llmkit", "runner", (char *)NULL);
             _exit(127);
         }
-        fclose(in);
+        close(inpipe[0]);
         close(outp[1]);
-        /* the session transcript: input records first, runner output
-           appended line by line (minus its duplicate header). 0600:
-           the llm record carries the api key. */
+        /* the session transcript: records appended as they are sent to
+           the runner's stdin, then the runner output line by line
+           (minus its duplicate header). 0600: the llm record carries
+           the api key. */
         sess_path = session_open(pid);
         if (sess_path) {
             sess = fopen(sess_path, "wb");
@@ -1021,35 +1128,52 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
                 sess_path = NULL;
             }
         }
-        if (sess && input.len > 0 &&
-            fwrite(input.data, 1, input.len, sess) != input.len) {
-            fprintf(stderr, "flower: session write error\n");
-            fclose(sess);
-            sess = NULL;
+        rp = fdopen(outp[0], "r");
+        if (!rp) {
+            fprintf(stderr, "flower: cannot open runner output: %s\n",
+                    strerror(errno));
+            close(outp[0]);
         }
-        /* read the runner's output: one json line at a time */
-        {
-            FILE *rp = fdopen(outp[0], "r");
-            char *line = NULL;
-            size_t cap = 0;
-            ssize_t got;
-            if (!rp) {
-                close(outp[0]);
-                outp[0] = -1;
+
+        /* feed the initial records, then run the three stages */
+        if (send_records(inpipe[1], sess, &input) != 0) rc2 = -1;
+        if (!rp) rc2 = -1; /* outp[0] is closed in the cleanup below */
+        for (s = 0; s < 3 && rc2 == 0; s++) {
+            char *text = stage_prompt_text(pid, &scan_stages[s]);
+            int nudges = 0;
+            if (!text) {
+                rc2 = -1;
+                break;
             }
-            while (outp[0] >= 0 && (got = getline(&line, &cap, rp)) >= 0) {
-                while (got > 0 && (line[got - 1] == '\n' ||
-                                   line[got - 1] == '\r'))
-                    got--;
-                if (got > 0 &&
-                    session_line(line, (size_t)got, sess, &skipped_header) !=
-                        0)
+            if (stage_records(&input, &scan_stages[s], text) != 0 ||
+                send_records(inpipe[1], sess, &input) != 0) {
+                free(text);
+                rc2 = -1;
+                break;
+            }
+            free(text);
+            for (;;) {
+                int w = wait_stage_end(rp, &line, &cap, sess,
+                                       &skipped_header);
+                if (w == 1) break; /* marker: stage done */
+                if (w < 0 || w == 2) {
+                    rc2 = -1;
                     break;
+                }
+                /* the turn ended without the marker: nudge once */
+                if (nudges++ >= 1) {
+                    rc2 = -1;
+                    break;
+                }
+                if (nudge_records(&input) != 0 ||
+                    send_records(inpipe[1], sess, &input) != 0)
+                    rc2 = -1;
             }
-            free(line);
-            if (rp) fclose(rp);
-            else close(outp[0]);
         }
+        close(inpipe[1]); /* EOF: the runner's stdin is done */
+        free(line);
+        if (rp) fclose(rp);
+        else close(outp[0]);
         if (sess) {
             if (fclose(sess) != 0)
                 fprintf(stderr, "flower: session write error\n");
@@ -1059,15 +1183,17 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         free(sess_path);
         if (waitpid(kid, &st, 0) < 0) {
             fprintf(stderr, "flower: waitpid: %s\n", strerror(errno));
-            goto out;
-        }
-        if (WIFEXITED(st)) {
+            rc = 1;
+        } else if (WIFEXITED(st)) {
             int code = WEXITSTATUS(st);
             if (code == 127)
                 fprintf(stderr, "flower: cannot run '%s runner' - set "
                                 "FLOWER_LLMKIT to the llmkit binary\n",
                         llmkit);
-            rc = code == 127 ? 1 : code;
+            /* a nonzero runner exit wins; a clean exit with unfinished
+               stages is still a failure */
+            rc = code == 127 ? 1 : (code != 0 ? code
+                                              : (rc2 < 0 ? 1 : 0));
         } else {
             rc = 1;
         }
@@ -1076,9 +1202,6 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
 out:
     free(seed_rel);
     free(seed_path);
-    free(input_rel);
-    free(input_path);
-    free(sys_text);
     buf_free(&seed);
     buf_free(&input);
     json_free(llm);

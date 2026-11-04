@@ -1,0 +1,11 @@
+stage 1 of 3: details collection.
+
+capture what the project is and how it works in details.md, one short
+summary per chapter:
+- Output: what the project produces or provides.
+- Objectives: why it exists, what it aims to do.
+- Scope: what is in and out, as evidenced by the tree.
+- Constraints: technical or process limits you observed.
+- Stakeholders: who uses or maintains it, as evidenced by the tree.
+
+only these five chapters exist; never invent other areas.

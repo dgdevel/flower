@@ -1,0 +1,3 @@
+stage 2 complete. begin stage 3: fill resources.md. when it is
+complete, end your final message with a line that is exactly
+[STEP_COMPLETE].

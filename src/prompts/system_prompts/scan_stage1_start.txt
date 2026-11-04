@@ -1,0 +1,2 @@
+begin stage 1: fill details.md. when it is complete, end your final
+message with a line that is exactly [STEP_COMPLETE].
