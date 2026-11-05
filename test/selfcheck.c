@@ -210,6 +210,17 @@ static void test_md(void) {
     check_int(md_parse("## orphan\n", &doc), -3, "first header h2 -3");
     check_int(md_parse("# A\n## A\n", &doc), 0, "same title other level ok");
     md_free_doc(&doc);
+    /* hash set grows past initial capacity and still catches dups */
+    {
+        buf_t big;
+        int i;
+        buf_init(&big);
+        buf_appendf(&big, "# R\n");
+        for (i = 0; i < 300; i++) buf_appendf(&big, "## S%d\n", i);
+        buf_appendf(&big, "## S42\ndup\n");
+        check_int(md_parse(big.data, &doc), -2, "dup after 300 grow");
+        buf_free(&big);
+    }
     check_int(md_parse("text before any header\n# A\nv\n", &doc), 0,
               "preamble skipped");
     check(doc.nch == 1 && doc.ch[0].nbody == 1, "chapter body only");

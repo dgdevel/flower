@@ -68,12 +68,68 @@ static void body_clear(md_chapter_t *c) {
     c->nbody = 0;
 }
 
+/* fnv-1a */
+static size_t str_hash(const char *s) {
+    size_t h = 1469598103934665603u;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211u;
+    }
+    return h;
+}
+
+/* dup-title set: open addressing, linear probe, power-of-two slots.
+   entries borrow title pointers from the doc under construction. */
+typedef struct {
+    int level; /* -1 empty */
+    const char *title;
+} seen_ent_t;
+
+/* probe for (level,title); insert when absent. 0 absent (now present),
+   1 already present, -1 oom (set stays valid). */
+static int seen_check(seen_ent_t **setp, size_t *cap, size_t *used,
+                      int level, const char *title) {
+    seen_ent_t *set = *setp;
+    size_t mask, i;
+    if (*cap == 0 || *used * 4 >= *cap * 3) { /* grow at 3/4 */
+        size_t ncap = *cap ? *cap * 2 : 64;
+        seen_ent_t *n = calloc(ncap, sizeof *n);
+        size_t j;
+        if (!n) return -1;
+        for (j = 0; j < ncap; j++) n[j].level = -1;
+        for (j = 0; j < *cap; j++)
+            if (set[j].level != -1) {
+                size_t k = str_hash(set[j].title) & (ncap - 1);
+                while (n[k].level != -1) k = (k + 1) & (ncap - 1);
+                n[k] = set[j];
+            }
+        free(set);
+        *setp = set = n;
+        *cap = ncap;
+    }
+    mask = *cap - 1;
+    i = str_hash(title) & mask;
+    while (set[i].level != -1) {
+        if (set[i].level == level && !strcmp(set[i].title, title))
+            return 1;
+        i = (i + 1) & mask;
+    }
+    set[i].level = level;
+    set[i].title = title;
+    (*used)++;
+    return 0;
+}
+
 int md_parse(const char *content, md_doc_t *out) {
     md_doc_t doc;
     int stack[8]; /* open ancestors; levels strictly increasing */
     int nstack = 0;
     size_t len, pos = 0;
     int rc = 0;
+    /* dup-title set: open-addressing (level,title), replaces the
+       o(nch^2) duplicate scan */
+    seen_ent_t *seen = NULL;
+    size_t scap = 0, sused = 0;
 
     memset(&doc, 0, sizeof doc);
     if (!content) {
@@ -110,7 +166,6 @@ int md_parse(const char *content, md_doc_t *out) {
 
         if (header_scan(line, &level, &rest)) {
             char *title;
-            int j;
 
             /* jump deeper than parent+1 (e.g. h1 straight to h3, or the
                very first header deeper than h1) */
@@ -129,9 +184,15 @@ int md_parse(const char *content, md_doc_t *out) {
                 goto fail;
             }
             /* duplicate chapter name at the same level */
-            for (j = 0; j < doc.nch; j++) {
-                if (doc.ch[j].level == level &&
-                    !strcmp(doc.ch[j].title, title)) {
+            {
+                int dup = seen_check(&seen, &scap, &sused, level, title);
+                if (dup < 0) {
+                    free(title);
+                    free(line);
+                    rc = -1;
+                    goto fail;
+                }
+                if (dup) {
                     free(title);
                     free(line);
                     rc = -2;
@@ -219,9 +280,11 @@ int md_parse(const char *content, md_doc_t *out) {
         }
     }
     *out = doc;
+    free(seen);
     return 0;
 
 fail:
+    free(seen);
     md_free_doc(&doc);
     memset(out, 0, sizeof *out);
     return rc;
