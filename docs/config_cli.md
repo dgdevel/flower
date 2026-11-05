@@ -181,7 +181,9 @@ themselves, through flower's own mcp servers. The session's tools:
   same validation as the cli verbs above.
 - `scout`: a readonly search subagent (`llmkit agent-as-tool` wrapping
   `llmkit builtin-mcp --read-only`) for listing, reading and grepping
-  the project tree. it cannot write config.
+  the project tree. it cannot write config. it retains its context
+  across the scan's stages (one growing conversation, resettable by
+  the main agent through its `context_reset` tool).
 
 The stages run in one runner process: flower feeds header, llm and
 tools records to its stdin, then per stage a system prompt, a kickoff

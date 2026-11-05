@@ -231,6 +231,7 @@ test -f "$SEED"
 test "$(stat -c %a "$SEED")" = 600
 grep -q 'builtin-mcp --read-only' "$SEED"
 grep -q '"type":"agent-as-tool"' "$SEED"
+grep -q '"retain_context":true' "$SEED"
 grep -q '"tool_description"' "$SEED"
 grep -q '"type":"system"' "$SEED"
 echo "ok: seed"

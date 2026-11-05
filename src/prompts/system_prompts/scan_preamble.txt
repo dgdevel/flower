@@ -13,8 +13,10 @@ stages and fill the flower configuration of the project:
 rules:
 - work autonomously with the tools. do not ask the user anything.
 - read and search the project through the scout subagent. it is
-  readonly: it cannot and must not write configuration. write all
-  findings yourself with the details_, context_ and resource_ tools.
+  readonly: it cannot and must not write configuration. it remembers
+  your earlier questions and its findings across the stages; ask it to
+  build on them instead of rescanning. write all findings yourself
+  with the details_, context_ and resource_ tools.
 - ground every entry in what you actually saw. no guesses. terse
   entries, one finding per chapter.
 - persistence: every finding must be written to the project files

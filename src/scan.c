@@ -837,6 +837,11 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         }
         if (emit_record(&seed, aat) != 0) goto oom;
     }
+    /* one growing scout conversation: invoke keeps the context it
+       gained in earlier stages (plus a context_reset tool) */
+    if (emit_record(&seed, json_parse("{\"type\":\"options\","
+                                      "\"retain_context\":true}")) != 0)
+        goto oom;
 
     /* write the seed under projects/<pid>/scan/ */
     seed_rel = xasprintf("projects/%s/scan/scout-seed.jsonl", pid);
