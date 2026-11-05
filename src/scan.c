@@ -709,6 +709,69 @@ static json_t *server_entry(const char *name, const char *cmd,
 
 /* ---------- cmd_scan ---------- */
 
+/* scan creates a missing project on the fly: config.md gets Name from
+   the current directory name and Path from getcwd(3), so scanning a
+   repo is one command with no project setup step. 0 ok, 1 error
+   printed (io or oom). */
+static int scan_ensure_project(const char *pid) {
+    char cwd[8192];
+    const char *base;
+    md_doc_t doc;
+    md_chapter_t *c;
+    char *rel_dir, *rel_file, *path;
+    int rc;
+
+    rel_dir = xasprintf("projects/%s", pid);
+    if (!rel_dir) return oom();
+    if (rel_dir_exists(rel_dir)) {
+        free(rel_dir);
+        return 0;
+    }
+
+    if (!getcwd(cwd, sizeof cwd)) {
+        fprintf(stderr, "flower: cannot get current directory: %s\n",
+                strerror(errno));
+        free(rel_dir);
+        return 1;
+    }
+    base = strrchr(cwd, '/');
+    base = base ? base + 1 : cwd;
+    if (!*base) base = "root"; /* cwd == "/" */
+
+    memset(&doc, 0, sizeof doc); /* fresh doc: no file read needed */
+    c = doc_add_chapter(&doc, "Project", 1);
+    if (!c || doc_append_kv(c, "Name", base) != 0 ||
+        doc_append_kv(c, "Path", cwd) != 0) {
+        md_free_doc(&doc);
+        free(rel_dir);
+        return oom();
+    }
+    rel_file = xasprintf("projects/%s/config.md", pid);
+    if (!rel_file) {
+        md_free_doc(&doc);
+        free(rel_dir);
+        return oom();
+    }
+    if (store_mkdir_p(rel_dir) != 0) {
+        rc = 1;
+        goto out;
+    }
+    path = store_path(rel_file);
+    if (!path) {
+        rc = oom();
+        goto out;
+    }
+    rc = md_save(path, &doc) != 0 ? 1 : 0;
+    free(path);
+    if (rc == 0)
+        fprintf(stderr, "flower: created project %s (%s)\n", pid, cwd);
+out:
+    free(rel_file);
+    free(rel_dir);
+    md_free_doc(&doc);
+    return rc;
+}
+
 int cmd_scan(const char *pid, const char *profile, int dry_run,
              const char *argv0) {
     profile_t p;
@@ -721,7 +784,7 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     int rc = 1;
     int i;
 
-    if (!require_project(pid)) return 1;
+    if (scan_ensure_project(pid) != 0) return 1;
     if (profile_load(profile, &p, &llms_doc) != 0) return 1;
 
     /* resolve the flower binary: the runner spawns mcp servers from

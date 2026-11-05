@@ -206,6 +206,9 @@ entries instead of duplicating them:
 ```
 
 - `<profile>` names a chapter in llms.md (see the llm section).
+- nonexistent project is created first: config.md gets `Name` from the
+  current directory name and `Path` from the current working directory
+  (a note goes to stderr), so scanning a repo is one command.
 - anthropic profiles need `Max tokens` (llmkit rule).
 - profile `Mcp proxy` entries join the session as extra tool servers,
   `Terminal tool` entries mark tools as terminal (llmkit rule).

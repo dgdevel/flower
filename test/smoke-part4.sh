@@ -240,7 +240,12 @@ hdr "scan error paths (expect fails)"
 ./flower project P1 scan nosuch 2>&1 | grep -q "no such profile"
 ./flower project P1 scan ant 2>&1 | grep -q "requires Max tokens"
 ./flower project P1 scan hdr 2>&1 | grep -q "is not <name>=<value>"
-./flower project P9 scan gpt 2>&1 | grep -q "no such project"
+./flower project P9 scan gpt --dry-run > scan-p9.jsonl 2> scan-p9.err
+grep -q "created project P9" scan-p9.err
+test -f "$FLOWER_BASE/projects/P9/config.md"
+grep -q "^Name: $(basename "$PWD")$" "$FLOWER_BASE/projects/P9/config.md"
+grep -q "^Path: $PWD$" "$FLOWER_BASE/projects/P9/config.md"
+grep -q '"type":"header","version":1' scan-p9.jsonl
 echo "ok: scan errors"
 
 hdr "scan session transcript (fake llmkit, staged)"

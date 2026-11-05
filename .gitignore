@@ -17,4 +17,4 @@
 # ignore the dir
 /llmkit/
 
-scan-dry.*
+scan-*.*
