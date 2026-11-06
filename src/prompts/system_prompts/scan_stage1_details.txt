@@ -1,11 +1,21 @@
-stage 1 of 3: details collection.
+stage 1: details collection.
 
-capture what the project is and how it works in details.md, one short
-summary per chapter:
+if "# Current" below already has chapters, this is an update pass:
+treat those summaries as grounded, keep them, and refresh only what
+this run's scout findings contradict or leave out. one or two scout
+calls are enough: ask for what changed or what the current file does
+not cover. do not re-research what the file already captures.
+
+if "# Current" is empty, this is a fresh pass: call the scout tool
+once or twice for the lay of the land (tree of the project root,
+README/build files if any), then capture what the project is and how
+it works in details.md, one short summary per chapter:
 - Output: what the project produces or provides.
 - Objectives: why it exists, what it aims to do.
 - Scope: what is in and out, as evidenced by the tree.
 - Constraints: technical or process limits you observed.
 - Stakeholders: who uses or maintains it, as evidenced by the tree.
 
-only these five chapters exist; never invent other areas.
+only these five chapters exist; never invent other areas. each chapter
+is a short prose summary (no "key: value" lines). if the scout findings
+do not support a chapter, write one honest sentence saying so.

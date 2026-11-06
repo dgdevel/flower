@@ -612,6 +612,10 @@ static int append_file(buf_t *b, const char *rel) {
     return 0;
 }
 
+/* project tree under study: set by cmd_scan from config.md, embedded
+   in every stage system prompt */
+static const char *scan_proj_path = "";
+
 /* one scan stage: bundled instructions + the config file it writes +
    its kickoff user message */
 typedef struct {
@@ -638,6 +642,9 @@ static char *stage_prompt_text(const char *pid, const scan_stage_t *st) {
     buf_init(&b);
     if (buf_appendf(&b, "%s\n%s", prompt_system_prompts_scan_preamble,
                     st->prompt) != 0 ||
+        buf_appendf(&b, "\nthe project under study is at %s; explore "
+                        "that tree through scout, not the runner cwd\n",
+                    scan_proj_path[0] ? scan_proj_path : "<unset>") != 0 ||
         buf_appendf(&b, "\n# Current %s\n", st->file) != 0)
         goto fail;
     rel = xasprintf("projects/%s/%s", pid, st->file);
@@ -904,6 +911,31 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     if (scan_ensure_project(pid) != 0) return 1;
     if (profile_load(profile, &p, &llms_doc) != 0) return 1;
 
+    /* the project tree the agent and its scout subagent must explore:
+       read from projects/<pid>/config.md so the runner cwd (the flower
+       repo) is never mistaken for the target project */
+    char proj_path[4096] = "";
+    {
+        md_doc_t cfg;
+        md_chapter_t *c;
+        char *cfg_rel;
+        int j;
+        cfg_rel = xasprintf("projects/%s/config.md", pid);
+        if (!cfg_rel) return oom();
+        if (load_rel(cfg_rel, FV_PROJECT, &cfg) != 0) cfg.nch = 0;
+        free(cfg_rel);
+        c = md_find(&cfg, "Project");
+        if (c)
+            for (j = 0; j < c->nkv; j++)
+                if (!strcmp(c->keys[j], "Path")) {
+                    snprintf(proj_path, sizeof proj_path, "%s",
+                             c->vals[j]);
+                    break;
+                }
+        md_free_doc(&cfg);
+    }
+    scan_proj_path = proj_path;
+
     /* resolve the flower binary: the runner spawns mcp servers from
        its own cwd, so a relative argv[0] would break */
     {
@@ -928,9 +960,17 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     sysrec = json_obj();
     if (!sysrec) goto oom;
     {
+        char *scout_text = xasprintf("%s\nthe project under study is at "
+                                     "%s: use paths under it, never at "
+                                     "the runner cwd",
+                                     prompt_system_prompts_scout,
+                                     proj_path[0] ? proj_path : "the "
+                                     "configured project path");
         json_t *content = json_arr();
         json_t *blk = json_obj();
-        json_t *txt = json_str(prompt_system_prompts_scout);
+        json_t *txt = scout_text ? json_str(scout_text)
+                                 : json_str(prompt_system_prompts_scout);
+        free(scout_text);
         if (!content || !blk || !txt) {
             json_free(content);
             json_free(blk);
@@ -1029,10 +1069,14 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         if (!dry_run) {
             scout_path = session_open(pid, "-scout");
             if (!scout_path) goto out;
-            if (obj_str(opts, "transcript", scout_path) != 0) {
-                json_free(opts);
-                goto oom;
-            }
+            /* note the path for the operator: the helper does not tee
+               its conversation (llmkit agent-as-tool has no transcript
+               option - an unknown option kills the server at spawn) */
+            fprintf(stderr, "flower: scout transcript is not supported "
+                            "by llmkit agent-as-tool; sessions at %s\n",
+                    scout_path);
+            free(scout_path);
+            scout_path = NULL;
         }
         if (emit_record(&seed, opts) != 0) {
             json_free(opts);
@@ -1065,6 +1109,14 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     llm = llm_record(&p);
     if (!llm || emit_record(&input, llm) != 0) goto oom;
     llm = NULL;
+    /* scout calls can take minutes (a small model behind a slow
+       endpoint): a generous tool budget keeps one call alive without
+       making the stage fatal - the scan-level time budget is the
+       operator's watchdog, not a runner kill switch */
+    if (emit_record(&input,
+                    json_parse("{\"type\":\"options\","
+                               "\"tool_call_timeout\":240}")) != 0)
+        goto oom;
     {
         json_t *tools_rec = json_obj();
         json_t *arr;

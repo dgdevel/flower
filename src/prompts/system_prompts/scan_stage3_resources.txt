@@ -1,6 +1,13 @@
-stage 3 of 3: resource cataloging.
+stage 3: resource cataloging.
 
-catalog useful pointers in resources.md, one named entry per pointer:
-the build file, key sources, docs, entry points. a pointer is a url,
-a path or file#fragment. name each entry so its purpose is clear from
-the name alone.
+if "# Current" below already has entries, this is an update pass:
+treat them as grounded - keep them, fix in place (resource_set) what
+is stale or wrongly named, remove only pointers that no longer exist,
+add only real gaps. do not re-verify existing pointers one by one.
+
+if "# Current" is empty, this is a fresh pass: use what you already
+hold; at most one extra scout call for missing pointers. catalog
+useful pointers in resources.md, one named entry per pointer: the
+build file, key sources, docs, entry points. a pointer is a url, a
+path or file#fragment. name each entry so its purpose is clear from
+the name alone. five to ten entries, then end the stage.

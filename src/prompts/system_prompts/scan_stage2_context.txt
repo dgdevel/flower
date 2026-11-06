@@ -1,7 +1,16 @@
-stage 2 of 3: context item definition.
+stage 2: context item definition.
 
-record what you found in context.md, one chapter per finding. pick the
-prefix that fits each entry:
+if "# Current" below already has entries, this is an update pass:
+treat them as grounded - keep them, edit in place (context_edit) what
+this run's scout findings contradict or sharpen, remove only what is
+now wrong, add only real gaps. do not re-verify existing entries one
+by one and do not rewrite entries that still hold.
+
+if "# Current" is empty, this is a fresh pass: build on the scout
+findings you already hold (one more scout call if you need
+specifics). record what you found in context.md, one chapter per
+finding, each entry one terse sentence of prose (no "key: value"
+lines). pick the prefix that fits each entry:
 - Fact: an observed truth about the project.
 - Pattern: a repeated way of doing things.
 - Risk: something that could hurt the project.
@@ -9,3 +18,5 @@ prefix that fits each entry:
 - Failure sign: what a bad outcome looks like.
 - Evaluation method: how to check that something holds.
 - Rule: a constraint the project follows or must follow.
+
+target six to ten grounded entries; stop there.
