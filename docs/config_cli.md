@@ -215,12 +215,26 @@ entries instead of duplicating them:
 - artifacts under `projects/P1/scan/`: `scout-seed.jsonl` only (subagent
   seed, mode 0600). the runner records are written to the runner's
   stdin live; there is no input file.
+- the live scan runs one `llmkit runner` process per turn: the runner
+  exits after a final response instead of waiting for steering, so each
+  stage (and each nudge) is a fresh runner fed the whole transcript so
+  far plus the stage's records, ending in a flush and eof. a turn whose
+  response lacks `[STEP_COMPLETE]` gets one nudge retry.
 - the whole session is saved as a jsonl transcript under
   `projects/P1/llm-sessions/scan-<timestamp>.jsonl` (mode 0600 - it
   carries the api key): every record sent to the runner's stdin, in
   send order, followed by every runner output record (the runner's
   duplicate header line is dropped). the file is a valid continuation
   transcript, replayable with `llmkit runner < <file>`.
+- the scout subagent's conversation is teed to
+  `projects/P1/llm-sessions/scan-<timestamp>-scout.jsonl` (mode 0600,
+  same guarantee): the seed records first, then every invoke's records
+  as they happen - the subagent's llmkit writes it (the seed names the
+  file in its `options.transcript`). context resets and rolled-back
+  invokes are truncated out, so the file always mirrors the subagent's
+  live context. it is a valid continuation transcript too. the file is
+  created up front and may hold only the seed when a scan completed
+  without ever invoking scout.
 - exit code: the runner's own exit code when it exits nonzero (127
   means the llmkit binary was not found), 1 when the stages did not
   complete despite a clean runner exit, 0 when all three stages ended

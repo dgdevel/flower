@@ -253,10 +253,27 @@ rc=0
 mkdir -p fakellm
 cat > fakellm/llmkit <<'FAKE'
 #!/usr/bin/env python3
-# fake llmkit runner: reads stdin incrementally (proves the records are
-# fed live, not from a file), answers each flush with a start marker and
-# ends every stage turn with [STEP_COMPLETE]. no network.
+# fake llmkit: two subcommands.
+# runner: reads stdin incrementally (proves the records are fed live,
+# not from a file), answers each flush with a start marker and ends
+# every stage turn with [STEP_COMPLETE]. no network.
+# agent-as-tool <seed>: reads the seed, tees every seed record into the
+# path named by options.transcript (what the real subagent does at
+# startup), then exits on stdin eof. no network.
 import sys, json
+if len(sys.argv) > 1 and sys.argv[1] == "agent-as-tool":
+    tee = None
+    seed = open(sys.argv[2]).read().splitlines()
+    for line in seed:
+        rec = json.loads(line)
+        if rec.get("type") == "options":
+            tee = rec.get("transcript")
+    if not tee:
+        sys.exit(1)
+    with open(tee, "w") as f:
+        for line in seed:
+            f.write(line + "\n")
+    sys.exit(0)
 stage = 0
 for raw in sys.stdin:
     line = raw.strip()
@@ -291,7 +308,7 @@ grep -q 'stage 1 done \[STEP_COMPLETE\]' scan-out.jsonl
 grep -q 'stage 2 done \[STEP_COMPLETE\]' scan-out.jsonl
 grep -q 'stage 3 done \[STEP_COMPLETE\]' scan-out.jsonl
 SESSDIR="$FLOWER_BASE/projects/P1/llm-sessions"
-SESS=$(ls "$SESSDIR"/scan-*.jsonl | head -1)
+SESS=$(ls "$SESSDIR"/scan-*.jsonl | grep -v -- -scout | head -1)
 test "$(stat -c %a "$SESS")" = 600
 # initial records (3) + per stage (system, user, flush, start, response)
 test "$(grep -c "" "$SESS")" = 18
@@ -308,8 +325,58 @@ assert seq == ["header", "llm", "tools",
 print("ok: staged transcript")
 EOF
 FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >/dev/null 2>&1 || true
-test "$(ls "$SESSDIR" | grep -c scan-)" = 2
+test "$(ls "$SESSDIR" | grep -c scan-)" = 4
+# the scout tee: one per run. flower creates the file (0600, like the
+# session); the subagent's own llmkit fills it at startup. the fake
+# runner spawns nothing, so exercise the agent-as-tool subcommand
+# directly: it tees the seed records into the options.transcript path
+test "$(ls "$SESSDIR" | grep -c -- '-scout.jsonl')" = 2
+"$PWD/fakellm/llmkit" agent-as-tool "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
+SCOUT=$(python3 -c 'import json,sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if r.get("type") == "options":
+        print(r["transcript"]); break' \
+    "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl")
+test "$(stat -c %a "$SCOUT")" = 600
+grep -q '"type":"header","version":1' "$SCOUT"
+grep -q '"retain_context":true' "$SCOUT"
+grep -q '"agent-as-tool"' "$SCOUT"
 echo "ok: session transcript"
+
+hdr "scan resolves llmkit from PATH when FLOWER_LLMKIT is unset"
+mkdir -p fakebin
+cp fakellm/llmkit fakebin/llmkit
+cat > fakellm/llmkit <<'FAKE'
+#!/usr/bin/env python3
+# same fake runner, reused via PATH: proves execlp finds a bare name
+import sys, json
+stage = 0
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line: continue
+    rec = json.loads(line)
+    t = rec.get("type")
+    if t == "system":
+        txt = rec["content"][0]["text"]
+        if "stage 1 of 3" in txt: stage = 1
+        elif "stage 2 of 3" in txt: stage = 2
+        elif "stage 3 of 3" in txt: stage = 3
+    elif t == "flush":
+        print(json.dumps({"type": "start"}), flush=True)
+        print(json.dumps({"type": "response",
+                          "text": "stage %d done [STEP_COMPLETE]" % stage,
+                          "finish_reason": "stop"}), flush=True)
+sys.exit(0)
+FAKE
+chmod +x fakellm/llmkit
+env -u FLOWER_LLMKIT PATH="$PWD/fakebin:$PATH" \
+    ./flower project P1 scan mock >scan-out3.jsonl || rc=$?
+test "$rc" = 0
+test "$(grep -c "" scan-out3.jsonl)" = 6
+grep -q 'stage 3 done \[STEP_COMPLETE\]' scan-out3.jsonl
+rm -rf fakebin scan-out3.jsonl
+echo "ok: PATH lookup"
 
 hdr "scan error path: runner dies mid-stage (expect fail)"
 cat > fakellm/llmkit <<'FAKE'
@@ -323,7 +390,7 @@ chmod +x fakellm/llmkit
 FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >scan-out2.jsonl || rc=$?
 test "$rc" = 3
 grep -q '"code":"connect_failed"' scan-out2.jsonl
-SESS=$(ls "$SESSDIR"/scan-*.jsonl | head -2 | tail -1)
+SESS=$(ls -t "$SESSDIR"/scan-*.jsonl | grep -v -- -scout | head -1)
 tail -1 "$SESS" | grep -q '"code":"connect_failed"'
 rm -rf fakellm scan-out.jsonl scan-out2.jsonl
 echo "ok: mid-stage failure"

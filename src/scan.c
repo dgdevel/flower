@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -321,9 +322,10 @@ static int write_private(const char *path, const buf_t *b) {
 
 /* ---------- llm session transcripts ---------- */
 
-/* open projects/<pid>/llm-sessions/scan-<stamp>.jsonl, unique name.
+/* open projects/<pid>/llm-sessions/scan-<stamp><suffix>.jsonl, unique
+   name. suffix "" is the main session, "-scout" the subagent tee.
    malloc'd path, NULL on io error (printed). mode 0600 from birth. */
-static char *session_open(const char *pid) {
+static char *session_open(const char *pid, const char *suffix) {
     char dir_rel[128];
     char *dir, *path = NULL;
     char stamp[64];
@@ -348,8 +350,11 @@ static char *session_open(const char *pid) {
     for (attempt = 0; attempt < 100; attempt++) {
         char name[96];
         struct stat st;
-        if (attempt == 0) snprintf(name, sizeof name, "scan-%s.jsonl", stamp);
-        else snprintf(name, sizeof name, "scan-%s-%d.jsonl", stamp, attempt);
+        if (attempt == 0)
+            snprintf(name, sizeof name, "scan-%s%s.jsonl", stamp, suffix);
+        else
+            snprintf(name, sizeof name, "scan-%s-%d%s.jsonl", stamp, attempt,
+                     suffix);
         path = xasprintf("%s/%s", dir, name);
         if (!path) {
             free(dir);
@@ -384,7 +389,7 @@ static char *session_open(const char *pid) {
    {"type":"header"} as the first output line, which would duplicate
    the input's. returns 0 ok, -1 io error (printed). */
 static int session_line(const char *line, size_t len, FILE *sess,
-                        int *skipped_header) {
+                        int *skipped_header, buf_t *hist) {
     static const char hdr[] = "{\"type\":\"header\",\"version\":1}";
     if (!*skipped_header && len == strlen(hdr) &&
         memcmp(line, hdr, len) == 0) {
@@ -399,7 +404,145 @@ static int session_line(const char *line, size_t len, FILE *sess,
         fprintf(stderr, "flower: stdout write error\n");
         return -1;
     }
+    if (hist && (buf_append(hist, line, len) != 0 ||
+                 buf_append(hist, "\n", 1) != 0)) {
+        fprintf(stderr, "flower: out of memory\n");
+        return -1;
+    }
     return 0;
+}
+
+/* write every byte of data to fd, retrying on eintr. -1 io error.
+   EPIPE counts as success: the writer child shares SIGPIPE
+   disposition, so a dead reader shows up as write() returning -1 with
+   EPIPE rather than a signal - the runner's own exit code reports it */
+static int write_all_fd(int fd, const char *data, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EPIPE) return 0;
+        if (n <= 0) return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+/* run one runner turn: a fresh <llmkit> runner gets input (a full
+   transcript ending in a flush) on stdin followed by eof, because the
+   real runner exits after a final response instead of waiting for
+   steering. its stdout lines are teed to flower's stdout, the session
+   file and hist. returns the runner wait status (>= 0), -1 on a
+   flower-side io error, -2 when the runner could not run (127). */
+static int run_turn(const char *llmkit, const buf_t *input, FILE *sess,
+                    buf_t *hist) {
+    pid_t kid, wr;
+    int inpipe[2], outp[2];
+    int st, wst;
+    FILE *rp;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got;
+    int skipped_header = 0;
+    int rc = 0;
+
+    if (pipe(inpipe) != 0 || pipe(outp) != 0) {
+        fprintf(stderr, "flower: pipe: %s\n", strerror(errno));
+        if (inpipe[0] >= 0) {
+            close(inpipe[0]);
+            close(inpipe[1]);
+        }
+        if (outp[0] >= 0) {
+            close(outp[0]);
+            close(outp[1]);
+        }
+        return -1;
+    }
+    fflush(stdout);
+    kid = fork();
+    if (kid < 0) {
+        fprintf(stderr, "flower: fork: %s\n", strerror(errno));
+        close(inpipe[0]); close(inpipe[1]);
+        close(outp[0]); close(outp[1]);
+        return -1;
+    }
+    if (kid == 0) {
+        if (dup2(inpipe[0], STDIN_FILENO) < 0 ||
+            dup2(outp[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        close(inpipe[0]); close(inpipe[1]);
+        close(outp[0]); close(outp[1]);
+        /* execlp: FLOWER_LLMKIT may be bare "llmkit" or a path - both
+           work, PATH search happens for the bare name */
+        execlp(llmkit, "llmkit", "runner", (char *)NULL);
+        _exit(127);
+    }
+    close(inpipe[0]);
+    close(outp[1]);
+
+    /* writer child: feeds the transcript then closes the pipe (eof).
+       separate process because the runner emits output while it still
+       reads, and a big transcript written from the parent would
+       deadlock the pipe */
+    wr = fork();
+    if (wr < 0) {
+        fprintf(stderr, "flower: fork: %s\n", strerror(errno));
+        close(inpipe[1]);
+        close(outp[0]);
+        kill(kid, SIGTERM);
+        waitpid(kid, &st, 0);
+        return -1;
+    }
+    if (wr == 0) {
+        signal(SIGPIPE, SIG_IGN);
+        _exit(write_all_fd(inpipe[1], input->data, input->len) == 0
+                  ? 0
+                  : 1);
+    }
+    close(inpipe[1]);
+
+    rp = fdopen(outp[0], "r");
+    if (!rp) {
+        fprintf(stderr, "flower: cannot read runner output: %s\n",
+                strerror(errno));
+        close(outp[0]);
+        kill(kid, SIGTERM);
+        waitpid(kid, &st, 0);
+        waitpid(wr, &st, 0);
+        return -1;
+    }
+    for (;;) {
+        got = getline(&line, &cap, rp);
+        if (got < 0) {
+            if (ferror(rp)) {
+                fprintf(stderr, "flower: session read error\n");
+                rc = -1;
+            }
+            break;
+        }
+        if (!line) continue;
+        while (got > 0 && (line[got - 1] == '\n' || line[got - 1] == '\r'))
+            got--;
+        if (got <= 0) continue;
+        if (session_line(line, (size_t)got, sess, &skipped_header,
+                         hist) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    free(line);
+    fclose(rp);
+    if (waitpid(wr, &st, 0) < 0 || (WIFEXITED(st) && WEXITSTATUS(st) != 0)) {
+        fprintf(stderr, "flower: runner stdin write error\n");
+        rc = -1;
+    }
+    if (waitpid(kid, &wst, 0) < 0) {
+        fprintf(stderr, "flower: waitpid: %s\n", strerror(errno));
+        return -1;
+    }
+    if (!WIFEXITED(wst)) return -1;
+    if (WEXITSTATUS(wst) == 127) return -2;
+    return rc < 0 ? -1 : wst;
 }
 
 /* shift every markdown header one level deeper in a serialized doc:
@@ -588,27 +731,6 @@ static int nudge_records(buf_t *out) {
     return 0;
 }
 
-/* write out to the runner's stdin in full and mirror it to the session
-   transcript. 0 ok, -1 io error */
-static int send_records(int fd, FILE *sess, buf_t *out) {
-    size_t off = 0;
-    while (off < out->len) {
-        ssize_t n = write(fd, out->data + off, out->len - off);
-        if (n <= 0) {
-            fprintf(stderr, "flower: runner stdin write error\n");
-            return -1;
-        }
-        off += (size_t)n;
-    }
-    if (sess && out->len > 0 &&
-        fwrite(out->data, 1, out->len, sess) != out->len) {
-        fprintf(stderr, "flower: session write error\n");
-        return -1;
-    }
-    buf_reset(out);
-    return 0;
-}
-
 /* classify one runner output line for stage tracking: 1 a final
    response ending in [STEP_COMPLETE], 2 a final response without the
    marker, 0 anything else, -1 unparseable (printed). "final" means
@@ -626,57 +748,31 @@ static int stage_line(const char *line, size_t len) {
         return -1;
     }
     if (json_str_of(rec, "type") &&
-        !strcmp(json_str_of(rec, "type"), "response") &&
-        !json_get(rec, "partial") && json_get(rec, "finish_reason")) {
-        text = json_str_of(rec, "text");
-        if (text) {
-            size_t t = strlen(text);
-            /* models may pad the marker line with whitespace */
-            while (t > 0 && (text[t - 1] == '\n' || text[t - 1] == '\r' ||
-                             text[t - 1] == ' ' || text[t - 1] == '\t'))
-                t--;
-            int r = (t >= m && memcmp(text + t - m, marker, m) == 0) ? 1 : 2;
-            json_free(rec);
-            return r;
+        !strcmp(json_str_of(rec, "type"), "response")) {
+        json_t *part = json_get(rec, "partial");
+        int partial = part && (part->type == JSON_BOOL
+                                   ? (int)part->num
+                                   : part->type != JSON_NULL);
+        if (!partial && json_get(rec, "finish_reason")) {
+            text = json_str_of(rec, "text");
+            if (text) {
+                size_t t = strlen(text);
+                /* models may pad the marker line with whitespace */
+                while (t > 0 &&
+                       (text[t - 1] == '\n' || text[t - 1] == '\r' ||
+                        text[t - 1] == ' ' || text[t - 1] == '\t'))
+                    t--;
+                int r = (t >= m &&
+                         memcmp(text + t - m, marker, m) == 0)
+                            ? 1
+                            : 2;
+                json_free(rec);
+                return r;
+            }
         }
     }
     json_free(rec);
     return 0;
-}
-
-/* read runner output through session_line until the stage's turn ends.
-   1 done ([STEP_COMPLETE]), 0 turn ended without the marker (caller
-   may nudge), -1 io error (printed), 2 the runner's output closed
-   before a final response */
-static int wait_stage_end(FILE *rp, char **line, size_t *cap, FILE *sess,
-                          int *skipped_header) {
-    for (;;) {
-        ssize_t got;
-        if ((got = getline(line, cap, rp)) < 0) {
-            if (ferror(rp)) {
-                fprintf(stderr, "flower: session read error\n");
-                return -1;
-            }
-            return 2; /* eof without a final response */
-        }
-        if (!*line) continue; /* getline may set NULL on empty input */
-        while (got > 0 && ((*line)[got - 1] == '\n' ||
-                           (*line)[got - 1] == '\r'))
-            got--;
-        if (got <= 0) continue;
-        if (session_line(*line, (size_t)got, sess, skipped_header) != 0)
-            return -1;
-        switch (stage_line(*line, (size_t)got)) {
-        case 1:
-            return 1;
-        case 2:
-            return 0;
-        case -1:
-            return -1;
-        default:
-            break;
-        }
-    }
 }
 
 /* one stdio server entry, borrowed fields copied. NULL oom */
@@ -705,6 +801,27 @@ static json_t *server_entry(const char *name, const char *cmd,
         json_add(o, r);
     }
     return o;
+}
+
+/* does hist (the transcript fed to the next turn) end with a final
+   [STEP_COMPLETE] response? 1 yes, 0 no, -1 bad json (printed). */
+static int hist_ends_complete(const buf_t *hist) {
+    const char *p, *last_nl;
+    char *copy;
+    int r;
+    if (hist->len == 0) return 0;
+    /* find the last non-empty line */
+    p = hist->data + hist->len;
+    while (p > hist->data && (p[-1] == '\n' || p[-1] == '\r')) p--;
+    last_nl = p;
+    while (last_nl > hist->data && last_nl[-1] != '\n') last_nl--;
+    if (last_nl == p) return 0;
+    copy = strndup(last_nl, (size_t)(p - last_nl));
+    if (!copy) return oom() - 1;
+    r = stage_line(copy, strlen(copy));
+    free(copy);
+    if (r < 0) return -1;
+    return r == 1 ? 1 : 0;
 }
 
 /* ---------- cmd_scan ---------- */
@@ -777,7 +894,7 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
     profile_t p;
     md_doc_t llms_doc; /* holds the borrowed profile strings */
     char exe[4096];    /* absolute self path for mcp server spawns */
-    char *seed_rel = NULL, *seed_path = NULL;
+    char *seed_rel = NULL, *seed_path = NULL, *scout_path = NULL;
     buf_t seed, input;
     json_t *llm = NULL, *tools = NULL, *sysrec = NULL;
     const char *llmkit;
@@ -901,10 +1018,27 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         if (emit_record(&seed, aat) != 0) goto oom;
     }
     /* one growing scout conversation: invoke keeps the context it
-       gained in earlier stages (plus a context_reset tool) */
-    if (emit_record(&seed, json_parse("{\"type\":\"options\","
-                                      "\"retain_context\":true}")) != 0)
-        goto oom;
+       gained in earlier stages (plus a context_reset tool). the live
+       scan also names a transcript file: the subagent's llmkit tees
+       its whole conversation there (seed records first), same rules
+       as the main session. dry-run leaves it unset - nothing runs */
+    {
+        json_t *opts = json_parse("{\"type\":\"options\","
+                                  "\"retain_context\":true}");
+        if (!opts) goto oom;
+        if (!dry_run) {
+            scout_path = session_open(pid, "-scout");
+            if (!scout_path) goto out;
+            if (obj_str(opts, "transcript", scout_path) != 0) {
+                json_free(opts);
+                goto oom;
+            }
+        }
+        if (emit_record(&seed, opts) != 0) {
+            json_free(opts);
+            goto oom;
+        }
+    }
 
     /* write the seed under projects/<pid>/scan/ */
     seed_rel = xasprintf("projects/%s/scan/scout-seed.jsonl", pid);
@@ -1133,143 +1267,147 @@ int cmd_scan(const char *pid, const char *profile, int dry_run,
         goto out;
     }
 
-    /* spawn <llmkit> runner with a pipe as stdin; the parent keeps the
-       write end and feeds the records stage by stage: header/llm/tools
-       first, then per stage system + user + flush, waiting for the
-       [STEP_COMPLETE] marker before the next one. the runner's stdout
-       is teed to flower's stdout and the session transcript. */
+    /* the live scan: one <llmkit> runner per turn. the runner exits
+       after a final response instead of waiting for steering, so each
+       turn is a fresh runner fed the whole transcript so far plus this
+       stage's records and a flush, then eof. every output line is
+       teed to stdout, the session transcript and the transcript fed
+       to the next turn, keeping the session a valid replayable jsonl:
+       input records in send order, then output records. a turn that
+       ends without [STEP_COMPLETE] gets one nudge retry. */
     {
-        pid_t kid;
-        int st;
-        int inpipe[2];
-        int outp[2];
+        buf_t hist;
         FILE *sess = NULL;
         char *sess_path = NULL;
-        int skipped_header = 0;
-        FILE *rp = NULL;
-        char *line = NULL;
-        size_t cap = 0;
-        int s, rc2 = 0;
+        int s;
+        int failed = 0;
 
-        if (pipe(inpipe) != 0 || pipe(outp) != 0) {
-            fprintf(stderr, "flower: pipe: %s\n", strerror(errno));
-            if (inpipe[0] >= 0) {
-                close(inpipe[0]);
-                close(inpipe[1]);
-            }
-            goto out;
-        }
-        fflush(stdout);
-        kid = fork();
-        if (kid < 0) {
-            fprintf(stderr, "flower: fork: %s\n", strerror(errno));
-            close(inpipe[0]);
-            close(inpipe[1]);
-            close(outp[0]);
-            close(outp[1]);
-            goto out;
-        }
-        if (kid == 0) {
-            if (dup2(inpipe[0], STDIN_FILENO) < 0 ||
-                dup2(outp[1], STDOUT_FILENO) < 0)
-                _exit(127);
-            close(inpipe[0]);
-            close(inpipe[1]);
-            close(outp[0]);
-            close(outp[1]);
-            execl(llmkit, "llmkit", "runner", (char *)NULL);
-            _exit(127);
-        }
-        close(inpipe[0]);
-        close(outp[1]);
-        /* the session transcript: records appended as they are sent to
-           the runner's stdin, then the runner output line by line
-           (minus its duplicate header). 0600: the llm record carries
-           the api key. */
-        sess_path = session_open(pid);
-        if (sess_path) {
+        buf_init(&hist);
+        /* input currently holds header, llm, tools: the turn 1 prefix.
+           the session file mirrors every record in hist plus runner
+           output, 0600: it carries the api key */
+        sess_path = session_open(pid, "");
+        if (!sess_path) failed = 1;
+        else {
             sess = fopen(sess_path, "wb");
             if (!sess) {
                 fprintf(stderr, "flower: cannot open %s: %s\n", sess_path,
                         strerror(errno));
                 free(sess_path);
                 sess_path = NULL;
+                failed = 1;
             }
         }
-        rp = fdopen(outp[0], "r");
-        if (!rp) {
-            fprintf(stderr, "flower: cannot open runner output: %s\n",
-                    strerror(errno));
-            close(outp[0]);
+        /* write the prefix records into hist and the session */
+        if (!failed && fwrite(input.data, 1, input.len, sess) != input.len) {
+            fprintf(stderr, "flower: session write error\n");
+            failed = 1;
         }
+        if (!failed && buf_append(&hist, input.data, input.len) != 0)
+            failed = oom();
 
-        /* feed the initial records, then run the three stages */
-        if (send_records(inpipe[1], sess, &input) != 0) rc2 = -1;
-        if (!rp) rc2 = -1; /* outp[0] is closed in the cleanup below */
-        for (s = 0; s < 3 && rc2 == 0; s++) {
+        for (s = 0; s < 3 && !failed; s++) {
             char *text = stage_prompt_text(pid, &scan_stages[s]);
+            buf_t turn;      /* hist + this stage's records */
             int nudges = 0;
+            int done = 0;
             if (!text) {
-                rc2 = -1;
+                failed = oom();
                 break;
             }
-            if (stage_records(&input, &scan_stages[s], text) != 0 ||
-                send_records(inpipe[1], sess, &input) != 0) {
+            buf_init(&turn);
+            if (buf_append(&turn, hist.data, hist.len) != 0) {
+                buf_free(&turn);
                 free(text);
-                rc2 = -1;
+                failed = oom();
+                break;
+            }
+            if (stage_records(&turn, &scan_stages[s], text) != 0 ||
+                fwrite(turn.data + hist.len, 1, turn.len - hist.len,
+                       sess) != turn.len - hist.len) {
+                buf_free(&turn);
+                free(text);
+                if (!failed) failed = oom();
                 break;
             }
             free(text);
             for (;;) {
-                int w = wait_stage_end(rp, &line, &cap, sess,
-                                       &skipped_header);
-                if (w == 1) break; /* marker: stage done */
-                if (w < 0 || w == 2) {
-                    rc2 = -1;
+                int w = run_turn(llmkit, &turn, sess, &hist);
+                int code;
+                if (w == -2) {
+                    fprintf(stderr, "flower: cannot run '%s runner' - set "
+                                    "FLOWER_LLMKIT to the llmkit binary\n",
+                            llmkit);
+                    failed = 1;
                     break;
                 }
-                /* the turn ended without the marker: nudge once */
+                if (w < 0) {
+                    failed = 1;
+                    break;
+                }
+                code = WEXITSTATUS(w);
+                if (code != 0) {
+                    /* the runner's error records are already on stdout
+                       and in the session; its exit code wins */
+                    rc = code;
+                    failed = 1;
+                    break;
+                }
+                {
+                    int fin = hist_ends_complete(&hist);
+                    if (fin < 0) {
+                        failed = 1;
+                        break;
+                    }
+                    if (fin) {
+                        done = 1;
+                        break;
+                    }
+                }
+                /* turn ended without the marker: nudge once */
                 if (nudges++ >= 1) {
-                    rc2 = -1;
+                    fprintf(stderr, "flower: stage %d ended without "
+                                    "[STEP_COMPLETE]\n", s + 1);
+                    failed = 1;
                     break;
                 }
-                if (nudge_records(&input) != 0 ||
-                    send_records(inpipe[1], sess, &input) != 0)
-                    rc2 = -1;
+                buf_reset(&turn);
+                if (buf_append(&turn, hist.data, hist.len) != 0 ||
+                    nudge_records(&turn) != 0) {
+                    failed = oom();
+                    break;
+                }
+                if (fwrite(turn.data + hist.len, 1, turn.len - hist.len,
+                           sess) != turn.len - hist.len) {
+                    fprintf(stderr, "flower: session write error\n");
+                    failed = 1;
+                    break;
+                }
             }
+            buf_free(&turn);
+            (void)done;
         }
-        close(inpipe[1]); /* EOF: the runner's stdin is done */
-        free(line);
-        if (rp) fclose(rp);
-        else close(outp[0]);
         if (sess) {
             if (fclose(sess) != 0)
                 fprintf(stderr, "flower: session write error\n");
             else
                 fprintf(stderr, "flower: session: %s\n", sess_path);
         }
+        /* the scout tee is written by the subagent's own llmkit
+           process; only report the path here, the file may hold just
+           the seed when the scan never invoked scout */
+        if (scout_path)
+            fprintf(stderr, "flower: scout transcript: %s\n", scout_path);
         free(sess_path);
-        if (waitpid(kid, &st, 0) < 0) {
-            fprintf(stderr, "flower: waitpid: %s\n", strerror(errno));
-            rc = 1;
-        } else if (WIFEXITED(st)) {
-            int code = WEXITSTATUS(st);
-            if (code == 127)
-                fprintf(stderr, "flower: cannot run '%s runner' - set "
-                                "FLOWER_LLMKIT to the llmkit binary\n",
-                        llmkit);
-            /* a nonzero runner exit wins; a clean exit with unfinished
-               stages is still a failure */
-            rc = code == 127 ? 1 : (code != 0 ? code
-                                              : (rc2 < 0 ? 1 : 0));
-        } else {
-            rc = 1;
-        }
+        buf_free(&hist);
+        if (failed && rc == 0) rc = 1;
+        if (!failed) rc = 0;
     }
 
 out:
     free(seed_rel);
     free(seed_path);
+    free(scout_path);
     buf_free(&seed);
     buf_free(&input);
     json_free(llm);
