@@ -188,6 +188,8 @@ char *store_next_task_id(const char *pid);
 char *store_next_action_id(const md_doc_t *actions_doc);
 /* validate id syntax: "P<n>" etc. 1 ok 0 bad */
 int store_valid_id(const char *id, char kind); /* kind 'P','T','A' */
+/* malloc'd project id detected from cwd via Path keys, NULL when none */
+char *store_detect_project(void);
 
 /* allowed keys for config.md chapters. NULL-terminated lists. */
 extern const char *const store_user_keys[];     /* Name, Role */

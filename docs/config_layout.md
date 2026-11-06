@@ -42,7 +42,10 @@ Projects are organized as directories within `$FLOWER_BASE/projects/<project_id>
 
 1. **`config.md`**: Basic project metadata.  
    Managed via: `./flower project <project_id> set <key> "<value>"`
-   - Keys: `Name`, `Path`, `Description`.
+   - Keys: `Name`, `Path`, `Description`. `Path` also drives project
+     auto-detection: when a `project` command (or `flower mcp`) omits `<P>`,
+     flower picks the project whose Path covers the current working
+     directory.
 
    ```markdown
    # Project
@@ -81,7 +84,7 @@ Projects are organized as directories within `$FLOWER_BASE/projects/<project_id>
    ```
 
 #### Scan Artifacts
-`projects/<project_id>/scan/`: runtime files of `flower project <P> scan`
+`projects/<project_id>/scan/`: runtime files of `flower project [<P>] scan`
 (see docs/config_cli.md). `scout-seed.jsonl` is the readonly search
 subagent seed (mode 0600). Regenerated on every scan.
 

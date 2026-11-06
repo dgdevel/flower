@@ -8,6 +8,10 @@ docs/config_layout.md. Files on disk follow docs/config_markdown_format.md.
 - Binary invoked as `./flower` from repo root.
 - Identifiers are sequential and auto-assigned at creation: projects `P1, P2...`,
   tasks `T1, T2...`, actions `A1, A2...`. User never picks the numeric id.
+- `<P>` optional in every `project` command and in `flower mcp`: omitted,
+  flower resolves the project whose `Path` covers the current directory
+  (`Path` equal to cwd or cwd inside it, lowest id wins). An explicit `<P>`
+  always wins.
 - `<value>` arguments are quoted strings; spaces allowed inside quotes.
 - Key names unique per chapter, chapter names unique per file. Duplicate name or
   key -> command fails, file unchanged, error message says what clashed.
@@ -21,8 +25,8 @@ Grammar skeleton:
 
 ```
 ./flower setup
-./flower project <P> <area> <verb> [args]
-./flower project <P> task <T> <area> <verb> [args]
+./flower project [<P>] <area> <verb> [args]
+./flower project [<P>] task <T> <area> <verb> [args]
 ```
 
 Areas: `(none)` = config.md, `details`, `context`, `resource`, `action`; `llm` is a top-level area of its own.

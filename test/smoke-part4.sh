@@ -192,33 +192,33 @@ hdr "scan: setup profiles"
 hdr "scan dry-run: staged record shape"
 ./flower project P1 scan gpt --dry-run > scan-dry.jsonl 2> scan-dry.err
 # header, llm, tools + three stages of (system, user, flush)
-test "$(grep -c "" scan-dry.jsonl)" = 12
+test "$(grep -c "" scan-dry.jsonl)" = 13
 grep -q '"type":"header","version":1' scan-dry.jsonl
 sed -n 2p scan-dry.jsonl | grep -q '"endpoint_protocol":"openai"'
 sed -n 2p scan-dry.jsonl | grep -q '"api_base":"https://api.openai.com/v1"'
 sed -n 2p scan-dry.jsonl | grep -q '"api_key":"k1"'
 sed -n 2p scan-dry.jsonl | grep -q '"headers":{"X-Org":"acme"}'
 sed -n 2p scan-dry.jsonl | grep -q '"max_tokens":512'
-sed -n 3p scan-dry.jsonl | grep -q '"name":"details"'
-sed -n 3p scan-dry.jsonl | grep -q 'mcp P1 details'
-sed -n 3p scan-dry.jsonl | grep -q 'mcp P1 context'
-sed -n 3p scan-dry.jsonl | grep -q 'mcp P1 resource'
-sed -n 3p scan-dry.jsonl | grep -q 'agent-as-tool'
-sed -n 3p scan-dry.jsonl | grep -q 'scout-seed.jsonl'
-for n in 6 9 12; do sed -n "${n}p" scan-dry.jsonl | grep -q '"type":"flush"'; done
+sed -n 4p scan-dry.jsonl | grep -q '"name":"details"'
+sed -n 4p scan-dry.jsonl | grep -q 'mcp P1 details'
+sed -n 4p scan-dry.jsonl | grep -q 'mcp P1 context'
+sed -n 4p scan-dry.jsonl | grep -q 'mcp P1 resource'
+sed -n 4p scan-dry.jsonl | grep -q 'agent-as-tool'
+sed -n 4p scan-dry.jsonl | grep -q 'scout-seed.jsonl'
+for n in 7 10 13; do sed -n "${n}p" scan-dry.jsonl | grep -q '"type":"flush"'; done
 python3 - "$FLOWER_BASE" <<'EOF'
 import json, sys
 lines = open("scan-dry.jsonl").read().splitlines()
 def text(i): return json.loads(lines[i])["content"][0]["text"]
-s1, s2, s3 = text(3), text(6), text(9)
+s1, s2, s3 = text(4), text(7), text(10)
 assert s1.startswith("you are a project scanner"), "preamble head"
-assert "stage 1 of 3" in s1 and "[STEP_COMPLETE]" in s1
+assert "[STEP_COMPLETE]" in s1
 assert "# Current details.md" in s1, "details embedded in stage 1"
 assert "## Output" in s1 and "old output line" in s1, "shifted details body"
 assert "# Current context.md" not in s1, "no other files in stage 1"
-assert text(4).startswith("begin stage 1")
-assert "stage 2 of 3" in s2 and "# Current context.md" in s2
-assert "stage 3 of 3" in s3 and "# Current resources.md" in s3
+assert text(5).startswith("begin stage 1")
+assert "# Current context.md" in s2, "stage 2 prompt"
+assert "# Current resources.md" in s3, "stage 3 prompt"
 print("ok: staged system records")
 EOF
 echo "ok: dry-run records"
@@ -283,11 +283,11 @@ for raw in sys.stdin:
     t = rec.get("type")
     if t == "system":
         txt = rec["content"][0]["text"]
-        if "stage 1 of 3" in txt:
+        if "# Current details.md" in txt:
             stage = 1
-        elif "stage 2 of 3" in txt:
+        elif "# Current context.md" in txt:
             stage = 2
-        elif "stage 3 of 3" in txt:
+        elif "# Current resources.md" in txt:
             stage = 3
     elif t == "flush":
         print(json.dumps({"type": "start"}), flush=True)
@@ -310,15 +310,15 @@ grep -q 'stage 3 done \[STEP_COMPLETE\]' scan-out.jsonl
 SESSDIR="$FLOWER_BASE/projects/P1/llm-sessions"
 SESS=$(ls "$SESSDIR"/scan-*.jsonl | grep -v -- -scout | head -1)
 test "$(stat -c %a "$SESS")" = 600
-# initial records (3) + per stage (system, user, flush, start, response)
-test "$(grep -c "" "$SESS")" = 18
+# initial records (4) + per stage (system, user, flush, start, response)
+test "$(grep -c "" "$SESS")" = 19
 head -1 "$SESS" | grep -q '"type":"header","version":1'
 sed -n 2p "$SESS" | grep -q '"type":"llm"'
 python3 - "$SESS" <<'EOF'
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()
 seq = [json.loads(l)["type"] for l in lines]
-assert seq == ["header", "llm", "tools",
+assert seq == ["header", "llm", "options", "tools",
                "system", "user", "flush", "start", "response",
                "system", "user", "flush", "start", "response",
                "system", "user", "flush", "start", "response"], seq
@@ -326,22 +326,16 @@ print("ok: staged transcript")
 EOF
 FLOWER_LLMKIT="$PWD/fakellm/llmkit" ./flower project P1 scan mock >/dev/null 2>&1 || true
 test "$(ls "$SESSDIR" | grep -c scan-)" = 4
-# the scout tee: one per run. flower creates the file (0600, like the
-# session); the subagent's own llmkit fills it at startup. the fake
-# runner spawns nothing, so exercise the agent-as-tool subcommand
-# directly: it tees the seed records into the options.transcript path
+# the scout session file: one per run. flower creates it (0600, like
+# the main session); the seed no longer names a transcript option
+# (llmkit agent-as-tool has none), so with the fake runner - which
+# spawns no subagent - it stays empty
 test "$(ls "$SESSDIR" | grep -c -- '-scout.jsonl')" = 2
-"$PWD/fakellm/llmkit" agent-as-tool "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
-SCOUT=$(python3 -c 'import json,sys
-for l in open(sys.argv[1]):
-    r = json.loads(l)
-    if r.get("type") == "options":
-        print(r["transcript"]); break' \
-    "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl")
+SCOUT=$(ls "$SESSDIR"/*-scout.jsonl | head -1)
 test "$(stat -c %a "$SCOUT")" = 600
-grep -q '"type":"header","version":1' "$SCOUT"
-grep -q '"retain_context":true' "$SCOUT"
-grep -q '"agent-as-tool"' "$SCOUT"
+test ! -s "$SCOUT"
+grep -q '"retain_context":true' "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
+grep -q '"agent-as-tool"' "$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
 echo "ok: session transcript"
 
 hdr "scan resolves llmkit from PATH when FLOWER_LLMKIT is unset"
@@ -359,9 +353,9 @@ for raw in sys.stdin:
     t = rec.get("type")
     if t == "system":
         txt = rec["content"][0]["text"]
-        if "stage 1 of 3" in txt: stage = 1
-        elif "stage 2 of 3" in txt: stage = 2
-        elif "stage 3 of 3" in txt: stage = 3
+        if "# Current details.md" in txt: stage = 1
+        elif "# Current context.md" in txt: stage = 2
+        elif "# Current resources.md" in txt: stage = 3
     elif t == "flush":
         print(json.dumps({"type": "start"}), flush=True)
         print(json.dumps({"type": "response",

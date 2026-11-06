@@ -35,14 +35,16 @@ make fuzz         # set up libFuzzer harnesses (see fuzz/README.md)
 
 ```
 ./flower setup
-./flower project <P> <area> <verb> [args]
-./flower project <P> task <T> <area> <verb> [args]
+./flower project [<P>] <area> <verb> [args]
+./flower project [<P>] task <T> <area> <verb> [args]
 ```
 
 - `setup` - create/update `$FLOWER_BASE/flower.md`, then guided add/edit of llm
   profiles (`llms.md`)
-- `project <P> set|show|remove` - project config (`Name`, `Path`,
+- `project [<P>] set|show|remove` - project config (`Name`, `Path`,
   `Description`)
+- omitted `<P>` is auto-detected from the working directory via each project's
+  `Path`
 - `project <P> details set|remove|show` - detail chapters (`Output`,
   `Objectives`, `Scope`, ...)
 - `project <P> context add|edit|rename|remove|list` - context entries

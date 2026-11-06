@@ -129,6 +129,27 @@ hdr "invalid ids (expect fails)"
 hdr "unbalanced quotes (expect fails)"
 ./flower project P1 set Name '"unclosed' && echo "FAIL" || echo "ok: rejected"
 
+hdr "cwd project detection (<P> omitted)"
+FLOWER_BIN="$(pwd)/flower"
+PROJDIR="$(mktemp -d)"
+./flower project P1 set Path "$PROJDIR"
+mkdir -p "$PROJDIR/sub"
+echo "-- project show from inside Path:"
+( cd "$PROJDIR" && "$FLOWER_BIN" project show )
+echo "-- details set from a subdir:"
+( cd "$PROJDIR/sub" && "$FLOWER_BIN" project details set Output "set from subdir" )
+cat "$FLOWER_BASE/projects/P1/details.md"
+echo "-- tie-break: P2 shares the Path, lowest id (P1) wins:"
+mkdir "$FLOWER_BASE/projects/P2"
+printf '# Project\nName: dup\nPath: %s\n' "$PROJDIR" > "$FLOWER_BASE/projects/P2/config.md"
+( cd "$PROJDIR" && "$FLOWER_BIN" project show | grep -c "Name: flower" )
+rm -rf "$FLOWER_BASE/projects/P2"
+echo "-- unrelated dir without P (expect fail):"
+( cd / && "$FLOWER_BIN" project show ) && echo "FAIL" || echo "ok: rejected"
+echo "-- malformed explicit id keeps old error (expect fail):"
+./flower project p1 show && echo "FAIL" || echo "ok: rejected"
+rm -rf "$PROJDIR"
+
 hdr "parse error on corrupt file (expect fail, unchanged)"
 printf '# Project\n## broken jump\n' > "$FLOWER_BASE/projects/P1/config.md"
 ./flower project P1 set Name "y" && echo "FAIL" || echo "ok: rejected"

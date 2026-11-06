@@ -19,35 +19,35 @@
 
 static int usage(FILE *out) {
     fputs("usage: flower setup\n"
-          "       flower project <P> set <Key> \"<Value>\"\n"
-          "       flower project <P> show\n"
-          "       flower project <P> details set <Field> \"<text>\"\n"
-          "       flower project <P> details remove <Field>\n"
-          "       flower project <P> details show [Field]\n"
-          "       flower project <P> context add <Prefix> \"<Title>\" "
+          "       flower project [<P>] set <Key> \"<Value>\"\n"
+          "       flower project [<P>] show\n"
+          "       flower project [<P>] details set <Field> \"<text>\"\n"
+          "       flower project [<P>] details remove <Field>\n"
+          "       flower project [<P>] details show [Field]\n"
+          "       flower project [<P>] context add <Prefix> \"<Title>\" "
           "\"<Body>\"\n"
-          "       flower project <P> context edit <Prefix> \"<Title>\" "
+          "       flower project [<P>] context edit <Prefix> \"<Title>\" "
           "\"<NewBody>\"\n"
-          "       flower project <P> context rename <Prefix> \"<Title>\" "
+          "       flower project [<P>] context rename <Prefix> \"<Title>\" "
           "\"<NewTitle>\"\n"
-          "       flower project <P> context remove <Prefix> \"<Title>\"\n"
-          "       flower project <P> context list\n"
-          "       flower project <P> resource add \"<Name>\" \"<Pointer>\"\n"
-          "       flower project <P> resource set \"<Name>\" \"<Pointer>\"\n"
-          "       flower project <P> resource remove \"<Name>\"\n"
-          "       flower project <P> resource list\n"
-          "       flower project <P> task <T> set <Key> \"<Value>\"\n"
-          "       flower project <P> task <T> show\n"
-          "       flower project <P> task <T> context <verb> [args]\n"
-          "       flower project <P> task <T> action add \"<Title>\" "
+          "       flower project [<P>] context remove <Prefix> \"<Title>\"\n"
+          "       flower project [<P>] context list\n"
+          "       flower project [<P>] resource add \"<Name>\" \"<Pointer>\"\n"
+          "       flower project [<P>] resource set \"<Name>\" \"<Pointer>\"\n"
+          "       flower project [<P>] resource remove \"<Name>\"\n"
+          "       flower project [<P>] resource list\n"
+          "       flower project [<P>] task <T> set <Key> \"<Value>\"\n"
+          "       flower project [<P>] task <T> show\n"
+          "       flower project [<P>] task <T> context <verb> [args]\n"
+          "       flower project [<P>] task <T> action add \"<Title>\" "
           "[--description \"<text>\"]\n"
-          "       flower project <P> task <T> action <A> set <Key> "
+          "       flower project [<P>] task <T> action <A> set <Key> "
           "\"<Value>\"\n"
-          "       flower project <P> task <T> action <A> remove\n"
-          "       flower project <P> task <T> action list "
+          "       flower project [<P>] task <T> action <A> remove\n"
+          "       flower project [<P>] task <T> action list "
           "[--pending|--complete]\n"
-          "       flower project <P> remove\n"
-          "       flower project <P> task <T> remove\n"
+          "       flower project [<P>] remove\n"
+          "       flower project [<P>] task <T> remove\n"
           "       flower llm add <name> --base <url> --protocol <p> "
           "[--key <k>]\n"
           "                          [--model <m>] [--max-tokens <n>] "
@@ -60,9 +60,9 @@ static int usage(FILE *out) {
           "       flower llm <name> remove\n"
           "       flower llm <name> show\n"
           "       flower llm list\n"
-          "       flower project <P> scan <profile> [--dry-run]\n"
+          "       flower project [<P>] scan <profile> [--dry-run]\n"
           "       flower edit <path>\n"
-          "       flower mcp <P> <area>\n",
+          "       flower mcp [<P>] <area>\n",
           out);
     return 1;
 }
@@ -1413,176 +1413,293 @@ out:
 /* ---------- project dispatch ---------- */
 
 static int cmd_project(int argc, char **argv) {
-    const char *pid = argv[2];
-    const char *area;
-    if (argc < 4) return usage(stderr);
-    if (!store_valid_id(pid, 'P')) {
-        fprintf(stderr, "flower: invalid project id '%s'\n", pid);
-        return 1;
+    char *detected = NULL;
+    char **a;
+    const char *pid, *area;
+    int n, explicit_pid;
+    if (argc < 3) return usage(stderr);
+    explicit_pid = store_valid_id(argv[2], 'P');
+    if (explicit_pid) {
+        pid = argv[2];
+    } else {
+        detected = store_detect_project();
+        if (!detected) {
+            if (argc >= 4) {
+                /* explicit but malformed id (e.g. p1, X1): keep the
+                   old error instead of blaming the directory */
+                fprintf(stderr, "flower: invalid project id '%s'\n",
+                        argv[2]);
+                return 1;
+            }
+            fprintf(stderr, "flower: no project found for this directory "
+                            "(set project Path or pass <P>)\n");
+            return 1;
+        }
+        pid = detected;
     }
-    area = argv[3];
+    a = argv + (explicit_pid ? 3 : 2);
+    n = argc - (explicit_pid ? 3 : 2);
+    if (n < 1) {
+        free(detected);
+        return usage(stderr);
+    }
+    area = a[0];
 
     if (!strcmp(area, "set")) {
         char *dir, *file, *key, *val;
         int rc;
-        if (argc != 6) return usage(stderr);
-        key = arg_val(argv[4]);
-        val = arg_val(argv[5]);
-        if (!key || !val) return usage(stderr);
+        if (n != 3) {
+            free(detected);
+            return usage(stderr);
+        }
+        key = arg_val(a[1]);
+        val = arg_val(a[2]);
+        if (!key || !val) {
+            free(detected);
+            return usage(stderr);
+        }
         dir = xasprintf("projects/%s", pid);
         file = xasprintf("projects/%s/config.md", pid);
         if (!dir || !file) {
             free(dir);
             free(file);
+            free(detected);
             return oom();
         }
         rc = cmd_config_set(FV_PROJECT, dir, file, key, val);
         free(dir);
         free(file);
+        free(detected);
         return rc;
     }
 
     if (!strcmp(area, "show")) {
         char *file;
         int rc;
-        if (argc != 4) return usage(stderr);
-        if (!require_project(pid)) return 1;
+        if (n != 1) {
+            free(detected);
+            return usage(stderr);
+        }
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
         file = xasprintf("projects/%s/config.md", pid);
-        if (!file) return oom();
+        if (!file) {
+            free(detected);
+            return oom();
+        }
         rc = print_rel_file(file);
         free(file);
+        free(detected);
         return rc;
     }
 
     if (!strcmp(area, "details")) {
-        if (argc < 5) return usage(stderr);
-        if (!require_project(pid)) return 1;
-        return cmd_details(pid, &argv[4], argc - 4);
+        int rc;
+        if (n < 2) {
+            free(detected);
+            return usage(stderr);
+        }
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
+        rc = cmd_details(pid, &a[1], n - 1);
+        free(detected);
+        return rc;
     }
 
     if (!strcmp(area, "context")) {
         char *file;
         int rc;
-        if (argc < 5) return usage(stderr);
-        if (!require_project(pid)) return 1;
+        if (n < 2) {
+            free(detected);
+            return usage(stderr);
+        }
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
         file = xasprintf("projects/%s/context.md", pid);
-        if (!file) return oom();
-        rc = cmd_context(file, &argv[4], argc - 4);
+        if (!file) {
+            free(detected);
+            return oom();
+        }
+        rc = cmd_context(file, &a[1], n - 1);
         free(file);
+        free(detected);
         return rc;
     }
 
     if (!strcmp(area, "resource")) {
-        if (argc < 5) return usage(stderr);
-        if (!require_project(pid)) return 1;
-        return cmd_resource(pid, &argv[4], argc - 4);
+        int rc;
+        if (n < 2) {
+            free(detected);
+            return usage(stderr);
+        }
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
+        rc = cmd_resource(pid, &a[1], n - 1);
+        free(detected);
+        return rc;
     }
 
     if (!strcmp(area, "task")) {
         const char *tid;
-        if (argc < 6) return usage(stderr);
-        tid = argv[4];
+        int rc;
+        if (n < 3) {
+            free(detected);
+            return usage(stderr);
+        }
+        tid = a[1];
         if (!store_valid_id(tid, 'T')) {
             fprintf(stderr, "flower: invalid task id '%s'\n", tid);
+            free(detected);
             return 1;
         }
-        if (!strcmp(argv[5], "set") && argc == 8) {
+        if (!strcmp(a[2], "set") && n == 5) {
             char *dir, *file, *key, *val;
-            int rc;
-            key = arg_val(argv[6]);
-            val = arg_val(argv[7]);
-            if (!key || !val) return usage(stderr);
+            key = arg_val(a[3]);
+            val = arg_val(a[4]);
+            if (!key || !val) {
+                free(detected);
+                return usage(stderr);
+            }
             dir = xasprintf("projects/%s/tasks/%s", pid, tid);
             file = xasprintf("projects/%s/tasks/%s/config.md", pid, tid);
             if (!dir || !file) {
                 free(dir);
                 free(file);
+                free(detected);
                 return oom();
             }
             rc = cmd_config_set(FV_TASK, dir, file, key, val);
             free(dir);
             free(file);
+            free(detected);
             return rc;
         }
-        if (!strcmp(argv[5], "show") && argc == 6) {
+        if (!strcmp(a[2], "show") && n == 3) {
             char *file;
-            int rc;
-            if (!require_task(pid, tid)) return 1;
+            if (!require_task(pid, tid)) {
+                free(detected);
+                return 1;
+            }
             file = xasprintf("projects/%s/tasks/%s/config.md", pid, tid);
-            if (!file) return oom();
+            if (!file) {
+                free(detected);
+                return oom();
+            }
             rc = print_rel_file(file);
             free(file);
+            free(detected);
             return rc;
         }
-        if (!strcmp(argv[5], "context")) {
+        if (!strcmp(a[2], "context")) {
             char *file;
-            int rc;
-            if (argc < 7) return usage(stderr);
-            if (!require_task(pid, tid)) return 1;
+            if (n < 4) {
+                free(detected);
+                return usage(stderr);
+            }
+            if (!require_task(pid, tid)) {
+                free(detected);
+                return 1;
+            }
             file = xasprintf("projects/%s/tasks/%s/context.md", pid, tid);
-            if (!file) return oom();
-            rc = cmd_context(file, &argv[6], argc - 6);
+            if (!file) {
+                free(detected);
+                return oom();
+            }
+            rc = cmd_context(file, &a[3], n - 3);
             free(file);
+            free(detected);
             return rc;
         }
-        if (!strcmp(argv[5], "action")) {
+        if (!strcmp(a[2], "action")) {
             char *file;
-            int rc;
-            const char *verb = argv[6];
-            if (argc < 7) return usage(stderr);
+            const char *verb = a[3];
             /* add and list need an existing task dir: add creates it */
+            if (n < 4) {
+                free(detected);
+                return usage(stderr);
+            }
             if (!strcmp(verb, "add")) {
                 char *dir = xasprintf("projects/%s/tasks/%s", pid, tid);
-                if (!dir) return oom();
+                if (!dir) {
+                    free(detected);
+                    return oom();
+                }
                 if (store_mkdir_p(dir) != 0) {
                     free(dir);
+                    free(detected);
                     return 1;
                 }
                 free(dir);
             } else if (!require_task(pid, tid)) {
+                free(detected);
                 return 1;
             }
             file =
                 xasprintf("projects/%s/tasks/%s/actions.md", pid, tid);
-            if (!file) return oom();
-            rc = cmd_action(pid, tid, &argv[6], argc - 6);
+            if (!file) {
+                free(detected);
+                return oom();
+            }
+            rc = cmd_action(pid, tid, &a[3], n - 3);
             free(file);
+            free(detected);
             return rc;
         }
-        if (!strcmp(argv[5], "remove") && argc == 6) {
+        if (!strcmp(a[2], "remove") && n == 3) {
             char *rel;
-            int rc;
-            if (!require_task(pid, tid)) return 1;
+            if (!require_task(pid, tid)) {
+                free(detected);
+                return 1;
+            }
             rel = xasprintf("projects/%s/tasks/%s", pid, tid);
-            if (!rel) return oom();
+            if (!rel) {
+                free(detected);
+                return oom();
+            }
             rc = cmd_remove_tree(rel);
             free(rel);
+            free(detected);
             return rc;
         }
+        free(detected);
         return usage(stderr);
     }
 
-    if (!strcmp(area, "scan") && (argc == 5 ||
-                                   (argc == 6 &&
-                                    !strcmp(argv[5], "--dry-run")))) {
-        if (!store_valid_id(pid, 'P')) {
-            fprintf(stderr, "flower: invalid project id '%s'\n", pid);
-            return 1;
-        }
-        return cmd_scan(pid, argv[4], argc == 6, argv[0]);
-    }
-
-    if (!strcmp(area, "remove") && argc == 4) {
-        char *rel;
-        int rc;
-        if (!require_project(pid)) return 1;
-        rel = xasprintf("projects/%s", pid);
-        if (!rel) return oom();
-        rc = cmd_remove_tree(rel);
-        free(rel);
+    if (!strcmp(area, "scan") && (n == 2 ||
+                                   (n == 3 &&
+                                    !strcmp(a[2], "--dry-run")))) {
+        int rc = cmd_scan(pid, a[1], n == 3, argv[0]);
+        free(detected);
         return rc;
     }
 
+    if (!strcmp(area, "remove") && n == 1) {
+        char *rel;
+        int rc;
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
+        rel = xasprintf("projects/%s", pid);
+        if (!rel) {
+            free(detected);
+            return oom();
+        }
+        rc = cmd_remove_tree(rel);
+        free(rel);
+        free(detected);
+        return rc;
+    }
+
+    free(detected);
     return usage(stderr);
 }
 

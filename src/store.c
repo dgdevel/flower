@@ -1,7 +1,8 @@
 /* store.c - config directory layout: base dir resolution, path
    building, id allocation, schema tables. layout: docs/config_layout.md */
-/* mkdir/opendir/setenv are posix, hidden by -std=c11 without this */
-#define _POSIX_C_SOURCE 200809L
+/* mkdir/opendir/setenv are posix and realpath is xsi, hidden by
+   -std=c11 without this */
+#define _XOPEN_SOURCE 700
 #include "flower.h"
 
 #include <dirent.h>
@@ -129,6 +130,82 @@ static char *next_dir_id(const char *rel_dir, char kind) {
 }
 
 char *store_next_project_id(void) { return next_dir_id("projects", 'P'); }
+
+/* qsort helper: project ids by numeric part ascending */
+static int cmp_proj_id(const void *x, const void *y) {
+    const char *a = *(const char *const *)x;
+    const char *b = *(const char *const *)y;
+    long na = strtol(a + 1, NULL, 10);
+    long nb = strtol(b + 1, NULL, 10);
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+    return 0;
+}
+
+/* does cwd match path? path with trailing '/' stripped: equal, or cwd
+   starts with path + "/" */
+static int path_contains(const char *cwd, const char *path) {
+    size_t n = strlen(path);
+    while (n > 0 && path[n - 1] == '/') n--;
+    if (n == 0) return 0;
+    if (strncmp(cwd, path, n) != 0) return 0;
+    return cwd[n] == '\0' || cwd[n] == '/';
+}
+
+/* malloc'd project id detected from cwd via Path keys, NULL when none */
+char *store_detect_project(void) {
+    char cwd[4096];
+    char *dir, *rel, *path, **ids = NULL, *hit = NULL;
+    DIR *d;
+    struct dirent *e;
+    int n = 0;
+    if (!realpath(".", cwd)) return NULL;
+    dir = store_path("projects");
+    if (!dir) return NULL;
+    d = opendir(dir);
+    free(dir);
+    if (!d) return NULL;
+    while ((e = readdir(d)) != NULL) {
+        char **grown;
+        if (!store_valid_id(e->d_name, 'P')) continue;
+        grown = realloc(ids, (size_t)(n + 1) * sizeof *ids);
+        if (!grown) break; /* oom: keep what we have */
+        ids = grown;
+        ids[n] = str_dup(e->d_name);
+        if (!ids[n]) break;
+        n++;
+    }
+    closedir(d);
+    qsort(ids, (size_t)n, sizeof *ids, cmp_proj_id);
+    for (int i = 0; i < n; i++) {
+        md_doc_t doc;
+        md_chapter_t *ch;
+        const char *val;
+        rel = xasprintf("projects/%s/config.md", ids[i]);
+        if (!rel) continue;
+        path = store_path(rel);
+        free(rel);
+        if (!path) continue;
+        if (md_load(path, &doc) != 0) {
+            free(path);
+            continue;
+        }
+        free(path);
+        ch = md_find(&doc, "Project");
+        val = ch ? md_kv_get((const char **)ch->keys,
+                             (const char **)ch->vals, ch->nkv, "Path")
+                 : NULL;
+        if (val && val[0] && path_contains(cwd, val)) {
+            hit = str_dup(ids[i]);
+            md_free_doc(&doc);
+            break;
+        }
+        md_free_doc(&doc);
+    }
+    for (int i = 0; i < n; i++) free(ids[i]);
+    free(ids);
+    return hit;
+}
 
 char *store_next_task_id(const char *pid) {
     size_t n = strlen(pid) + 64;

@@ -713,20 +713,44 @@ static void serve(const tool_t *tools) {
 /* ---------- entry ---------- */
 
 static int mcp_usage(void) {
-    fputs("usage: flower mcp <P> <area>\n"
+    fputs("usage: flower mcp [<P>] <area>\n"
           "       area: details, context or resource\n",
           stderr);
     return 1;
 }
 
-/* argv: prog "mcp" <pid> <area>. stdin/stdout carry the json-rpc
-   session, stderr carries diagnostics */
+/* argv: prog "mcp" [<pid>] <area>. stdin/stdout carry the json-rpc
+   session, stderr carries diagnostics. pid optional: detected from
+   cwd via project Path keys when omitted */
 int cmd_mcp(int argc, char **argv) {
+    char *detected = NULL;
     const char *pid, *area;
     const tool_t *tools;
-    if (argc != 4) return mcp_usage();
-    pid = argv[2];
-    area = argv[3];
+    int area_off = 3;
+    if (argc >= 3 && store_valid_id(argv[2], 'P')) {
+        pid = argv[2];
+    } else {
+        detected = store_detect_project();
+        if (!detected) {
+            if (argc >= 4) {
+                /* explicit but malformed id (e.g. p1, X1): keep the
+                   old error instead of blaming the directory */
+                fprintf(stderr, "flower: invalid project id '%s'\n",
+                        argv[2]);
+                return 1;
+            }
+            fprintf(stderr, "flower: no project found for this directory "
+                            "(set project Path or pass <P>)\n");
+            return 1;
+        }
+        pid = detected;
+        area_off = 2;
+    }
+    if (argc != area_off + 1) {
+        free(detected);
+        return mcp_usage();
+    }
+    area = argv[area_off];
     if (!strcmp(area, "details")) {
         tools = tools_details;
         g.kind = FV_FIELDS;
@@ -737,17 +761,26 @@ int cmd_mcp(int argc, char **argv) {
         tools = tools_resource;
         g.kind = FV_RESOURCE;
     } else {
+        free(detected);
         return mcp_usage();
     }
     if (!store_valid_id(pid, 'P')) {
         fprintf(stderr, "flower: invalid project id '%s'\n", pid);
+        free(detected);
         return 1;
     }
-    if (!require_project(pid)) return 1;
+    if (!require_project(pid)) {
+        free(detected);
+        return 1;
+    }
     g.area = area;
     g.rel = xasprintf("projects/%s/%s.md", pid, area);
-    if (!g.rel) return oom();
+    if (!g.rel) {
+        free(detected);
+        return oom();
+    }
     serve(tools);
     free(g.rel);
+    free(detected);
     return 0;
 }
