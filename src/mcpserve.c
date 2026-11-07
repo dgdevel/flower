@@ -1,7 +1,9 @@
-/* mcpserve.c - `flower mcp <P> <area>`: stdio json-rpc server exposing
-   one project area (details, context, resource) as mcp tools. the tool
-   handlers mirror the cli verbs in flower.c; stdout carries only
-   json-rpc responses, everything diagnostic goes to stderr. */
+/* mcpserve.c - `flower mcp <P> <area>` and `flower mcp <P> task <T>
+   <area>`: stdio json-rpc servers exposing one project area (details,
+   context, resource) or one task area (config, context, action) as
+   mcp tools. the tool handlers mirror the cli verbs in flower.c;
+   stdout carries only json-rpc responses, everything diagnostic goes
+   to stderr. */
 #define _POSIX_C_SOURCE 200809L
 #include "flower.h"
 #include "prompts.gen.h"
@@ -13,9 +15,12 @@
 
 /* the served area, fixed once cmd_mcp validated its arguments */
 static struct {
-    const char *area; /* "details" | "context" | "resource" */
-    char *rel;        /* "projects/<pid>/<area>.md" */
-    int kind;         /* FV_FIELDS | FV_CONTEXT | FV_RESOURCE */
+    const char *area;  /* "details" | "context" | "resource" | the task
+                          areas "config", "context", "action" */
+    const char *sname; /* serverInfo name after the "flower-" prefix:
+                          the area itself, or "task-<area>" */
+    char *rel;         /* the served file under $FLOWER_BASE */
+    int kind;          /* FV_FIELDS | FV_CONTEXT | ... */
 } g;
 
 /* ---------- json build helpers (json.c is allocation-only) ---------- */
@@ -66,10 +71,13 @@ static const char *arg_str(const json_t *args, const char *name,
 }
 
 /* load the area file. 0 ok (doc may be empty), 1 after the isError
-   text was written (load_rel already said why on stderr) */
+   text was written (load_rel already said why on stderr). the text
+   names the basename of the served file, so the task areas report
+   config.md/context.md/actions.md and not the area word */
 static int load_area(md_doc_t *doc, buf_t *out, int *err) {
     if (load_rel(g.rel, g.kind, doc)) {
-        buf_appendf(out, "cannot load %s.md", g.area);
+        buf_appendf(out, "cannot load %s.md",
+                    strcmp(g.area, "action") ? g.area : "actions");
         *err = 1;
         return 1;
     }
@@ -461,6 +469,239 @@ static void t_resource_remove(const json_t *a, buf_t *out, int *err) {
     finish_save(&doc, out, err);
 }
 
+/* ---------- task config tools ---------- */
+
+/* cmd_config_set semantics on tasks/<T>/config.md: one "# Task"
+   chapter, keys Name and Description only. load_rel treats a missing
+   file as an empty doc, so this creates it (require_task made sure
+   the directory exists) */
+static void t_task_set(const json_t *a, buf_t *out, int *err) {
+    const char *key = arg_str(a, "key", out, err);
+    const char *val;
+    md_doc_t doc;
+    md_chapter_t *c;
+    if (!key) return;
+    val = arg_str(a, "value", out, err);
+    if (!val) return;
+    if (!key_allowed(store_task_keys, key)) {
+        buf_reset(out);
+        buf_appendf(out, "unknown key '%s'", key);
+        *err = 1;
+        return;
+    }
+    if (load_area(&doc, out, err)) return;
+    c = md_find(&doc, "Task");
+    if (!c) c = doc_add_chapter(&doc, "Task", 1);
+    if (!c || md_kv_set(c, key, val) != 0) {
+        md_free_doc(&doc);
+        buf_reset(out);
+        buf_appendf(out, "out of memory");
+        *err = 1;
+        return;
+    }
+    finish_save(&doc, out, err);
+}
+
+/* ---------- action tools ---------- */
+
+/* the given action id, or NULL after the "invalid action id '<id>'"
+   or "no such action <id>" isError text was written */
+static md_chapter_t *action_arg(const char *id, md_doc_t *doc,
+                                buf_t *out, int *err) {
+    md_chapter_t *c;
+    if (!store_valid_id(id, 'A')) {
+        buf_reset(out);
+        buf_appendf(out, "invalid action id '%s'", id);
+        *err = 1;
+        return NULL;
+    }
+    c = action_find(doc, id);
+    if (!c) {
+        buf_reset(out);
+        buf_appendf(out, "no such action %s", id);
+        *err = 1;
+    }
+    return c;
+}
+
+/* the chapter's Status value, "?" when it has none - the cli list
+   prints the same stand-in */
+static const char *action_status(const md_chapter_t *c) {
+    const char *s = md_kv_get((const char **)c->keys,
+                              (const char **)c->vals, c->nkv, "Status");
+    return s ? s : "?";
+}
+
+/* cmd_action add: duplicate title guard across the chapters, id from
+   store_next_action_id, header "<id>: <title>", Description kv when
+   given, Status pending */
+static void t_action_add(const json_t *a, buf_t *out, int *err) {
+    const char *title = arg_str(a, "title", out, err);
+    const char *desc;
+    md_doc_t doc;
+    md_chapter_t *c;
+    char *id;
+    int i;
+    if (!title) return;
+    desc = json_str_of(a, "description");
+    if (!title[0]) {
+        buf_reset(out);
+        buf_appendf(out, "empty action title");
+        *err = 1;
+        return;
+    }
+    if (load_area(&doc, out, err)) return;
+    for (i = 0; i < doc.nch; i++) {
+        char *t = action_title_of(&doc.ch[i]);
+        int dup = t && !strcmp(t, title);
+        free(t);
+        if (dup) {
+            buf_reset(out);
+            buf_appendf(out, "duplicate action title '%s' (%s)", title,
+                        doc.ch[i].title);
+            *err = 1;
+            md_free_doc(&doc);
+            return;
+        }
+    }
+    id = store_next_action_id(&doc);
+    if (id) {
+        char *hdr = xasprintf("%s: %s", id, title);
+        c = hdr ? doc_add_chapter(&doc, hdr, 1) : NULL;
+        free(hdr);
+        free(id);
+    } else {
+        c = NULL;
+    }
+    if (!c || (desc && md_kv_set(c, "Description", desc) != 0) ||
+        md_kv_set(c, "Status", "pending") != 0) {
+        md_free_doc(&doc);
+        buf_reset(out);
+        buf_appendf(out, "out of memory");
+        *err = 1;
+        return;
+    }
+    finish_save(&doc, out, err);
+}
+
+/* cmd_action set: key in store_action_keys, Status validated, Depends
+   parsed with self-reference and unknown id guards */
+static void t_action_set(const json_t *a, buf_t *out, int *err) {
+    const char *id = arg_str(a, "id", out, err);
+    const char *key, *val;
+    md_doc_t doc;
+    md_chapter_t *c;
+    if (!id) return;
+    key = arg_str(a, "key", out, err);
+    if (!key) return;
+    val = arg_str(a, "value", out, err);
+    if (!val) return;
+    if (!key_allowed(store_action_keys, key)) {
+        buf_reset(out);
+        buf_appendf(out, "unknown key '%s'", key);
+        *err = 1;
+        return;
+    }
+    if (!strcmp(key, "Status") && !store_valid_status(val)) {
+        buf_reset(out);
+        buf_appendf(out, "invalid Status '%s' (pending, complete)", val);
+        *err = 1;
+        return;
+    }
+    if (load_area(&doc, out, err)) return;
+    c = action_arg(id, &doc, out, err);
+    if (!c) {
+        md_free_doc(&doc);
+        return;
+    }
+    if (!strcmp(key, "Depends")) {
+        char **ids = NULL;
+        int cnt = store_parse_id_list(val, &ids), j;
+        if (cnt < 0) {
+            md_free_doc(&doc);
+            buf_reset(out);
+            buf_appendf(out, "out of memory");
+            *err = 1;
+            return;
+        }
+        for (j = 0; j < cnt; j++) {
+            if (!strcmp(ids[j], id)) {
+                buf_reset(out);
+                buf_appendf(out, "action %s cannot depend on itself", id);
+                *err = 1;
+                store_free_ids(ids, cnt);
+                md_free_doc(&doc);
+                return;
+            }
+            if (!action_find(&doc, ids[j])) {
+                buf_reset(out);
+                buf_appendf(out, "unknown action %s", ids[j]);
+                *err = 1;
+                store_free_ids(ids, cnt);
+                md_free_doc(&doc);
+                return;
+            }
+        }
+        store_free_ids(ids, cnt);
+    }
+    if (md_kv_set(c, key, val) != 0) {
+        md_free_doc(&doc);
+        buf_reset(out);
+        buf_appendf(out, "out of memory");
+        *err = 1;
+        return;
+    }
+    finish_save(&doc, out, err);
+}
+
+/* cmd_action remove: blocked while another action depends on this one */
+static void t_action_remove(const json_t *a, buf_t *out, int *err) {
+    const char *id = arg_str(a, "id", out, err);
+    md_doc_t doc;
+    md_chapter_t *c;
+    char *dep;
+    if (!id) return;
+    if (load_area(&doc, out, err)) return;
+    c = action_arg(id, &doc, out, err);
+    if (!c) {
+        md_free_doc(&doc);
+        return;
+    }
+    dep = action_depended_on(&doc, id, c);
+    if (dep) {
+        char *rid = NULL, *rtitle = NULL;
+        action_split(dep, &rid, &rtitle);
+        buf_reset(out);
+        buf_appendf(out, "action %s depends on %s; remove or edit "
+                         "dependents first",
+                    rid ? rid : dep, id);
+        free(rid);
+        free(rtitle);
+        *err = 1;
+        md_free_doc(&doc);
+        return;
+    }
+    doc_remove_chapter(&doc, (int)(c - doc.ch));
+    finish_save(&doc, out, err);
+}
+
+/* cmd_action list: one "<id>: <title> [status]" line per action */
+static void t_action_list(const json_t *a, buf_t *out, int *err) {
+    md_doc_t doc;
+    int i;
+    (void)a;
+    if (load_area(&doc, out, err)) return;
+    for (i = 0; i < doc.nch; i++) {
+        char *id, *title;
+        if (!action_split(doc.ch[i].title, &id, &title)) continue;
+        buf_appendf(out, "%s: %s [%s]\n", id, title,
+                    action_status(&doc.ch[i]));
+        free(id);
+        free(title);
+    }
+    md_free_doc(&doc);
+}
+
 /* ---------- tool tables ---------- */
 
 /* one string argument of the input schema: name plus prompt text */
@@ -508,6 +749,19 @@ static const arg_spec_t a_resource_set[] = {
     {"pointer", prompt_mcp_resource_set_arguments_pointer}, {NULL, NULL}};
 static const arg_spec_t a_resource_remove[] = {
     {"name", prompt_mcp_resource_remove_arguments_name}, {NULL, NULL}};
+static const arg_spec_t a_task_set[] = {
+    {"key", prompt_mcp_task_set_arguments_key},
+    {"value", prompt_mcp_task_set_arguments_value}, {NULL, NULL}};
+static const arg_spec_t a_action_add[] = {
+    {"title", prompt_mcp_action_add_arguments_title},
+    {"description", prompt_mcp_action_add_arguments_description},
+    {NULL, NULL}};
+static const arg_spec_t a_action_set[] = {
+    {"id", prompt_mcp_action_set_arguments_id},
+    {"key", prompt_mcp_action_set_arguments_key},
+    {"value", prompt_mcp_action_set_arguments_value}, {NULL, NULL}};
+static const arg_spec_t a_action_remove[] = {
+    {"id", prompt_mcp_action_remove_arguments_id}, {NULL, NULL}};
 
 static const tool_t tools_details[] = {
     {"details_get", prompt_mcp_details_get_description, a_details_get,
@@ -542,6 +796,22 @@ static const tool_t tools_resource[] = {
      t_resource_set},
     {"resource_remove", prompt_mcp_resource_remove_description,
      a_resource_remove, t_resource_remove},
+    {NULL, NULL, NULL, NULL}};
+
+static const tool_t tools_task_config[] = {
+    {"task_set", prompt_mcp_task_set_description, a_task_set,
+     t_task_set},
+    {NULL, NULL, NULL, NULL}};
+
+static const tool_t tools_action[] = {
+    {"action_add", prompt_mcp_action_add_description, a_action_add,
+     t_action_add},
+    {"action_set", prompt_mcp_action_set_description, a_action_set,
+     t_action_set},
+    {"action_remove", prompt_mcp_action_remove_description,
+     a_action_remove, t_action_remove},
+    {"action_list", prompt_mcp_action_list_description, a_none,
+     t_action_list},
     {NULL, NULL, NULL, NULL}};
 
 /* ---------- json-rpc plumbing ---------- */
@@ -596,7 +866,7 @@ static json_t *init_result(const json_t *params) {
     json_t *res = json_obj();
     json_t *caps = json_obj();
     json_t *si = json_obj();
-    char *name = xasprintf("flower-%s", g.area);
+    char *name = xasprintf("flower-%s", g.sname);
     jobj_str(res, "protocolVersion",
              req && proto_supported(req) ? req : "2025-11-25");
     jobj_set(caps, "tools", json_obj());
@@ -606,6 +876,13 @@ static json_t *init_result(const json_t *params) {
     jobj_set(res, "serverInfo", si);
     free(name);
     return res;
+}
+
+/* 1 when an argument is optional (stays out of the required array).
+   only action_add's description so far; the rest mirror the cli,
+   which demands every argument */
+static int arg_optional(const tool_t *tool, const arg_spec_t *arg) {
+    return tool->fn == t_action_add && !strcmp(arg->name, "description");
 }
 
 /* tools/list result built from a static table */
@@ -627,7 +904,7 @@ static json_t *tools_result(const tool_t *tools) {
             jobj_str(p, "type", "string");
             jobj_str(p, "description", as->desc);
             jobj_set(props, as->name, p);
-            json_add(req, json_str(as->name));
+            if (!arg_optional(t, as)) json_add(req, json_str(as->name));
         }
         jobj_set(schema, "properties", props);
         jobj_set(schema, "required", req);
@@ -714,17 +991,20 @@ static void serve(const tool_t *tools) {
 
 static int mcp_usage(void) {
     fputs("usage: flower mcp [<P>] <area>\n"
-          "       area: details, context or resource\n",
+          "       flower mcp [<P>] task <T> <area>\n"
+          "       area: details, context or resource\n"
+          "       task area: config, context or action\n",
           stderr);
     return 1;
 }
 
-/* argv: prog "mcp" [<pid>] <area>. stdin/stdout carry the json-rpc
-   session, stderr carries diagnostics. pid optional: detected from
-   cwd via project Path keys when omitted */
+/* argv: prog "mcp" [<pid>] <area> | prog "mcp" [<pid>] "task" <tid>
+   <area>. stdin/stdout carry the json-rpc session, stderr carries
+   diagnostics. pid optional: detected from cwd via project Path keys
+   when omitted */
 int cmd_mcp(int argc, char **argv) {
     char *detected = NULL;
-    const char *pid, *area;
+    const char *pid, *area, *tid = NULL;
     const tool_t *tools;
     int area_off = 3;
     if (argc >= 3 && store_valid_id(argv[2], 'P')) {
@@ -746,20 +1026,49 @@ int cmd_mcp(int argc, char **argv) {
         pid = detected;
         area_off = 2;
     }
-    if (argc != area_off + 1) {
-        free(detected);
-        return mcp_usage();
+    if (argc > area_off && !strcmp(argv[area_off], "task")) {
+        /* task-scoped form: the area sits one slot further right */
+        if (argc != area_off + 3) {
+            free(detected);
+            return mcp_usage();
+        }
+        tid = argv[area_off + 1];
+        if (!store_valid_id(tid, 'T')) {
+            fprintf(stderr, "flower: invalid task id '%s'\n", tid);
+            free(detected);
+            return 1;
+        }
+        area = argv[area_off + 2];
+    } else {
+        if (argc != area_off + 1) {
+            free(detected);
+            return mcp_usage();
+        }
+        area = argv[area_off];
     }
-    area = argv[area_off];
-    if (!strcmp(area, "details")) {
-        tools = tools_details;
-        g.kind = FV_FIELDS;
+    if (!tid) {
+        if (!strcmp(area, "details")) {
+            tools = tools_details;
+            g.kind = FV_FIELDS;
+        } else if (!strcmp(area, "context")) {
+            tools = tools_context;
+            g.kind = FV_CONTEXT;
+        } else if (!strcmp(area, "resource")) {
+            tools = tools_resource;
+            g.kind = FV_RESOURCE;
+        } else {
+            free(detected);
+            return mcp_usage();
+        }
+    } else if (!strcmp(area, "config")) {
+        tools = tools_task_config;
+        g.kind = FV_TASK;
     } else if (!strcmp(area, "context")) {
         tools = tools_context;
         g.kind = FV_CONTEXT;
-    } else if (!strcmp(area, "resource")) {
-        tools = tools_resource;
-        g.kind = FV_RESOURCE;
+    } else if (!strcmp(area, "action")) {
+        tools = tools_action;
+        g.kind = FV_ACTIONS;
     } else {
         free(detected);
         return mcp_usage();
@@ -769,18 +1078,35 @@ int cmd_mcp(int argc, char **argv) {
         free(detected);
         return 1;
     }
-    if (!require_project(pid)) {
+    if (!tid) {
+        if (!require_project(pid)) {
+            free(detected);
+            return 1;
+        }
+    } else if (!require_task(pid, tid)) {
         free(detected);
         return 1;
     }
     g.area = area;
-    g.rel = xasprintf("projects/%s/%s.md", pid, area);
+    g.sname = tid ? xasprintf("task-%s", area) : area;
+    if (!g.sname) {
+        free(detected);
+        return oom();
+    }
+    if (tid)
+        g.rel = xasprintf("projects/%s/tasks/%s/%s.md", pid, tid,
+                          strcmp(area, "action") ? area : "actions");
+    else
+        g.rel = xasprintf("projects/%s/%s.md", pid,
+                          strcmp(area, "resource") ? area : "resources");
     if (!g.rel) {
+        if (tid) free((char *)g.sname);
         free(detected);
         return oom();
     }
     serve(tools);
     free(g.rel);
+    if (tid) free((char *)g.sname);
     free(detected);
     return 0;
 }

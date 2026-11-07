@@ -4,6 +4,7 @@
 #define FLOWER_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 /* release builds stamp this: tools/release.sh passes VERSION=x.y.z to make */
 #ifndef FLOWER_VERSION
@@ -169,6 +170,102 @@ int cmd_mcp(int argc, char **argv);
 /* scan.c: drive the llmkit runner session; argv0 for self-spawning */
 int cmd_scan(const char *pid, const char *profile, int dry_run,
              const char *argv0);
+/* taskcreate.c: interactive task creation session (two stages:
+   task context, action hierarchy); argv0 for self-spawning. profile
+   NULL picks the only llms.md chapter */
+int cmd_task_create(const char *pid, const char *profile, int dry_run,
+                    const char *argv0);
+
+/* llmkit runner session plumbing (llmrun.c): shared by scan.c and
+   taskcreate.c. split out of scan.c, behavior unchanged. */
+
+/* profile values: up to one each, key/value arrays for repeats. the
+   single strings borrow the loaded llms.md doc: keep it alive (and
+   free it with md_free_doc) until profile_free */
+typedef struct {
+    const char *base;      /* Api base */
+    const char *protocol;  /* Protocol */
+    const char *key;       /* Api key */
+    const char *model;     /* Model */
+    const char *max_tokens;/* Max tokens */
+    const char *effort;    /* Reasoning effort */
+    char **hdr_names;      /* Header pairs, split */
+    char **hdr_vals;
+    int nhdr;
+    char **proxies;        /* Mcp proxy paths */
+    int nproxy;
+    char **terminals;      /* Terminal tool server.tool entries */
+    int nterminal;
+} profile_t;
+
+/* free all owned arrays and zero p (safe on a zeroed profile_t) */
+void profile_free(profile_t *p);
+/* load one profile chapter from llms.md into p; *doc_out receives the
+   loaded doc (p borrows its strings - free with md_free_doc when done).
+   0 ok, 1 error printed */
+int profile_load(const char *name, profile_t *p, md_doc_t *doc_out);
+/* build the runner/seed llm record from the profile. NULL on oom */
+json_t *llm_record(const profile_t *p);
+
+/* tiny json helpers */
+/* shell-quote s into b: single quotes, embedded quote closed+reopened.
+   0 ok, -1 oom */
+int sh_quote(buf_t *b, const char *s);
+/* append one json node to b as a jsonl line, then free the node.
+   0 ok, -1 oom */
+int emit_record(buf_t *b, json_t *rec);
+/* add a string member to an object node, freeing v on oom. 0 ok, -1 */
+int obj_str(json_t *o, const char *key, const char *v);
+/* one stdio server entry, borrowed fields copied. NULL oom */
+json_t *llmrun_server_entry(const char *name, const char *cmd,
+                            int required);
+
+/* text records */
+/* one stage's system prompt record. NULL oom */
+json_t *llmrun_system_record(const char *text);
+/* one user record. NULL oom */
+json_t *llmrun_user_record(const char *text);
+/* append the nudge user record + flush to out: the turn ended without
+   the stage marker. 0 ok, -1 oom */
+int llmrun_nudge_records(buf_t *out);
+/* classify one runner output line for stage tracking: 1 a final
+   response ending in [STEP_COMPLETE], 2 a final response without the
+   marker, 0 anything else, -1 unparseable (printed) */
+int llmrun_stage_line(const char *line, size_t len);
+/* does hist (the transcript fed to the next turn) end with a final
+   [STEP_COMPLETE] response? 1 yes, 0 no, -1 bad json (printed) */
+int llmrun_hist_ends_complete(const buf_t *hist);
+
+/* files and io */
+/* write buf to path with 0600. 0 ok, 1 error printed */
+int write_private(const char *path, const buf_t *b);
+/* open projects/<pid>/llm-sessions/<prefix>-<stamp><suffix>.jsonl,
+   unique name. prefix names the command ("scan", "taskcreate"); suffix
+   "" is the main session, "-scout" the subagent tee. malloc'd path,
+   NULL on io error (printed). mode 0600 from birth. */
+char *session_open(const char *prefix, const char *pid,
+                   const char *suffix);
+/* one line of the runner's output, mirrored to stdout and the session
+   file; skips the runner's leading header record. returns 0 ok, -1 io
+   error (printed) */
+int session_line(const char *line, size_t len, FILE *sess,
+                 int *skipped_header, buf_t *hist);
+/* write every byte of data to fd, retrying on eintr. -1 io error.
+   EPIPE counts as success */
+int write_all_fd(int fd, const char *data, size_t len);
+/* run one runner turn: a fresh <llmkit> runner gets input (a full
+   transcript ending in a flush) on stdin followed by eof. its stdout
+   lines are teed to flower's stdout, the session file and hist.
+   returns the runner wait status (>= 0), -1 on a flower-side io
+   error, -2 when the runner could not run (127). */
+int run_turn(const char *llmkit, const buf_t *input, FILE *sess,
+             buf_t *hist);
+/* shift every markdown header one level deeper in a serialized doc:
+   "# x" -> "## x". returns malloc'd copy, NULL oom */
+char *shift_headers(const char *s);
+/* append one project file (shifted) to the system prompt text.
+   0 ok, -1 io or oom (a missing file is skipped) */
+int append_file(buf_t *b, const char *rel);
 /* $FLOWER_BASE: $FLOWER_BASE env if set, else $XDG_CONFIG_HOME/flower,
    else $HOME/.config/flower. NULL on missing HOME and no env. */
 const char *store_base(void);
@@ -291,6 +388,14 @@ char *action_title_of(const md_chapter_t *c);
 /* 1 when some chapter (other than skip) already holds this title */
 int context_title_taken(md_doc_t *doc, const char *title,
                         const md_chapter_t *skip);
+/* action chapter lookup by id (flower.c, shared with mcpserve.c).
+   id must be validated */
+md_chapter_t *action_find(md_doc_t *doc, const char *id);
+/* title of the first chapter whose Depends mentions id, NULL when
+   none (flower.c, shared with mcpserve.c). skip's own Depends is
+   ignored */
+char *action_depended_on(md_doc_t *doc, const char *id,
+                         md_chapter_t *skip);
 
 /* schema check of an already parsed file; rejects stray chapters, keys
    and key-value pairs where only bare text may live. on failure writes

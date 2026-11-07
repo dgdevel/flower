@@ -181,6 +181,115 @@ cat "$FLOWER_BASE/projects/P1/details.md"
 cat "$FLOWER_BASE/projects/P1/context.md"
 
 echo
+hdr "mcp task servers: usage guards (expect fails)"
+./flower project P1 task T1 set Name "t"
+./flower mcp P1 task T1 bogus </dev/null && echo "FAIL" || echo "ok: rejected"
+./flower mcp P1 task Tx config </dev/null && echo "FAIL" || echo "ok: rejected"
+./flower mcp P1 task T9 config </dev/null && echo "FAIL" || echo "ok: rejected"
+./flower mcp P1 task T1 </dev/null && echo "FAIL" || echo "ok: rejected"
+
+hdr "mcp task servers: initialize + tools/list"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+    | ./flower mcp P1 task T1 context | grep -c '"flower-task-context"'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    | ./flower mcp P1 task T1 config > "$FLOWER_BASE/outt1"
+grep -q "\"name\":\"task_set\",\"description\":\"" "$FLOWER_BASE/outt1" ||
+    { echo "FAIL: task_set missing"; exit 1; }
+grep -q '"required":\["key","value"\]' "$FLOWER_BASE/outt1" || {
+    echo "FAIL: task_set schema"; exit 1; }
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    | ./flower mcp P1 task T1 context > "$FLOWER_BASE/outt2"
+for t in context_list context_get context_add context_edit \
+    context_remove; do
+    grep -q "\"name\":\"$t\",\"description\":\"" "$FLOWER_BASE/outt2" ||
+        { echo "FAIL: $t missing"; exit 1; }
+done
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    | ./flower mcp P1 task T1 action > "$FLOWER_BASE/outt3"
+for t in action_add action_set action_remove action_list; do
+    grep -q "\"name\":\"$t\",\"description\":\"" "$FLOWER_BASE/outt3" ||
+        { echo "FAIL: $t missing"; exit 1; }
+done
+grep -q '"required":\["title"\]' "$FLOWER_BASE/outt3" || {
+    echo "FAIL: action_add description should be optional"; exit 1; }
+grep -q '"required":\["id","key","value"\]' "$FLOWER_BASE/outt3" || {
+    echo "FAIL: action_set schema"; exit 1; }
+echo "ok: task server tool tables"
+
+hdr "task_set lifecycle"
+printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_set","arguments":{"key":"Description","value":"task description"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"task_set","arguments":{"key":"Colour","value":"red"}}}' \
+    | ./flower mcp P1 task T1 config > "$FLOWER_BASE/outt4"
+grep -q '"isError":false' "$FLOWER_BASE/outt4" ||
+    { echo "FAIL: task_set rejected a good key"; exit 1; }
+grep -q "unknown key 'Colour'" "$FLOWER_BASE/outt4" ||
+    { echo "FAIL: task_set unknown key accepted"; exit 1; }
+grep -q '^Description: task description$' \
+    "$FLOWER_BASE/projects/P1/tasks/T1/config.md" ||
+    { echo "FAIL: task config.md"; exit 1; }
+echo "ok: task_set"
+
+hdr "task context lifecycle (context_* tools on the task file)"
+printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"context_add","arguments":{"prefix":"Risk","title":"scope creep","body":"keep the task small"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"context_list","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"context_get","arguments":{"prefix":"Risk","title":"scope creep"}}}' \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"context_remove","arguments":{"prefix":"Risk","title":"scope creep"}}}' \
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"context_get","arguments":{"prefix":"Risk","title":"scope creep"}}}' \
+    | ./flower mcp P1 task T1 context > "$FLOWER_BASE/outt5"
+grep -q '"text":"Risk: scope creep[\\]n"' "$FLOWER_BASE/outt5" ||
+    { echo "FAIL: task context_list"; cat "$FLOWER_BASE/outt5"; exit 1; }
+grep -q 'keep the task small' "$FLOWER_BASE/outt5" ||
+    { echo "FAIL: task context_get"; exit 1; }
+grep -q 'no such context' "$FLOWER_BASE/outt5" ||
+    { echo "FAIL: task context remove left it behind"; exit 1; }
+grep -q 'Risk: scope creep' "$FLOWER_BASE/projects/P1/context.md" &&
+    { echo "FAIL: wrote the project context instead"; exit 1; }
+echo "ok: task context add + get + list + remove"
+
+hdr "action lifecycle"
+printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"action_add","arguments":{"title":"first step"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"action_add","arguments":{"title":"second step","description":"two"}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"action_list","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A2","key":"Status","value":"complete"}}}' \
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A2","key":"Depends","value":"A1"}}}' \
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"action_list","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A2","key":"Depends","value":"A9"}}}' \
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A2","key":"Depends","value":"A2"}}}' \
+    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"action_add","arguments":{"title":"first step"}}}' \
+    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A9","key":"Status","value":"complete"}}}' \
+    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"action_remove","arguments":{"id":"A1"}}}' \
+    '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"action_set","arguments":{"id":"A2","key":"Depends","value":""}}}' \
+    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"action_remove","arguments":{"id":"A1"}}}' \
+    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"action_remove","arguments":{"id":"A1"}}}' \
+    | ./flower mcp P1 task T1 action > "$FLOWER_BASE/outt6"
+grep -q '"text":"A1: first step \[pending\][\\]nA2: second step \[pending\][\\]n"' \
+    "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: action_list after add"; cat "$FLOWER_BASE/outt6"; exit 1; }
+grep -q '"text":"A1: first step \[pending\][\\]nA2: second step \[complete\][\\]n"' \
+    "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: action_list after set"; exit 1; }
+grep -q 'unknown action A9' "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: Depends unknown id accepted"; exit 1; }
+grep -q 'action A2 cannot depend on itself' "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: Depends self-reference accepted"; exit 1; }
+grep -q "duplicate action title 'first step'" "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: duplicate title accepted"; exit 1; }
+grep -q 'no such action A9' "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: action_set on unknown id"; exit 1; }
+grep -q 'action A2 depends on A1; remove or edit dependents first' \
+    "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: remove depended-on accepted"; exit 1; }
+grep -q 'no such action A1' "$FLOWER_BASE/outt6" ||
+    { echo "FAIL: remove twice"; exit 1; }
+test ! -f "$FLOWER_BASE/projects/P1/actions.md" ||
+    { echo "FAIL: wrote the project-level actions.md"; exit 1; }
+test -f "$FLOWER_BASE/projects/P1/tasks/T1/actions.md" ||
+    { echo "FAIL: task actions.md missing"; exit 1; }
+echo "ok: action add/set/list/remove with cli-mirror guards"
+
 hdr "scan: setup profiles"
 ./flower llm add gpt --base "https://api.openai.com/v1" --protocol openai \
     --key k1 --model m1 --max-tokens 512 --header "X-Org=acme"

@@ -36,6 +36,7 @@ static int usage(FILE *out) {
           "       flower project [<P>] resource set \"<Name>\" \"<Pointer>\"\n"
           "       flower project [<P>] resource remove \"<Name>\"\n"
           "       flower project [<P>] resource list\n"
+          "       flower project [<P>] task create [<profile>] [--dry-run]\n"
           "       flower project [<P>] task <T> set <Key> \"<Value>\"\n"
           "       flower project [<P>] task <T> show\n"
           "       flower project [<P>] task <T> context <verb> [args]\n"
@@ -610,8 +611,9 @@ out:
 
 /* ---------- actions ---------- */
 
-/* chapter for action id, NULL when absent. id must be validated. */
-static md_chapter_t *action_find(md_doc_t *doc, const char *id) {
+/* chapter for action id, NULL when absent. id must be validated.
+   shared with mcpserve.c (the action_* mcp tools) */
+md_chapter_t *action_find(md_doc_t *doc, const char *id) {
     char want[64];
     int i;
     snprintf(want, sizeof want, "%s: ", id);
@@ -623,8 +625,9 @@ static md_chapter_t *action_find(md_doc_t *doc, const char *id) {
 }
 
 /* 1 when some action's Depends mentions id (skip's own Depends is
-   ignored: self-reference is rejected at set time, not here) */
-static char *action_depended_on(md_doc_t *doc, const char *id,
+   ignored: self-reference is rejected at set time, not here). shared
+   with mcpserve.c */
+char *action_depended_on(md_doc_t *doc, const char *id,
                                 md_chapter_t *skip) {
     int i;
     for (i = 0; i < doc->nch; i++) {
@@ -1550,6 +1553,26 @@ static int cmd_project(int argc, char **argv) {
     if (!strcmp(area, "task")) {
         const char *tid;
         int rc;
+        if (n >= 2 && !strcmp(a[1], "create")) {
+            int dry = 0;
+            const char *prof = NULL;
+            if (n == 3 && !strcmp(a[2], "--dry-run")) dry = 1;
+            else if (n == 3) prof = a[2];
+            else if (n == 4) {
+                prof = a[2];
+                if (strcmp(a[3], "--dry-run")) {
+                    free(detected);
+                    return usage(stderr);
+                }
+                dry = 1;
+            } else if (n != 2) {
+                free(detected);
+                return usage(stderr);
+            }
+            rc = cmd_task_create(pid, prof, dry, argv[0]);
+            free(detected);
+            return rc;
+        }
         if (n < 3) {
             free(detected);
             return usage(stderr);

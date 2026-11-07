@@ -11,7 +11,7 @@ ifneq ($(VERSION),)
 CFLAGS  += -DFLOWER_VERSION=\"$(VERSION)\"
 endif
 
-SRC  = src/buf.c src/strutil.c src/md.c src/json.c src/store.c src/cli.c src/crash_report.c src/update.c src/config.c src/mcpserve.c src/scan.c src/prompts.gen.c src/flower.c
+SRC  = src/buf.c src/strutil.c src/md.c src/json.c src/store.c src/cli.c src/crash_report.c src/update.c src/config.c src/mcpserve.c src/llmrun.c src/scan.c src/taskcreate.c src/prompts.gen.c src/flower.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
 

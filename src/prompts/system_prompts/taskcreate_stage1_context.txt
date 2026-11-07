@@ -1,0 +1,31 @@
+stage 1: task context.
+
+the task description from the user, the task id and the project's own
+configuration are embedded below. read them first: they say what the
+project is and what is already known. then learn what this specific
+task touches:
+
+- if "# Current tasks/<T>/context.md" below already has chapters, this
+  is an update pass: treat those chapters as grounded, keep them, and
+  add only what is missing for this run. one or two scout calls.
+- if it is empty, this is a fresh pass: call scout once or twice with
+  task-focused questions, e.g. "where does <area from the task
+  description> live in the tree, read the main files involved, and
+  what constrains changing them". do not rescan the whole project: the
+  embedded project data already covers the general picture; scout is
+  for the files and mechanisms this task specifically touches.
+
+write what you learned into the task's context.md with the context_
+tools (allowed prefixes: Fact, Pattern, Risk, Success metric, Failure
+sign, Evaluation method, Rule). every chapter must be specific to this
+task, not a copy of the project-level context. good chapters: the
+files and functions the change touches (Fact), invariants those files
+hold (Pattern), ways this exact change could break them (Risk), how
+to tell the task succeeded (Success metric) or failed (Failure sign).
+
+if the findings sharpen the task description itself (vague user words
+-> concrete change), also update it once with task_set Description.
+keep the Name untouched.
+
+aim for three to six grounded chapters. quality over quantity: no
+chapter is better than a guessed one.

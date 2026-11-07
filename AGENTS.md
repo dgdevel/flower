@@ -27,7 +27,9 @@ dependency-free.
     - `cli.c`: the long-option parser (`--name`, `--name value`, `--name=value`, lone `--`).
     - `config.c`: the config plumbing - doc schema validation, load/save under `$FLOWER_BASE` (used by the command layer).
     - `mcpserve.c`: `flower mcp <P> <area>` - stdio json-rpc servers exposing the details/context/resource editing tools.
+    - `llmrun.c`: shared llmkit runner session plumbing (profile -> llm record, jsonl record builders, session transcripts, runner turn loop) used by scan.c and taskcreate.c.
     - `scan.c`: `flower project <P> scan <profile>` - builds the llmkit runner jsonl (llm record from the profile, tool servers, embedded config prompt) and spawns `<llmkit> runner`.
+    - `taskcreate.c`: `flower project <P> task create` - asks for a task name + description, creates the task, then runs the two-stage runner session (task context, action hierarchy).
     - `src/prompts/`: tool descriptions and system prompts as txt, bundled into the binary by `tools/gen-prompts.sh` at build time (edit the txt, rebuild - never edit `src/prompts.gen.c`).
     - `crash_report.c`/`.h`: fatal-signal handler (SIGSEGV/SIGBUS/SIGFPE/SIGABRT), optional backtrace.
     - `update.c`: `flower update` - latest-release check via the curl binary; download step is a documented stub.

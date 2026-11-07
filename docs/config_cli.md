@@ -246,6 +246,61 @@ entries instead of duplicating them:
 - `FLOWER_LLMKIT` overrides the llmkit binary path (default `llmkit`
   from PATH). The runner's jsonl output goes to stdout unchanged.
 
+## Task creation - llm session that plans a task
+
+`flower project [<P>] task create [<profile>] [--dry-run]` turns a
+short user description into a grounded task: flower asks for a task
+name and a description, creates `projects/<P>/tasks/<T>/config.md`,
+then runs one llm session (via the `llmkit runner`) in two stages that
+read the project and fill the new task themselves:
+
+- stage 1 fills `tasks/<T>/context.md`: the agent reads the embedded
+  project data, asks the readonly `scout` subagent task-focused
+  questions (where the touched code lives, what constrains the
+  change) and writes the findings through the task context tools
+  (same prefixes as project context). it may sharpen the task
+  `Description` with `task_set`.
+- stage 2 plans the action hierarchy in `tasks/<T>/actions.md`: three
+  to eight concrete actions added with `action_add` in execution
+  order, each with a `Description`, then wired with
+  `action_set Depends` (`Status` stays `pending`; the executing agent
+  flips it).
+
+The session's tools:
+
+- `project-details`, `project-context`, `project-resource`:
+  `flower mcp <P> <area>` servers - visibility only, the session
+  prompt forbids writing them.
+- `task-config`, `task-context`, `task-action`:
+  `flower mcp <P> task <T> <area>` servers over the new task's
+  config.md (`task_set`), context.md (`context_*`) and actions.md
+  (`action_add`, `action_set`, `action_remove`, `action_list`) - same
+  validation as the cli verbs.
+- `scout`: the same readonly search subagent the scan uses.
+
+Each stage's system prompt embeds the whole project configuration
+(config.md, details.md, context.md, resources.md, headers shifted one
+`#` deeper) plus the task identity and the current content of the
+files that stage writes, so the agent works from the project data
+instead of rescanning it. Stage tracking, nudges, transcripts and exit
+codes follow the scan rules above; the transcripts live under
+`projects/P1/llm-sessions/taskcreate-<timestamp>.jsonl` (plus the
+`-scout` twin), the subagent seed at
+`projects/P1/tasks/T1/scout-seed.jsonl` (0600).
+
+```
+./flower project P1 task create claude            # prompts, then runs
+./flower project P1 task create                   # sole llms.md profile
+./flower project P1 task create claude --dry-run  # print the staged jsonl
+```
+
+- profile omitted: the only profile in llms.md; with zero or several
+  profiles the command fails saying so.
+- both prompts are required; eof (Ctrl-D) aborts before anything is
+  created.
+- nonexistent project fails (unlike scan, which creates it: a task
+  needs its project).
+
 ## Escape hatch
 
 ```
