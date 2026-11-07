@@ -1,2 +1,1 @@
-begin stage 1: fill the task context. when it is complete, end your
-final message with a line that is exactly [STEP_COMPLETE].
+Begin stage 1: fill task context. When complete, final message end with line exactly [STEP_COMPLETE].

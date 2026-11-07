@@ -1,1 +1,1 @@
-list every actions.md chapter as id + title + status
+list actions.md chapters: id + title + status

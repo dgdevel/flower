@@ -1,3 +1,1 @@
-your previous message did not end with a line that is exactly
-[STEP_COMPLETE]. if this stage's work is complete, send a final message
-ending with that marker now; otherwise keep working and end with it.
+Last message no end with [STEP_COMPLETE]. If work done, send message end with marker now. Else work more, then end with marker.

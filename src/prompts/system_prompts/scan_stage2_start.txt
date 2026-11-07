@@ -1,2 +1,1 @@
-stage 1 complete. begin stage 2: fill context.md. when it is complete,
-end your final message with a line that is exactly [STEP_COMPLETE].
+Stage 1 done. Begin stage 2: fill context.md. When complete, final message end with line exactly [STEP_COMPLETE].

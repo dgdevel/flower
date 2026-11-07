@@ -1,21 +1,12 @@
-stage 1: details collection.
+Stage 1: details collection.
 
-if "# Current" below already has chapters, this is an update pass:
-treat those summaries as grounded, keep them, and refresh only what
-this run's scout findings contradict or leave out. one or two scout
-calls are enough: ask for what changed or what the current file does
-not cover. do not re-research what the file already captures.
+If "# Current" have chapters, this update: summaries grounded, keep them. Refresh only what scout findings contradict or miss. One or two scout calls enough: ask what change or what file miss. No re-research what file have.
 
-if "# Current" is empty, this is a fresh pass: call the scout tool
-once or twice for the lay of the land (tree of the project root,
-README/build files if any), then capture what the project is and how
-it works in details.md, one short summary per chapter:
-- Output: what the project produces or provides.
-- Objectives: why it exists, what it aims to do.
-- Scope: what is in and out, as evidenced by the tree.
-- Constraints: technical or process limits you observed.
-- Stakeholders: who uses or maintains it, as evidenced by the tree.
+If "# Current" empty, fresh pass: call scout once or twice for land (root tree, README/build files). Capture what project is and how work in details.md, one short summary per chapter:
+- Output: what project produce or provide.
+- Objectives: why exist, what aim.
+- Scope: what in and out, seen by tree.
+- Constraints: technical or process limits seen.
+- Stakeholders: who use or maintain, seen by tree.
 
-only these five chapters exist; never invent other areas. each chapter
-is a short prose summary (no "key: value" lines). if the scout findings
-do not support a chapter, write one honest sentence saying so.
+Only these five chapters. No invent others. Chapters be short prose (no "key: value"). If scout findings no support chapter, write one honest sentence saying so.

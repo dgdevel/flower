@@ -1,1 +1,1 @@
-append one new actions.md chapter: the next free id is assigned
+add actions.md chapter: next free id assigned

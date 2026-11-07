@@ -1,3 +1,1 @@
-begin stage 2: add the task actions and their dependencies. when the
-hierarchy is complete, end your final message with a line that is
-exactly [STEP_COMPLETE].
+Begin stage 2: add task actions and dependencies. When hierarchy complete, final message end with line exactly [STEP_COMPLETE].

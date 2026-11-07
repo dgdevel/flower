@@ -1,1 +1,1 @@
-action key: Description, Status or Depends
+action key: Description, Status, Depends

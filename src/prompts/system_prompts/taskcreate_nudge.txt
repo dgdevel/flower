@@ -1,3 +1,1 @@
-your reply did not end with a line that is exactly [STEP_COMPLETE].
-finish the stage now with the tools you have: write what you already
-hold, then end your final message with the marker.
+Reply no end with [STEP_COMPLETE]. Finish stage now: write what you have, then end final message with marker.

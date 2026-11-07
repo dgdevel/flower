@@ -1,1 +1,1 @@
-drop one actions.md chapter
+drop actions.md chapter

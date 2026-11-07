@@ -1,25 +1,11 @@
-stage 2: the action hierarchy.
+Stage 2: action hierarchy.
 
-the task context from stage 1 is embedded below ("# Current tasks/<T>/
-context.md") - it is grounded, trust it. plan the work as actions:
+Task context from stage 1 below ("# Current tasks/<T>/context.md"): it grounded, trust it. Plan work as actions:
 
-- three to eight actions, each one concrete, verifiable step. an
-  action is something a person or agent can do and check, not an
-  area of concern: "add the --limit flag to the list handler" beats
-  "improve the cli".
-- add every action with action_add first, in execution order: give
-  each a one-to-three sentence Description that says what to do and
-  how to verify it. Status stays pending; the agent that executes the
-  task flips it.
-- then wire the dependencies with action_set Depends: later actions
-  list the action ids they need done first, as a comma-separated list
-  like "A1, A2". no cycles, no self-reference: the tools reject them.
-  independent actions share no dependency and may run in parallel.
-- when actions depend on a mechanism rather than another action
-  (a file that must exist, an account that must be set up), that is
-  an action too: add it, make others depend on it.
-- ground the plan in the embedded task context and project data. do
-  not invent work the task does not need: every action must trace to
-  a chapter, a risk, or the task description itself.
+- Three to eight actions, each concrete, verifiable step. Action something person or agent do and check, not area of concern: "add --limit flag to list handler" better than "improve cli".
+- Add each action with action_add first, in execution order: give 1-3 sentence Description what to do and how verify. Status stay pending.
+- Wire dependencies with action_set Depends: later actions list needs first, comma-separated like "A1, A2". No cycles, no self-reference. Tools reject them.
+- If action depend on mechanism (file must exist, account set up), that be action too: add it, make others depend on it.
+- Ground plan in task context and project data. No invent work task no need: every action trace to chapter, risk, or task description.
 
-when every action is added and wired, end the stage.
+Every action added and wired? End stage.

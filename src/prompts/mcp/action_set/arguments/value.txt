@@ -1,1 +1,1 @@
-the new key value. Status: pending or complete. Depends: comma separated action ids, e.g. "A1, A2"
+new key value. Status: pending, complete. Depends: comma separated action ids, e.g. "A1, A2"
