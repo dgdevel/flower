@@ -236,7 +236,7 @@ char *store_next_action_id(const md_doc_t *actions_doc) {
 }
 
 /* allowed keys for config.md chapters. NULL-terminated lists. */
-const char *const store_user_keys[] = {"Name", "Role", NULL};
+const char *const store_user_keys[] = {"Name", "Role", "Scout profile", NULL};
 const char *const store_project_keys[] = {"Name", "Path", "Description", NULL};
 const char *const store_task_keys[] = {"Name", "Description", NULL};
 const char *const store_action_keys[] = {"Description", "Status", "Depends",
@@ -387,3 +387,34 @@ void store_free_ids(char **ids, int n) {
     for (i = 0; i < n; i++) free(ids[i]);
     free(ids);
 }
+
+    /* resolve the profile for scout subagents: the flower.md "Scout
+       profile" key when set, else the only llms.md profile when exactly
+       one exists, else no override (NULL). malloc'd name, NULL when none
+       or on io/schema error (printed). */
+    char *store_scout_profile(void) {
+        md_doc_t fdoc, ldoc;
+        md_chapter_t *c;
+        const char *val;
+        int i;
+        if (load_rel("flower.md", FV_USER, &fdoc)) return NULL;
+        c = md_find(&fdoc, "User");
+        val = NULL;
+        if (c)
+            for (i = 0; i < c->nkv; i++)
+                if (!strcmp(c->keys[i], "Scout profile")) val = c->vals[i];
+        if (val && val[0]) {
+            char *name = str_dup(val);
+            md_free_doc(&fdoc);
+            return name;
+        }
+        md_free_doc(&fdoc);
+        if (load_rel("llms.md", FV_LLM, &ldoc)) return NULL;
+        if (ldoc.nch == 1) {
+            char *name = str_dup(ldoc.ch[0].title);
+            md_free_doc(&ldoc);
+            return name;
+        }
+        md_free_doc(&ldoc);
+        return NULL;
+    }

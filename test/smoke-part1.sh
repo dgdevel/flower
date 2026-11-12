@@ -22,6 +22,7 @@ cat "$FLOWER_BASE/llms.md"
 ./flower llm list
 ./flower llm claude show
 grep -q 'claude-sonnet-4-5' "$FLOWER_BASE/llms.md" && echo "ok: model in llms.md" || { echo "FAIL: model missing"; exit 1; }
+grep -q 'Scout profile: claude' "$FLOWER_BASE/flower.md" && echo "ok: scout profile defaulted" || { echo "FAIL: scout default missing"; exit 1; }
 
 hdr "setup guided llm edit"
 printf '\n\ny\nclaude\n\n\n\nclaude-opus-4-1\n\n\n' | ./flower setup
@@ -37,6 +38,16 @@ hdr "setup eof-safe"
 printf 'x\ny\n' | ./flower setup && echo "ok: rc 0"
 ./flower llm list
 ./flower llm list | grep -q '^claude$' && echo "ok: claude still listed" || { echo "FAIL: claude gone"; exit 1; }
+
+hdr "setup scout profile choice"
+./flower llm add gpt --base "https://api.openai.com/v1" --protocol openai --key k1 --model m1
+printf '\n\nn\ny\ngpt\n' | ./flower setup
+grep -q 'Scout profile: gpt' "$FLOWER_BASE/flower.md" && echo "ok: scout profile changed" || { echo "FAIL: scout profile not written"; exit 1; }
+
+hdr "setup scout profile invalid retry"
+printf '\n\nn\ny\nbogus\ngpt\n' | ./flower setup 2> "$FLOWER_BASE/scout.err"
+grep -q "no such profile 'bogus'" "$FLOWER_BASE/scout.err" && echo "ok: bad scout name rejected" || { echo "FAIL: no retry error"; exit 1; }
+grep -q 'Scout profile: gpt' "$FLOWER_BASE/flower.md" && echo "ok: scout profile still gpt" || { echo "FAIL: scout profile lost"; exit 1; }
 
 hdr "project set + show"
 ./flower project P1 set Name "flower"

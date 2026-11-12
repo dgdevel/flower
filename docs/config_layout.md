@@ -5,14 +5,21 @@
 Refer to [docs/config_markdown_format.md](docs/config_markdown_format.md) for file format specifications.
 
 #### Global Configuration
-`$FLOWER_BASE/flower.md`: Contains user identity and roles.  
+`$FLOWER_BASE/flower.md`: Contains user identity, roles and the scout profile.
 Managed via: `./flower setup`
 
 ```markdown
 # User
 Name: Daniele
 Role: Software Developer
+Scout profile: gemini-flash
 ```
+
+The `Scout profile` key names an llms.md profile used by the readonly scout
+subagents of `flower project <P> scan <profile>` and
+`flower project <P> task create [<profile>]`. When absent and llms.md has
+exactly one profile, that one is the scout default; otherwise scout runs the
+session profile (same as the main agent).
 
 #### LLM Configuration
 `$FLOWER_BASE/llms.md`: One chapter per named LLM profile.  

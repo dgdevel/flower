@@ -48,6 +48,9 @@ to edit. It asks for the profile name, then `Api base`, `Protocol`
 `Reasoning effort`. Empty answer keeps the current value, eof (Ctrl-D) ends the
 walk. Anthropic profiles want `Max tokens` set (llmkit rule). Repeatable keys
 (`Header`, `Mcp proxy`, `Terminal tool`) stay with `flower llm <name> set`.
+Setup ends with the scout profile step: with a single llms.md profile it is set
+as the scout default silently, with several the user is asked which one the
+scout subagents run (Enter skips).
 
 ## LLM profiles - $FLOWER_BASE/llms.md
 
@@ -71,6 +74,11 @@ One chapter per named profile, keys inside each. Global, not per-project.
 - `set Protocol` validates the value. `unset Api base` / `unset Protocol` fail.
 - `unset Header` removes every `Header` occurrence in the profile.
 - `remove` deletes the whole chapter, `list` prints one profile name per line.
+
+Agent profiles: the profile argument of `scan`/`task create` drives the main
+agent. The scout subagent instead uses the `Scout profile` key in flower.md
+(`# User`); when unset, it defaults to the only llms.md profile, otherwise it
+runs the session profile.
 
 ## Project config - projects/P1/config.md
 

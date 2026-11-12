@@ -320,12 +320,12 @@ import json, sys
 lines = open("scan-dry.jsonl").read().splitlines()
 def text(i): return json.loads(lines[i])["content"][0]["text"]
 s1, s2, s3 = text(4), text(7), text(10)
-assert s1.startswith("you are a project scanner"), "preamble head"
+assert s1.startswith("You project scanner"), "preamble head"
 assert "[STEP_COMPLETE]" in s1
 assert "# Current details.md" in s1, "details embedded in stage 1"
 assert "## Output" in s1 and "old output line" in s1, "shifted details body"
 assert "# Current context.md" not in s1, "no other files in stage 1"
-assert text(5).startswith("begin stage 1")
+assert text(5).startswith("Begin stage 1")
 assert "# Current context.md" in s2, "stage 2 prompt"
 assert "# Current resources.md" in s3, "stage 3 prompt"
 print("ok: staged system records")
@@ -344,6 +344,40 @@ grep -q '"retain_context":true' "$SEED"
 grep -q '"tool_description"' "$SEED"
 grep -q '"type":"system"' "$SEED"
 echo "ok: seed"
+
+hdr "scan dry-run: scout profile split"
+./flower llm add antx --base "https://api.anthropic.com" --protocol anthropic \
+    --model m2 --max-tokens 256
+printf '# User\nName: n\nRole: r\nScout profile: antx\n' > "$FLOWER_BASE/flower.md"
+./flower project P1 scan gpt --dry-run > scan-scout.jsonl 2> scan-scout.err
+grep -q "flower: seed: " scan-scout.err || { echo "FAIL: no seed path"; exit 1; }
+SCSEED="$FLOWER_BASE/projects/P1/scan/scout-seed.jsonl"
+test -f "$SCSEED" || { echo "FAIL: scout seed missing"; exit 1; }
+sed -n 2p "$SCSEED" | grep -q '"endpoint_protocol":"anthropic"' || {
+    echo "FAIL: seed llm not anthropic"; exit 1; }
+sed -n 2p "$SCSEED" | grep -q '"api_base":"https://api.anthropic.com"' || {
+    echo "FAIL: seed llm base"; exit 1; }
+sed -n 2p scan-scout.jsonl | grep -q '"api_base":"https://api.openai.com/v1"' || {
+    echo "FAIL: runner llm changed"; exit 1; }
+test "$(grep -c "" scan-scout.jsonl)" = 13 || { echo "FAIL: line count"; exit 1; }
+echo "ok: scout profile split"
+
+hdr "task create dry-run: scout profile split"
+printf 'smoke task\nsmoke description\n' | \
+    ./flower project P1 task create gpt --dry-run > task-scout.jsonl \
+    2> task-scout.err
+grep -q "flower: seed: " task-scout.err || { echo "FAIL: no seed path"; exit 1; }
+TID=$(ls "$FLOWER_BASE/projects/P1/tasks" | sort -V | tail -1)
+TCSEED="$FLOWER_BASE/projects/P1/tasks/$TID/scout-seed.jsonl"
+test -f "$TCSEED" || { echo "FAIL: task scout seed missing"; exit 1; }
+sed -n 2p "$TCSEED" | grep -q '"endpoint_protocol":"anthropic"' || {
+    echo "FAIL: task seed llm not anthropic"; exit 1; }
+sed -n 2p "$TCSEED" | grep -q '"api_base":"https://api.anthropic.com"' || {
+    echo "FAIL: task seed llm base"; exit 1; }
+sed -n 2p task-scout.jsonl | grep -q '"api_base":"https://api.openai.com/v1"' || {
+    echo "FAIL: task runner llm changed"; exit 1; }
+echo "ok: task create scout split"
+rm -f "$FLOWER_BASE/flower.md"
 
 hdr "scan error paths (expect fails)"
 ./flower project P1 scan nosuch 2>&1 | grep -q "no such profile"

@@ -267,6 +267,89 @@ out:
     return rc;
 }
 
+/* scout profile step after the llm walk: with no llm profiles there
+   is nothing to choose. one profile is the silent default. two or
+   more: ask which one the scout subagents run, empty line skips. */
+static int setup_scout_walk(void) {
+    md_doc_t ldoc, fdoc;
+    md_chapter_t *u;
+    const char *cur;
+    int changed = 0, rc = 0;
+    if (load_rel("llms.md", FV_LLM, &ldoc)) return 1;
+    if (ldoc.nch == 0) {
+        md_free_doc(&ldoc);
+        return 0;
+    }
+    if (load_rel("flower.md", FV_USER, &fdoc)) {
+        md_free_doc(&ldoc);
+        return 1;
+    }
+    u = md_find(&fdoc, "User");
+    if (!u) {
+        u = doc_add_chapter(&fdoc, "User", 1);
+        if (!u) {
+            oom();
+            rc = 1;
+            goto out;
+        }
+        changed = 1;
+    }
+    cur = md_kv_get((const char **)u->keys, (const char **)u->vals,
+                    u->nkv, "Scout profile");
+    if (ldoc.nch == 1) {
+        const char *def = ldoc.ch[0].title;
+        if (cur && cur[0] && strcmp(cur, def) != 0 && md_find(&ldoc, cur)) {
+            /* explicit pick, still valid: keep it */
+        } else if (cur && cur[0] && !md_find(&ldoc, cur)) {
+            fprintf(stderr, "flower: scout profile '%s' no longer exists\n",
+                    cur);
+            changed = 1;
+            if (md_kv_set(u, "Scout profile", def) != 0) {
+                rc = oom();
+                goto out;
+            }
+        } else if (!cur || !cur[0]) {
+            if (md_kv_set(u, "Scout profile", def) != 0) {
+                rc = oom();
+                goto out;
+            }
+            changed = 1;
+            printf("flower: scout profile defaults to '%s'\n", def);
+        }
+    } else {
+        if (cur && cur[0] && md_find(&ldoc, cur) &&
+            !ask_yes("change scout profile? [y/N]", 0))
+            goto out;
+        for (;;) {
+            char name[4096];
+            int e = 0;
+            if (!ask_line("scout profile (Enter to skip)", NULL, name,
+                          sizeof name, &e)) {
+                if (e) break; /* eof: stop quietly */
+                goto out;     /* empty line: skip */
+            }
+            if (!store_valid_llm_name(name) || !md_find(&ldoc, name)) {
+                fprintf(stderr, "flower: no such profile '%s'\n", name);
+                continue;
+            }
+            if (md_kv_set(u, "Scout profile", name) != 0) {
+                rc = oom();
+                goto out;
+            }
+            changed = 1;
+            break;
+        }
+    }
+out:
+    if (!rc && changed) {
+        if (store_mkdir_p(NULL) != 0) rc = 1;
+        else rc = save_rel(NULL, "flower.md", &fdoc);
+    }
+    md_free_doc(&ldoc);
+    md_free_doc(&fdoc);
+    return rc;
+}
+
 static int cmd_setup(void) {
     char *rel = "flower.md";
     md_doc_t doc;
@@ -281,6 +364,7 @@ static int cmd_setup(void) {
     if (store_mkdir_p(NULL) != 0) goto out;
     rc = save_rel(NULL, rel, &doc);
     if (rc == 0) rc = setup_llm_walk();
+    if (rc == 0) rc = setup_scout_walk();
 out:
     md_free_doc(&doc);
     return rc;

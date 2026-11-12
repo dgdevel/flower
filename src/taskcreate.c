@@ -290,6 +290,10 @@ int cmd_task_create(const char *pid, const char *profile, int dry_run,
     char exe[4096]; /* absolute self path for mcp server spawns */
     char *profile_owned = NULL, *tid = NULL;
     char *seed_rel = NULL, *seed_path = NULL;
+    char *scout_name = NULL; /* scout subagent profile override */
+    profile_t sp;
+    md_doc_t scout_doc;
+    int have_scout = 0;
     buf_t seed, input;
     json_t *llm = NULL, *tools = NULL, *sysrec = NULL;
     const char *llmkit;
@@ -315,6 +319,18 @@ int cmd_task_create(const char *pid, const char *profile, int dry_run,
     if (profile_load(profile, &p, &llms_doc) != 0) {
         free(profile_owned);
         return 1;
+    }
+
+    /* the scout subagent may run a different profile: resolve it
+       here; NULL means the session profile for both */
+    scout_name = store_scout_profile();
+    if (scout_name && strcmp(scout_name, profile) != 0) {
+        if (profile_load(scout_name, &sp, &scout_doc) != 0) {
+            free(scout_name);
+            free(profile_owned);
+            return 1;
+        }
+        have_scout = 1;
     }
 
     if (!ask_required("Task name", name, sizeof name)) {
@@ -374,7 +390,7 @@ int cmd_task_create(const char *pid, const char *profile, int dry_run,
     if (emit_record(&seed, json_parse("{\"type\":\"header\","
                                       "\"version\":1}")) != 0)
         goto oom;
-    llm = llm_record(&p);
+    llm = llm_record(have_scout ? &sp : &p);
     if (!llm || emit_record(&seed, llm) != 0) goto oom;
     llm = NULL;
     sysrec = json_obj();
@@ -914,6 +930,11 @@ out:
     json_free(sysrec);
     md_free_doc(&llms_doc);
     profile_free(&p);
+    if (have_scout) {
+        profile_free(&sp);
+        md_free_doc(&scout_doc);
+    }
+    free(scout_name);
     return rc;
 
 oom:

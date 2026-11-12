@@ -455,6 +455,8 @@ static void test_store_llm(void) {
     static const char *const want_protos[] = {
         "anthropic", "openai", "openai-responses",
     };
+    static const char *const want_user[] = {"Name", "Role",
+                                            "Scout profile"};
     size_t i;
     const char *const *p;
 
@@ -467,6 +469,14 @@ static void test_store_llm(void) {
               "llm_keys slot matches");
     check(store_llm_keys[sizeof want_keys / sizeof want_keys[0]] == NULL,
           "llm_keys null terminated");
+
+    /* store_user_keys table */
+    for (i = 0; i < sizeof want_user / sizeof want_user[0]; i++)
+        check(store_user_keys[i] && !strcmp(store_user_keys[i],
+                                            want_user[i]),
+              "user_keys slot matches");
+    check(store_user_keys[sizeof want_user / sizeof want_user[0]] == NULL,
+          "user_keys null terminated");
     for (p = store_llm_keys; *p; p++)
         for (i = 0; i < sizeof want_keys / sizeof want_keys[0]; i++)
             if (!strcmp(*p, want_keys[i])) break;
@@ -510,6 +520,74 @@ static void test_store_llm(void) {
               "name slash bad");
     check_int(store_valid_llm_name("claude@x"), 0, "name at bad");
     check_int(store_valid_llm_name(" claude"), 0, "name leading space bad");
+}
+
+static void test_store_scout_profile(void) {
+    char tmpl[] = "/tmp/flower-selfcheck-scp-XXXXXX";
+    char *tmp, *p;
+    char path[4200];
+    FILE *f;
+
+    printf("store_scout_profile:\n");
+    tmp = mkdtemp(tmpl);
+    if (!tmp) {
+        printf("  [SKIP] store_scout_profile (/tmp unwritable)\n");
+        return;
+    }
+    setenv("FLOWER_BASE", tmp, 1);
+
+    /* 1. no flower.md, no llms.md */
+    p = store_scout_profile();
+    check(p == NULL, "no files -> null");
+    free(p);
+
+    /* 2. explicit key wins, even with 2+ llm profiles */
+    snprintf(path, sizeof path, "%s/llms.md", tmp);
+    f = fopen(path, "w");
+    fputs("# claude\nApi base: http://x\nProtocol: anthropic\n"
+          "\n# gpt\nApi base: http://y\nProtocol: openai\n", f);
+    fclose(f);
+    p = store_scout_profile();
+    check(p == NULL, "no flower key, 2 llms -> null");
+    free(p);
+    snprintf(path, sizeof path, "%s/flower.md", tmp);
+    f = fopen(path, "w");
+    fputs("# User\nName: n\nRole: r\nScout profile: gpt\n", f);
+    fclose(f);
+    p = store_scout_profile();
+    check_str(p, "gpt", "explicit key wins");
+    free(p);
+
+    /* 3. no key, single llm profile -> default */
+    snprintf(path, sizeof path, "%s/flower.md", tmp);
+    f = fopen(path, "w");
+    fputs("# User\nName: n\nRole: r\n", f);
+    fclose(f);
+    snprintf(path, sizeof path, "%s/llms.md", tmp);
+    f = fopen(path, "w");
+    fputs("# claude\nApi base: http://x\nProtocol: anthropic\n", f);
+    fclose(f);
+    p = store_scout_profile();
+    check_str(p, "claude", "single llm profile defaults");
+    free(p);
+
+    /* 4. empty key value falls through to the llms.md rule */
+    snprintf(path, sizeof path, "%s/flower.md", tmp);
+    f = fopen(path, "w");
+    fputs("# User\nName: n\nRole: r\nScout profile: \n", f);
+    fclose(f);
+    p = store_scout_profile();
+    check_str(p, "claude", "empty key falls through");
+    free(p);
+
+    /* cleanup */
+    {
+        char cmd[4200];
+        snprintf(cmd, sizeof cmd, "rm -rf '%s'", tmp);
+        if (system(cmd) != 0)
+            printf("  [WARN] could not remove %s\n", tmp);
+    }
+    unsetenv("FLOWER_BASE");
 }
 
 static void test_json(void) {
@@ -724,6 +802,7 @@ int main(void) {
     test_md();
     test_store();
     test_store_llm();
+    test_store_scout_profile();
     test_cli();
     test_semver();
     test_json();

@@ -289,7 +289,7 @@ int store_valid_id(const char *id, char kind); /* kind 'P','T','A' */
 char *store_detect_project(void);
 
 /* allowed keys for config.md chapters. NULL-terminated lists. */
-extern const char *const store_user_keys[];     /* Name, Role */
+extern const char *const store_user_keys[];     /* Name, Role, Scout profile */
 extern const char *const store_project_keys[];  /* Name, Path, Description */
 extern const char *const store_task_keys[];     /* Name, Description */
 extern const char *const store_action_keys[];   /* Description, Status, Depends */
@@ -309,6 +309,9 @@ extern const char *const store_llm_protocols[];
 int store_valid_llm_protocol(const char *protocol);
 /* 1 if profile name is non-empty [A-Za-z][A-Za-z0-9 _-]* */
 int store_valid_llm_name(const char *name);
+/* malloc'd scout profile name from flower.md key or lone llms.md
+   profile, NULL when no override or on error */
+char *store_scout_profile(void);
 /* context chapter title in file is "<Prefix>: <Title>"; helpers: */
 /* 1 if title starts with one of allowed prefixes + ": " */
 int store_is_context_title(const char *chapter_title);
